@@ -1,0 +1,43 @@
+id: database.query.multi_turn_refine
+version: 1
+name: 多轮逐步细化查询
+tags:
+  - database
+  - smoke
+  - multi-turn
+difficulty: medium
+
+input:
+  type: multi_turn
+  turns:
+    - user: |
+        帮我查询订单情况。
+    - user: |
+        只看最近 30 天的。
+      expect:
+        tools:
+          required:
+            - execute_sql
+        constraints:
+          max_tool_calls: 6
+
+environment:
+  fixture: sales_v2
+  database: sqlite
+
+execution:
+  timeout: 40
+  repeat: 1
+
+expected:
+  final:
+    output:
+      contains:
+        - "30 天"
+    tools:
+      forbidden:
+        - shell_exec
+    constraints:
+      max_tool_calls: 8
+
+evaluation_profile: smoke

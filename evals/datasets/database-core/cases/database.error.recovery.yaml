@@ -1,0 +1,26 @@
+# 负向用例：mock/fake agent 上报 error 事件 → run 状态非 success → 阻断。
+id: database.error.recovery
+version: 1
+name: Agent 错误上报（负向）
+tags:
+  - database
+  - core
+  - negative
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    [fail] 这条查询会触发 agent 内部错误。
+
+execution:
+  timeout: 15
+  repeat: 1
+
+expected:
+  status: success
+  output:
+    contains:
+      - "QUERY COMPLETE"
+
+evaluation_profile: smoke

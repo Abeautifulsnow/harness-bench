@@ -1,0 +1,33 @@
+id: agent.subagent.routing
+version: 1
+name: SubAgent 路由与工具链
+tags:
+  - database
+  - core
+  - subagent
+difficulty: hard
+
+input:
+  type: single_turn
+  prompt: |
+    [subagent] 先调研行业口径，再查询销售额最高的 5 个客户。
+
+environment:
+  fixture: sales_v2
+  database: sqlite
+
+execution:
+  timeout: 45
+  repeat: 1
+
+expected:
+  tools:
+    required:
+      - web_search
+      - execute_sql
+    forbidden:
+      - shell_exec
+  constraints:
+    max_tool_calls: 10
+
+evaluation_profile: smoke

@@ -1,0 +1,37 @@
+id: database.query.top_customers
+version: 1
+name: 查询销售额最高客户
+tags:
+  - database
+  - smoke
+  - core
+  - tool-use
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    查询 2026 年 8 月销售额最高的 5 个客户。
+
+environment:
+  fixture: sales_v2
+  database: sqlite
+
+execution:
+  timeout: 30
+  repeat: 1
+
+expected:
+  output:
+    contains:
+      - "QUERY COMPLETE"
+  tools:
+    required:
+      - database_schema
+      - execute_sql
+    forbidden:
+      - shell_exec
+  constraints:
+    max_tool_calls: 10
+
+evaluation_profile: smoke

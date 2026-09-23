@@ -1,0 +1,8 @@
+name: database-core
+description: 数据库工具链路核心 benchmark（示例集，含负向用例于 core suite）
+owner: agent-platform
+dataset: database-core@1.0.0
+suites:
+  - smoke
+  - core
+default_profile: smoke

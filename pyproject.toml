@@ -1,0 +1,77 @@
+[project]
+name = "harness-bench"
+version = "0.1.0"
+description = "Agent Evaluation & Regression Platform (agent-eval)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "httpx>=0.27",
+    "typer>=0.12",
+    "rich>=13.7",
+    "jsonschema>=4.21",
+]
+
+[project.optional-dependencies]
+# DeepEval judge engine (Spec V2.1.1 §7: capability-probed, optional at runtime)
+judge = ["deepeval>=1.0"]
+
+[project.scripts]
+agent-eval = "agent_eval.cli.app:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+]
+
+# Native uv build backend: the generic PEP 517 bridge subprocess is broken on
+# this host ("stream did not contain valid UTF-8"), uv_build avoids it entirely.
+[build-system]
+requires = ["uv_build>=0.7,<1"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "agent_eval"
+module-root = "src"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+# docs/ 是契约文档：内嵌 Python 片段是"契约文本"，不是待格式化代码。
+# 未排除时 `ruff format` 会重排文档代码块，静默改动已评审的契约。
+extend-exclude = [
+    "docs",
+    ".trellis",
+    ".claude",
+    ".codex",
+    ".agents",
+    ".zcode",
+    ".mimosa",
+    "evals",
+    "fixtures",
+]
+# format 与 lint 共用上面的排除项（ruff 的 exclude 对两者同时生效）
+exclude = [
+    "docs",
+    ".trellis",
+    ".claude",
+    ".codex",
+    ".agents",
+    ".zcode",
+    ".mimosa",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# typer.Option()/typer.Argument() in defaults is the canonical Typer pattern
+"src/agent_eval/cli/app.py" = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

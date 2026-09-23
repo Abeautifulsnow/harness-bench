@@ -1,0 +1,4 @@
+# 回归风格混合集：包含负向用例，benchmark run core 预期为 FAIL（exit 1）。
+name: core
+tags:
+  - core

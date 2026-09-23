@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# agent-eval local run data (PRD §79 V1 storage) and CI handoff files
+.agent-eval/
+run.id
+
+# Local agent/tool runtime state (review #C05): scan ledgers, hook state,
+# session plans — never part of the repo, and they appear in subdirectories too
+.mimosa/
+.zcode/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

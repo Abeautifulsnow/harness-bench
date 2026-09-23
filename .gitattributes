@@ -1,0 +1,10 @@
+# 仓库统一 LF：本机 ruff / 文件工具会拒绝 CRLF 的源码（E902 假报编码错误），
+# 且 core.autocrlf=true 会在 checkout 时把文本文件转成 CRLF。用 eol=lf 固定，
+# 保证任何机器 checkout 后源码都是 LF（见 .trellis/spec/backend/quality-guidelines.md）。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.db binary

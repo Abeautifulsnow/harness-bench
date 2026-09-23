@@ -1,0 +1,16 @@
+name: smoke
+description: PR Gate 速度优先（PRD §39）；judge metric 带 native fallback（Spec §7.4）
+judge_concurrency: 2
+
+metrics:
+  - id: agent.task_completion
+    provider: deepeval
+    threshold: 0.70
+    blocking: false
+    fallback: native.output_checks   # deepeval 不可用时降级（点号命名空间）
+
+  - id: agent.tool_correctness
+    provider: deepeval
+    threshold: 0.80
+    blocking: false
+    fallback: native.tool_sequence

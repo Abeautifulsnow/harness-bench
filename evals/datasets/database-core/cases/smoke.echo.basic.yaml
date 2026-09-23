@@ -1,0 +1,22 @@
+id: smoke.echo.basic
+version: 1
+name: 冒烟回显
+tags:
+  - smoke
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    ping
+
+execution:
+  timeout: 15
+  repeat: 3
+
+expected:
+  output:
+    contains:
+      - "QUERY COMPLETE"
+
+evaluation_profile: smoke
