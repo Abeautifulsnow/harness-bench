@@ -1,0 +1,4 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": "docs/agent-eval-engineering-spec-v2.1.md", "reason": "工程契约基线：断言Schema/稳定性算法/exit code/registry"}
+{"file": "docs/agent-evaluation-regression-platform-engineering-prd-v2.md", "reason": "产品定义：架构/协议/数据模型/P0清单§96"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "错误处理规范(模板)"}
