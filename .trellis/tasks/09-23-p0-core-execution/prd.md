@@ -57,8 +57,30 @@ HTTP/SSE Agent 接入 → Trace 构建 → Native 评测（+ DeepEval Adapter �
 ### 实施期补充决策
 
 * 本机 uv 通用 PEP 517 桥接子进程损坏 → pyproject 固定 `uv_build` 原生后端（勿改回 hatchling）。
-* `expected.final` 挂载点：Case 模型 validator 拆分为 expected_final，`session_assertion()` 统一取用。
+* `expected.final` 挂载点：Case 模型 validator 拆分为 expected_final，`session_assertions()` 统一取用。
 * FakeAgentAdapter 与 dev/mock_server 保持同一套确定性脚本语义（[fail]/[forbidden]/[subagent]/30 天）。
+
+### Review 修复（2026-09-23 review-workflow，全部落地）
+
+| # | 缺陷 | 修复 |
+|---|---|---|
+| I01 | turn 级断言判定被丢弃，case 恒 PASS | `CaseRunResult.all_metric_results` 聚合三挂载点，`blocking_failed`/report/gate 统一消费 |
+| I02 | 单轮 Case 误用 `expected.final` 被静默丢弃 | `_split_final` 对非 multi_turn 直接抛 ValueError → 加载期 exit 3 |
+| I03 | `exit_code` 声明恒定假红 | 移出实现面，`unsupported_declarations` 启动期 fail-fast |
+| I04 | `max_cost` 声明恒定假绿 | 同上；`EvalScope` 删除无来源的 cost/exit_code 字段 |
+| I05 | 非法 endpoint exit 1 + 裸回溯 | `InvalidEndpointError(InvalidCallError)` → exit 3 |
+| C01 | Judge 阶段占用 agent 槽位（§86） | 两阶段执行：agent_sem 包住 agent phase，judge 在槽位外；区间重叠回归测试 |
+| C02 | `ruff format` 可改写契约文档 | docs 加入 exclude；`ruff format --check` 纳入质量门并清零 |
+| C03 | `_execute_iteration` 128 行 | 拆为 agent_phase/open_session/drive_session/evaluate_session/finish_iteration，全部 <80 行 |
+| C04 | `f` 单字母变量 | report.py 改名 failure，并在 Blocking Failures 增加 mount/turn 字段 |
+| C05 | 工具运行时状态混入提交面 | .gitignore 增加 `.mimosa/`、`.zcode/`（含子目录） |
+| S01 | run_store 函数内重复 import | 提升至模块头 |
+| S02 | fixture 名路径越界 | `resolve_fixture_dir` 统一边界校验（filesystem/sqlite 共用） |
+| S04 | 平台判定混在编排层 | 下沉为 `native.synthesize_platform_verdicts` |
+| 报告 | total_cost 伪造 0.0 | 改为 null + summary 显示 "N/A (P0 不计成本)" |
+
+未修（建议，不阻塞）：#S03 `script_queue` 在 `concurrency>1` 下的顺序约束——已由文档与
+测试纪律（concurrency=1）覆盖，改为按 (case, iteration) 分配属 P1 增强。
 
 ## Out of Scope
 
