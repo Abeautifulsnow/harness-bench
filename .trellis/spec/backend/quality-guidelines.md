@@ -35,6 +35,24 @@ judge 行为的用例标 `@pytest.mark.real_judge` 退出该夹具。装了 deep
    便利写法都是错的（REST API 会因此把"未物化"伪装成"没有数据"）。只读消费方用
    `Analytics(read_only=True)`。
 
+## 门禁约束（PRD §108，Spec §15）
+
+"声明了却从不求值"是 Gate 层最严重的缺陷类别：它不让任何功能报错，只在该拦住的
+时候放行。守住两条：
+
+1. **Gate YAML 的每个字段都必须有求值点**。`GateRules` 解析出的声明如果没人读，
+   就是装饰品——`suites` 曾在 YAML 里躺了整个 P4（`evaluate_gate()` 从不读它），
+   导致"只跑 smoke 的 run"套上 release 规则也能 PASS。新增字段时同时给出 rule。
+2. **套件覆盖只能读事实源，不能靠反推**。必跑套件的判定读
+   `RunMetadata.suites_covered`（套件 → 选中 case 数），不从 case tags 反推，
+   也不把 `0` 当成"跑过了"。`0` = 未覆盖 = FAIL：`security.max_failures: 0`
+   在零个安全 case 时的平凡通过，与真正的"零失败"是两件不同的事。
+3. **选择面与求值面必须成对**。`suites.coverage`（求值）之外还要有
+   `resolve_suites()` 用 `benchmark.suites ∪ gate.suites` 扩宽实际选择（选择）；
+   只做一半会分别得到"永远 FAIL"或"依然静默通过"。
+4. `suites: []` 是"不约束"，不是"任何套件都不许跑"——反向语义会让 PR/Main
+   两套 Gate 变成永远 FAIL。
+
 ## 断言有效性不变式（2026-09-23 review #I01–#I04 的教训）
 
 评测平台最严重的缺陷类别是"声明了却不算数的断言"。守住三条：

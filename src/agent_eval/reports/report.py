@@ -33,6 +33,8 @@ def build_report(aggregate: RunAggregate) -> dict[str, Any]:
             "hash": run.dataset_hash,
         },
         "profile": run.profile,
+        # PRD §108：本次覆盖的套件 → 选中 case 数（0 = 该套件没选出任何 case）
+        "suites_covered": dict(run.suites_covered),
         "status": run.status.value,
         "verdict": aggregate.verdict,
         "baseline_mode": aggregate.baseline_mode,

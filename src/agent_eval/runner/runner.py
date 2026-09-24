@@ -46,7 +46,7 @@ from agent_eval.loading.loader import (
     load_dataset,
     load_profile,
     load_suites,
-    resolve_cases,
+    resolve_suites,
 )
 from agent_eval.models.benchmark import BenchmarkDef, DatasetInfo
 from agent_eval.models.case import Case
@@ -98,6 +98,8 @@ class RunConfig:
     baseline_policy: str | None = None
     baseline_run_id: str | None = None
     gate: str = DEFAULT_GATE
+    # PRD §108: suites a gate run must execute; None = use the benchmark's own list.
+    suites: list[str] = field(default_factory=list)
     no_judge: bool = False
     timeout: float | None = None
     save_trace: bool = True
@@ -192,7 +194,16 @@ class Runner:
         benchmark = load_benchmark(cfg.evals_root, cfg.benchmark)
         info, cases = load_dataset(cfg.evals_root, benchmark.dataset)
         suites = load_suites(cfg.evals_root)
-        selected = resolve_cases(benchmark, suites, cases, cfg.tag_filter)
+        rules = load_gate_rules(cfg.evals_root, cfg.gate)
+        # PRD §108: --suite replaces the selection; otherwise the benchmark's own suites
+        # are widened by the gate's required ones (a release run must actually execute
+        # golden/regression/security/core, not merely be judged as if it had).
+        suite_filter = list(cfg.suites)
+        if not suite_filter:
+            suite_filter = list(dict.fromkeys([*benchmark.suites, *rules.suites]))
+        selected, suites_covered = resolve_suites(
+            benchmark, suites, cases, suite_filter, cfg.tag_filter
+        )
 
         unsupported = scan_unsupported_assertions(selected)
         if unsupported:
@@ -209,14 +220,13 @@ class Runner:
             name: load_profile(cfg.evals_root, name) for name in sorted(set(case_profile.values()))
         }
         ctx = self._resolve_profiles(profiles, case_profile, selected)
-        rules = load_gate_rules(cfg.evals_root, cfg.gate)
         baseline = self._resolve_baseline(benchmark, info, rules)
 
         health = await self.adapter.health_check()
         if not health.ok:
             raise InfraError(f"agent endpoint unhealthy: {health.detail}")
 
-        meta = self._build_meta(benchmark, info, baseline)
+        meta = self._build_meta(benchmark, info, baseline, suites_covered)
         run_dir = self.store.create_run(meta)
         meta.metric_capability_snapshot = ctx.capabilities
         meta.metric_degradations = ctx.degradations
@@ -777,7 +787,11 @@ class Runner:
     # ---------------------------------------------------------------- helpers
 
     def _build_meta(
-        self, benchmark: BenchmarkDef, info: DatasetInfo, baseline: Baseline | None
+        self,
+        benchmark: BenchmarkDef,
+        info: DatasetInfo,
+        baseline: Baseline | None,
+        suites_covered: dict[str, int] | None = None,
     ) -> RunMetadata:
         commit, branch, dirty = _git_info()
         return RunMetadata(
@@ -787,6 +801,7 @@ class Runner:
             dataset_version=info.version,
             dataset_hash=info.hash,
             profile=self.cfg.profile or "mixed",
+            suites_covered=suites_covered or {},
             agent_endpoint=self.cfg.agent_endpoint,
             git_commit=commit,
             git_branch=branch,

@@ -46,7 +46,10 @@ class GateRules:
     latency: dict[str, Any] = field(default_factory=dict)
     security: dict[str, Any] = field(default_factory=dict)
     golden: dict[str, Any] = field(default_factory=dict)
-    suites: list[str] = field(default_factory=list)  # Release Gate: required suites
+    # PRD §108: suites this gate requires the run to have executed.
+    # Empty list = no constraint (PR/Main only run what the benchmark declares);
+    # it must never be read as "no suite is allowed to run".
+    suites: list[str] = field(default_factory=list)
     hard_failure_categories: list[str] = field(default_factory=list)
     strict: bool = False
 
@@ -188,6 +191,36 @@ def _baseline_rules(
     return results
 
 
+def _suite_rules(aggregate: RunAggregate, rules: GateRules) -> list[GateRuleResult]:
+    """PRD §108：Gate 声明的必跑套件必须真的被执行过。
+
+    判定事实源是 ``RunMetadata.suites_covered``（套件 → 最终选中的 case 数），
+    不是从 case tags 反推：一个套件可以因为 tag 过滤、或因为套件定义选不出 case
+    而"跑了个空"，这两种都必须算未覆盖，否则正是"没 case 就没失败"的平凡通过。
+    """
+    if not rules.suites:
+        return []
+    covered = aggregate.run.suites_covered
+    missing = [name for name in rules.suites if name not in covered]
+    empty = [name for name in rules.suites if covered.get(name) == 0]
+    problems = [f"{name}(未执行)" for name in missing] + [f"{name}(0 个 case)" for name in empty]
+    satisfied = len(rules.suites) - len(problems)
+    return [
+        _rule(
+            "suites.coverage",
+            "fail" if problems else "pass",
+            observed=float(satisfied),
+            threshold=float(len(rules.suites)),
+            affected=[*missing, *empty],
+            detail=(
+                "PRD §108 必跑套件未覆盖：" + ", ".join(problems)
+                if problems
+                else "PRD §108 必跑套件均已执行：" + ", ".join(rules.suites)
+            ),
+        )
+    ]
+
+
 def _absolute_rules(aggregate: RunAggregate, rules: GateRules) -> list[GateRuleResult]:
     """不依赖 baseline 的绝对阈值（Spec §4.3 第 3 条，任何模式都生效）。"""
     results: list[GateRuleResult] = []
@@ -244,7 +277,8 @@ def evaluate_gate(
     comparison: RegressionComparison | None = None,
 ) -> GateReport:
     """Spec §6.2 gate.json：逐 rule 结果 + §6.3 可反向核对的聚合计数。"""
-    rule_results = _absolute_rules(aggregate, rules)
+    rule_results = _suite_rules(aggregate, rules)
+    rule_results.extend(_absolute_rules(aggregate, rules))
     rule_results.extend(_baseline_rules(aggregate, rules, comparison))
 
     if not rules.strict:

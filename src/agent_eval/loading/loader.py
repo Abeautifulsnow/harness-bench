@@ -116,35 +116,64 @@ def load_profile(root: Path, name: str) -> MetricProfile:
         raise InvalidCallError(f"invalid profile '{name}': {exc}") from exc
 
 
+def resolve_suites(
+    benchmark: BenchmarkDef,
+    suites: dict[str, SuiteDef],
+    cases: list[Case],
+    suite_filter: list[str] | None = None,
+    tag_filter: list[str] | None = None,
+) -> tuple[list[Case], dict[str, int]]:
+    """Union of suite selections (tags first, then explicit ids), deduped, order-stable.
+
+    Returns ``(cases, {suite_name: selected_case_count})``. The counts are the fact
+    source for the Release Gate's required-suite rule (PRD §108): a suite whose cases
+    were all filtered out counts 0 — that is "not covered", not "passed vacuously".
+
+    ``suite_filter`` overrides the benchmark's default suite list, so a release run can
+    name the four suites it must execute even when the benchmark declares fewer.
+    """
+    names = list(dict.fromkeys(suite_filter or benchmark.suites))
+    for name in names:
+        if name not in suites:
+            defined = ", ".join(sorted(suites)) or "none"
+            raise InvalidCallError(
+                f"unknown suite '{name}' referenced by benchmark "
+                f"'{benchmark.name}' (defined suites: {defined})"
+            )
+
+    by_id = {c.id: c for c in cases}
+    selected: dict[str, Case] = {}
+    counts: dict[str, int] = {}
+    for suite_name in names:
+        suite = suites[suite_name]
+        picked: dict[str, Case] = {}
+        for tag in suite.tags:
+            for case in cases:
+                if tag in case.tags:
+                    picked[case.id] = case
+        for case_id in suite.case_ids:
+            if case_id not in by_id:
+                raise InvalidCallError(f"suite '{suite_name}' references unknown case '{case_id}'")
+            picked[case_id] = by_id[case_id]
+        if tag_filter:
+            picked = {cid: c for cid, c in picked.items() if any(t in c.tags for t in tag_filter)}
+        counts[suite_name] = len(picked)
+        selected.update(picked)
+
+    if not selected:
+        raise InvalidCallError(
+            f"benchmark '{benchmark.name}' selects no cases"
+            + (f" for tags {tag_filter}" if tag_filter else "")
+            + (f" from suites {names}" if suite_filter else "")
+        )
+    return list(selected.values()), counts
+
+
 def resolve_cases(
     benchmark: BenchmarkDef,
     suites: dict[str, SuiteDef],
     cases: list[Case],
     tag_filter: list[str] | None = None,
 ) -> list[Case]:
-    """Union of suite selections (tags first, then explicit ids), deduped, order-stable."""
-    by_id = {c.id: c for c in cases}
-    selected: dict[str, Case] = {}
-    for suite_name in benchmark.suites:
-        suite = suites.get(suite_name)
-        if suite is None:
-            raise InvalidCallError(
-                f"benchmark '{benchmark.name}' references unknown suite '{suite_name}'"
-            )
-        for tag in suite.tags:
-            for case in cases:
-                if tag in case.tags:
-                    selected[case.id] = case
-        for case_id in suite.case_ids:
-            if case_id not in by_id:
-                raise InvalidCallError(f"suite '{suite_name}' references unknown case '{case_id}'")
-            selected[case_id] = by_id[case_id]
-
-    if tag_filter:
-        selected = {cid: c for cid, c in selected.items() if any(t in c.tags for t in tag_filter)}
-    if not selected:
-        raise InvalidCallError(
-            f"benchmark '{benchmark.name}' selects no cases"
-            + (f" for tags {tag_filter}" if tag_filter else "")
-        )
-    return list(selected.values())
+    """Case selection only (kept for callers that need no per-suite counts)."""
+    return resolve_suites(benchmark, suites, cases, None, tag_filter)[0]

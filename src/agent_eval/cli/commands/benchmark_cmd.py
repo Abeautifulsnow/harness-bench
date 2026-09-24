@@ -39,6 +39,9 @@ def benchmark_run(
     baseline_policy: str | None = typer.Option(None, "--baseline-policy"),
     baseline_run: str | None = typer.Option(None, "--baseline-run"),
     gate: str = typer.Option("pr", "--gate", help="pr | main | release"),
+    suite: list[str] = typer.Option(
+        [], "--suite", help="显式套件（覆盖 benchmark 声明；release 门禁按 PRD §108 校验覆盖）"
+    ),
     run_id_file: Path | None = typer.Option(None, "--run-id-file"),
     no_judge: bool = typer.Option(False, "--no-judge"),
     tag: list[str] = typer.Option([], "--tag"),
@@ -65,6 +68,7 @@ def benchmark_run(
         baseline_policy=baseline_policy,
         baseline_run_id=baseline_run,
         gate=gate,
+        suites=list(suite),
         no_judge=no_judge,
         timeout=timeout,
         agent_model=model,

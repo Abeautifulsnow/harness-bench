@@ -35,6 +35,10 @@ class RunMetadata(BaseModel):
     profile: str
     suite: str | None = None
     tag_filter: list[str] = Field(default_factory=list)
+    # PRD §108：本次 run 实际覆盖的套件 → 最终选中的 case 数。
+    # 是"必跑套件"校验的唯一事实源：被 tag 过滤掉、或套件本身选不出 case 的
+    # 套件在这里是 0，而不是"跑过了"。缺省空字典 = 旧 run，按未覆盖处理。
+    suites_covered: dict[str, int] = Field(default_factory=dict)
     # PRD §22–§25: an experiment run belongs to exactly one variant (Spec §1.2)
     experiment_id: str | None = None
     variant_id: str | None = None

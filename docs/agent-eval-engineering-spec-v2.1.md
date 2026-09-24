@@ -1091,3 +1091,78 @@ PRD §9.2 约束 Review / Cost / Trends 为一级入口。UI 侧栏分组为：
 | 派生层 | DuckDB 只做投影，`rebuild()` 永远安全 | §1.3 派生层可重建 |
 | 失败聚类 | 签名用 SHA-256 | 短摘要用于聚类键，避免弱哈希告警 |
 | 契约类型 | REST 响应复用平台模型本身作为 response_model | 让 OpenAPI 与契约模型不会各自漂移 |
+
+---
+
+# 15. 必跑套件校验（V2.3，P0 缺口回填）
+
+PRD §67/§108 要求 Release Gate **必须执行** Golden / Regression / Security /
+Core Business 四类套件，任一 Hard Gate 失败即 FAIL。V2.2 的实现只把
+`suites` 当作 YAML 里的声明读进 `GateRules`，求值器从未消费它——于是"只跑了
+smoke 的 run"套上 release 规则集照样能 PASS。本节把这条约束固定为可判定的规则。
+
+## 15.1 `suites` 的语义
+
+```text
+suites: [a, b, c]   Gate 要求本次 run 覆盖 a / b / c
+suites: []          不约束（PR / Main Gate 的现状）
+```
+
+空列表是"没有必跑列表"，**不是**"任何套件都不许跑"。反向语义会让 PR/Main 的
+`suites: []` 变成"永远 FAIL"，与两套 Gate 的设计意图相反。
+
+## 15.2 事实源：`RunMetadata.suites_covered`
+
+判定不得从 case tags 反推——那是脆的，且无法区分"套件跑了个空"与"套件没跑"。
+run 在创建时就把 **套件 → 该套件最终选中的 case 数** 写进 `RunMetadata.suites_covered`：
+
+```json
+{ "smoke": 3, "core": 4, "golden": 0, "regression": 0, "security": 0 }
+```
+
+计数口径（`resolve_suites()` 的唯一实现点）：
+1. 按套件定义（`tags` → `case_ids`）选出 case；
+2. 应用 `--tag` 过滤——被过滤掉的 case **不计入**该套件；
+3. `0` 表示该套件未产出任何 case，即**未覆盖**。
+
+第 3 条是关键：`security.max_failures: 0` 在"0 个安全 case"时平凡通过，
+`suites.coverage` 必须把同样的局面判为 FAIL，否则 Hard Gate 依然是空的。
+
+## 15.3 rule 与选择面
+
+```text
+rule:      suites.coverage
+observed:  已覆盖的套件数
+threshold: rules.suites 的长度
+verdict:   fail ⇔ 存在"未执行"或"0 个 case"的套件
+affected:  缺失套件名（未执行 + empty，按 rules.suites 顺序）
+blocking:  true
+```
+
+同一条声明有两个消费点，缺一不可：
+
+- **求值侧**：`evaluate_gate()` 新增 `suites.coverage`（§15.2 的口径）。
+- **选择侧**：门禁要求的套件会扩宽实际选择面。未显式指定 `--suite` 时，
+  `resolve_suites()` 用 `benchmark.suites ∪ gate.suites`；显式 `--suite` 则
+  完全替代（用于定点复现某一套件）。
+
+只做求值侧会得到"永远 FAIL"的 release（套件永远没跑）；只做选择侧则
+会在套件选不出 case 时静默通过。两者必须同时在场。
+
+## 15.4 反例（测试要求）
+
+```text
+只跑 smoke 的 run + release 规则  → suites.coverage = FAIL，affected = [golden, regression, security]
+四类套件都跑                      → suites.coverage = PASS
+删除 release.yaml 的 suites       → 该 rule 消失（不是变成 PASS）
+--tag 过滤掉某套件的全部 case     → 该套件计数 0 → FAIL
+```
+
+## 15.5 套件定义补齐
+
+`evals/suites/` 补齐 `golden.yaml` / `regression.yaml` / `security.yaml`，
+使 release 规则集里声明的四个名字都有对应的定义文件。三个套件是否选得出 case
+取决于 case 的 tag 现状（`golden` / `regression` / `security` 标签由用例集任务提供）；
+在 case 就位前，它们以 `0` 出现在 `suites_covered` 里并被判为未覆盖——
+这正是 §15.2 第 3 条要暴露的局面。
+

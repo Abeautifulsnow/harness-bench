@@ -5,6 +5,7 @@ from agent_eval.loading.loader import (
     load_profile,
     load_suites,
     resolve_cases,
+    resolve_suites,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "load_profile",
     "load_suites",
     "resolve_cases",
+    "resolve_suites",
 ]

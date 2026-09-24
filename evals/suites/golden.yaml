@@ -1,0 +1,6 @@
+# Golden 套件（PRD §67/§108）：Release Gate 必跑。
+# 稳定、确定性、必须 100% 通过的核心用例（gate rule: golden.required_pass_rate: 1.0）。
+# 只收"应始终 PASS"的正向 case；负向/易波动 case 不得入 golden。
+name: golden
+tags:
+  - golden

@@ -3,7 +3,7 @@
   "name": "release-gate-suites",
   "title": "Release Gate 必跑套件强制校验 + 补齐 golden/regression/security 套件定义",
   "description": "gate YAML 的 suites 字段未被校验；evals/suites 缺 golden/regression/security 三个文件，PRD §108 无法真正验证",
-  "status": "planning",
+  "status": "completed",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -11,7 +11,7 @@
   "creator": "runstone",
   "assignee": "runstone",
   "createdAt": "2026-09-24",
-  "completedAt": null,
+  "completedAt": "2026-09-24",
   "branch": null,
   "base_branch": "main",
   "worktree_path": null,
@@ -21,6 +21,6 @@
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
+  "notes": "落地口径（写入 Spec §15）：suites 的判定事实源是 RunMetadata.suites_covered（套件→选中 case 数），0 = 未覆盖 = FAIL；suites: [] = 不约束。声明有两个消费点：求值侧 suites.coverage rule + 选择侧 resolve_suites() 用 benchmark.suites ∪ gate.suites 扩宽选择面，只做一半会分别得到\"永远 FAIL\"与\"静默通过\"。--suite 显式覆盖选择面。golden/regression/security 三个套件文件已补齐，但 case 标签由 security-cases / mvp-case-expansion 提供，当前计数为 0，release run 正确判 FAIL（实测 run_de9a33b4f2e7：affected=[golden, regression, security]）。",
   "meta": {}
 }

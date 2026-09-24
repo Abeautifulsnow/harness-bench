@@ -1,0 +1,5 @@
+# Regression 套件（PRD §67/§108）：Release Gate 必跑。
+# 与 baseline 对比的回归集——包含负向用例，用于验证"该红的能红"。
+name: regression
+tags:
+  - regression
