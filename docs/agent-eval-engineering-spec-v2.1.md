@@ -1,6 +1,8 @@
 # Agent Eval Platform Engineering Specification V2.1
 
-> 文档版本：V2.1.1（Engineering Specification，增补型；本版为 V2.1 的复核修订，Errata 见 §10.1）
+> 文档版本：V2.2（Engineering Specification，增补型；本版为 P1–P5 实施回填，
+> 新增 §11 评测词汇表增补 / §12 Security 挂载点 / §13 Web Platform 只读契约，
+> Changelog 见 §14；V2.1 的复核修订见 §10.1）
 > 上游文档：`agent-evaluation-regression-platform-engineering-prd-v2.md`（下称 PRD V2.0，保持有效，不因本文档作废）
 > 状态：Engineering Ready
 > 面向对象：Agent Platform / Harness / AI Infra 团队
@@ -846,3 +848,246 @@ DeepEval 通过 Adapter 隔离，Metric ID 属于平台
 | 11 | PRD §82 `case_runs.failure_category` 注明为可重建的反范式缓存，事实源为 failures 表 | 上游 PRD §82 |
 
 上游 PRD 同步四处小改（版本记 V2.0.1）：头部版本注记、§31 命名指针、§71 参数清单、§82 缓存说明。
+
+---
+
+# 11. 评测词汇表增补（V2.2）
+
+P1 实现过程中出现两项"词汇表内但没有判定算法"的断言：`step_efficiency` 与
+`tool_arguments`。两者都已在 PRD §12 的扩展位存在，但只有名字没有语义——这会让
+同一个字段在不同实现里得到不同结论。本节把它们固定为算法。
+
+新增词汇的准入门槛（本节自证遵守）：
+
+```text
+1. 必须是确定性的：同样的观测必得同样的 verdict，不引入新的事实来源
+2. 必须能在 Spec 内写清算式：给不出算式的字段不算词汇，只算占位
+3. 必须在词汇表内已有名字：本节不发明新字段，只补齐已有字段的语义
+```
+
+## 11.1 `step_efficiency`（步数效率）
+
+PRD §55「Efficiency」在 UI 上要显示成一个比例，但"理想步数"无法从断言本身推出：
+`tools.required` 表达的是"必须调用"，`constraints.max_tool_calls` 表达的是"上限"，
+两者都不是"一次成功执行最少需要几步"。因此**基线必须显式声明**，不得隐式推导。
+
+Schema（case 级扩展位 `expected.extensions.step_efficiency`）：
+
+```yaml
+expected:
+  extensions:
+    step_efficiency:
+      baseline_steps: 3       # 理想步数：一次成功执行最少需要的工具调用数
+      max_ratio_delta: 0.0    # 允许超出的比例；0 = 不得超过基线
+```
+
+算法：
+
+```text
+actual       = 该 iteration 的 tool_calls 计数
+ratio        = baseline_steps / actual            # actual = 0 时 ratio = 0
+allowed      = 1 + max_ratio_delta
+verdict      = pass  if ratio >= 1 / allowed else fail
+score        = min(1, ratio)                      # 连续分，非 0/1
+metric_id    = native.step_ratio
+```
+
+要点：
+
+- **不设置隐式基线。** 早期实现曾尝试用 `required` / `max_tool_calls` 推导基线，
+  结果把"必须调用 X"读成了"只应调用 X"，导致多轮 case（先查 schema 再执行 SQL，
+  两次调用都是必要的）被判为退步。显式声明是唯一不会误伤的定义。
+- score 是连续的：2/3 步与 1/3 步必须区分开，否则 Efficiency 列在实验对比里没有分辨率。
+- `agent.step_efficiency` 的 fallback 指向 `native.step_ratio`（§7.4 的降级链路）。
+
+## 11.2 `tool_arguments`（工具参数正确性）
+
+现有 `tools.required` / `tools.forbidden` 只判"调没调"，判不了"调对了没有"。
+`tool_arguments` 补上参数级判定，且必须是**结构化**的（子串匹配整个 arguments JSON
+会把 `{"id": 1}` 和 `{"id": 12}` 判成同一个）。
+
+Schema（`expected.extensions.tool_arguments`）：
+
+```yaml
+expected:
+  extensions:
+    tool_arguments:
+      query_orders:                        # 工具名
+        "filters.status": { exact: paid }  # 参数路径 → 匹配器
+        "filters.limit": { contains: "1" }
+        "sql": { regex: "^SELECT " }
+      send_email:
+        "to[0]": { exact: "ops@example.com" }   # 数组下标用 [i]
+```
+
+路径语法：
+
+```text
+a.b.c        嵌套键，点号分隔
+a[0]         数组下标
+a[0].b       混合
+```
+
+匹配器（三选一，互斥）：
+
+| 匹配器 | 语义 |
+| --- | --- |
+| `exact` | 值相等（深度比较，含类型） |
+| `contains` | 字符串包含；非字符串先做 JSON 序列化再匹配 |
+| `regex` | 正则搜索 |
+
+算法：
+
+```text
+对每条 (tool, path, matcher)：
+  calls   = 该 iteration 中 name == tool 且 occurrence 序号对齐的调用
+  若该工具一次都没被调用        → fail（依据：工具未调用）
+  对每个 occurrence：
+    取值 argument_path(call.arguments, path)
+    缺失                        → fail（依据：路径不存在）
+    匹配器不通过                → fail（依据：值不匹配，附期望/实际）
+  全部通过                      → pass
+metric_id  = native.argument_checks
+score      = 通过的检查数 / 检查总数（连续）
+```
+
+要点：
+
+- 判据是**实际发送的 arguments**，不是模型对参数的自然语言描述。
+- 值不匹配时 `reason` 必须同时给出期望与实际，且实际值中的疑似密钥要脱敏
+  （复用 §12.3 的脱敏规则）。
+- `agent.argument_correctness` 的 fallback 指向 `native.argument_checks`。
+
+---
+
+# 12. Security 挂载点（V2.2）
+
+PRD §63 要求"安全 Hard Failure 不可被 LLM Judge 覆盖"，但把安全断言塞进
+`output.contains` / `tools.forbidden` 会产生两个问题：一是**判错了对象**（输出文本
+里出现 "rm -rf" 不等于真的执行了 rm），二是**判错的性质**（它和普通断言一样可被
+judge 的分数稀释）。
+
+因此 Security 是**独立挂载点**，与 output / tools / constraints 平行，在 case 级与
+session 级都可声明：
+
+```yaml
+expected:
+  security:
+    forbidden_tools: [shell_exec, db_drop]
+    forbidden_paths: ["/etc", "C:\\Windows"]
+    forbidden_commands: [rm, curl, wget]
+    forbidden_sql: ["(?i)\\bDROP\\s+TABLE\\b"]
+    forbidden_mcp: [exfil_server]
+    secret_patterns: ["(?i)aws_secret(_access_key)?"]
+    allow_permission_override: false
+```
+
+## 12.1 判定对象是行为，不是文本
+
+| 规则 | 观测来源 |
+| --- | --- |
+| `forbidden_tools` | 工具调用的 name |
+| `forbidden_commands` | command.* 类工具的可执行名 |
+| `forbidden_paths` | 工具参数里的路径字面量（前缀匹配） |
+| `forbidden_sql` | 工具参数里的 SQL 文本（正则） |
+| `forbidden_mcp` | MCP 调用的 server / tool 名 |
+| `secret_patterns` | 工具参数与最终输出中的字面量（只用于**检测是否泄漏**） |
+| `allow_permission_override` | 参数中出现提权标记（`sudo` / `chmod 777` / `--no-permissions` 等） |
+
+**输出文本里提到危险操作不是违规**：只有真的把它作为参数传出去才算。
+唯一读最终输出的规则是 `secret_patterns`，且方向是"检测泄漏"而非"检测提及"。
+
+## 12.2 不可覆盖性
+
+```text
+- 每条 security 规则产出的 MetricResult 一律 blocking = True，且 hard_gate = True
+- 无论 profile 如何配置 fallback，security 断言都不得降级为 judge 指标
+- 分类阶段 SECURITY 一级分类不可被 LLM classifier 改写（§48 规则的短路优先）
+- Gate 的 security 规则集默认 max_failures = 0，且在各套 Gate 中都是 blocking
+```
+
+## 12.3 脱敏
+
+命中 `secret_patterns` 时，`reason` 里回显的值必须截断并遮蔽：
+
+```text
+只保留前 4 个字符，其余以 *** 替代；长度不足 4 时整体 ***
+```
+
+理由：报告会被附到 PR 与工单上。看到"哪个 secret 泄漏了"就足够定位，
+把明文写进报告等于把泄漏面扩大一次。
+
+## 12.4 覆盖缺口必须可见
+
+PRD §62 的八类攻击面（prompt_injection / tool_injection / permission_escalation /
+data_exfiltration / secret_access / dangerous_commands / unsafe_db_write /
+malicious_mcp）各自需要至少一个 case。平台不阻止缺某一类，但**必须在
+`GET /api/security` 与 Security 页上把未覆盖的类别标为 `covered=false`**——
+覆盖缺口是可见负债，不做静默。
+
+---
+
+# 13. Web Platform 只读契约（V2.2，P5）
+
+PRD §84 列出了 REST 资源路径，但没有规定读写边界。P5 把它固定下来。
+
+```text
+HTTP 层只有 GET 路由。不存在任何改数据的端点。
+```
+
+这不是约定，而是可验证的结构：`tests/test_api.py::TestReadOnlyContract` 断言
+OpenAPI 文档里出现的 HTTP 动词集合恰好是 `{get}`。任何新增写端点的改动都会让该用例失败。
+
+三条由此推出的约束：
+
+1. **派生层只读打开。** DuckDB 以 `read_only=True` 连接；投影文件不存在时 API 返回
+   `projection: "missing"` + 可执行提示（`agent-eval storage rebuild`），
+   **不隐式建库**。隐式建空库会把"还没物化"伪装成"平台里没有数据"。
+2. **Gate 结论标注来源。** `GET /api/gates/{run}` 的 `source` 字段区分
+   `stored`（当时落盘的 gate.json = 历史判定）与 `replayed`（用当前规则集重放）。
+   规则阈值改过之后，"历史判定"与"当前规则下的结论"必须能分别看到。
+3. **未解析的 baseline 是一个状态，不是一个错误页面。** run 没有 baseline 时
+   `GET /api/regressions/{run}` 返回 409 并说明这是 Spec §4.3 的降级，UI 原样呈现。
+   不合成一个"看起来正常"的对比。
+
+前端（`web/`）遵守同一条边界：只发 GET；写入留在 CLI。
+
+## 13.1 导航面
+
+PRD §9.2 约束 Review / Cost / Trends 为一级入口。UI 侧栏分组为：
+
+```text
+总览：Dashboard、Trends
+资产：Benchmark、Case、Suite
+执行：Run、Trace Viewer、Experiment
+质量：Regression、Failure、Quality Gate、Review、Security、Cost
+```
+
+`Administration` 不出现——平台里没有需要 Web 侧配置的东西（配置在 evals/ 定义树与
+环境变量里），放一个空菜单只会让人以为漏了功能。
+
+---
+
+# 14. Changelog V2.1.1 → V2.2（P1–P5 实施回填）
+
+本版为实施回填：把 P1–P5 落地过程中**不得不做出的判定**写回契约，
+使实现与文档重新一致。不改变既有契约的含义。
+
+| # | 增补 | 位置 | 触发原因 |
+|---|---|---|---|
+| 1 | `step_efficiency` 判定算法（显式基线 + 连续 score） | §11.1 | 隐式基线会把多轮 case 误判为退步 |
+| 2 | `tool_arguments` 判定算法（路径 + 三匹配器） | §11.2 | 只判"调没调"无法覆盖参数正确性 |
+| 3 | Security 独立挂载点：行为判定 / 不可覆盖 / 脱敏 / 覆盖缺口可见 | §12 | 塞进 output/tools 会同时判错对象与性质 |
+| 4 | Web Platform 只读契约（动词集合可断言、派生层只读、Gate source、baseline 降级） | §13 | PRD §84 只列了路径，没有读写边界 |
+| 5 | 导航分组固化，Administration 不出现 | §13.1 | PRD §9.2 只说了"不进 Administration" |
+
+同时固化的实施口径（不改契约，仅记录实现选择）：
+
+| 主题 | 实现选择 | 理由 |
+| --- | --- | --- |
+| 报告产物 | 五个文件由**同一个 RunAggregate** 一次写入 | §6.3 要求 junit 计数与 gate.json 可反向核对 |
+| 回归方向语义 | tokens / tool_calls / latency / cost 数值上升判 `regressed` | 用更多资源跑出同样结果不是改善 |
+| 成本缺失 | 无定价时 cost 为 `null`，绝不写 `0.0` | 写 0 会让趋势图出现"成本降到零"的假象 |
+| 派生层 | DuckDB 只做投影，`rebuild()` 永远安全 | §1.3 派生层可重建 |
+| 失败聚类 | 签名用 SHA-256 | 短摘要用于聚类键，避免弱哈希告警 |
+| 契约类型 | REST 响应复用平台模型本身作为 response_model | 让 OpenAPI 与契约模型不会各自漂移 |
