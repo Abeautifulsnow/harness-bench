@@ -1,10 +1,12 @@
 # 负向用例：mock/fake agent 上报 error 事件 → run 状态非 success → 阻断。
+# regression suite 需要"该红的能红"的成员，故一并打上 regression 标签。
 id: database.error.recovery
 version: 1
 name: Agent 错误上报（负向）
 tags:
   - database
   - core
+  - regression
   - negative
 difficulty: medium
 

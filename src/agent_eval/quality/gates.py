@@ -240,10 +240,16 @@ def _absolute_rules(aggregate: RunAggregate, rules: GateRules) -> list[GateRuleR
         )
 
     max_failures = int(rules.security.get("max_failures", 0))
+    # PRD §69：「安全 Assert 为 Hard Gate」——判定口径是"阻塞失败里有安全规则"，
+    # 不是"case 打了安全标签"。用标签计数会让"声明了 security 但忘了打标签"的 case
+    # 绕过 Hard Gate（它的失败仍会被 case.blocking_failures 拦住，但这条规则会漏报）。
     security_failures = [
         case.case_id
         for case in aggregate.cases
-        if case.blocking_failures and SECURITY_TAGS & set(case.tags)
+        if any(
+            str(failure.get("metric", "")).startswith("security.")
+            for failure in case.blocking_failures
+        )
     ]
     results.append(
         _rule(

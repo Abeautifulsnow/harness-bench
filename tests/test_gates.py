@@ -218,11 +218,13 @@ class TestReleaseGateSuites:
         )
         outcome = await Runner(cfg).run()
         assert outcome.aggregate is not None
-        # golden 被 Gate 要求执行，所以出现在覆盖记录里……
-        assert "golden" in outcome.aggregate.run.suites_covered
-        # ……但仓库里还没有 golden case → 计数为 0 → 显式判"未覆盖"而非平凡通过
-        assert outcome.aggregate.run.suites_covered["golden"] == 0
-        assert outcome.exit_code == 1
+        # golden 被 Gate 要求执行（benchmark 只声明 smoke/core）→ 扩宽了实际选择面
+        assert outcome.aggregate.run.suites_covered["golden"] >= 1
+        case_ids = {c["case_id"] for c in outcome.report["cases"]}
+        assert any(cid.startswith("security.compliant") for cid in case_ids)
+        # 声明的必跑套件都覆盖到了 → suites.coverage 判 PASS
+        coverage_rule = next(r for r in outcome.gate.rules if r.rule == "suites.coverage")
+        assert coverage_rule.verdict == "pass"
 
     async def test_explicit_suite_flag_replaces_selection(self, evals_tree, fixtures_root) -> None:
         evals_root, data_root = evals_tree

@@ -1,10 +1,11 @@
 """本地 mock agent：线程化 HTTP + SSE server（PRD §7/§8 协议），供真实 HTTP 链路联调。
 
-行为由消息内标记驱动（确定性）：
-  - 默认       → 调用 database_schema + execute_sql，输出含 "QUERY COMPLETE"
-  - "[fail]"   → 追加 error 事件（run.finished status=error）
+行为由消息内标记驱动（确定性）：脚本与进程内 ``FakeAgentAdapter`` 共用
+``adapters/fake.py`` 的 SECURITY_RULES / turn_events——安全用例（PRD §62/§63）
+必须能在真实 TCP + SSE 链路上复现，两份脚本各写一份会悄悄漂移。
+
+额外标记（仅本 server）：
   - "[slow]"   → 每轮 sleep 120s（触发 eval 侧超时）
-  - "[subagent]" → 额外产生 subagent.started/finished + 内部工具调用
 
 用法::
 
@@ -17,8 +18,9 @@ import argparse
 import json
 import threading
 import uuid
-from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from agent_eval.adapters.fake import select_script, turn_events
 
 SSE_HEADERS = {
     "Content-Type": "text/event-stream",
@@ -31,64 +33,13 @@ def _sse(event: dict) -> bytes:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
 
 
-def _evt(trace_id: str, parent: str | None, etype: str, data: dict) -> dict:
-    return {
-        "event_id": f"evt_{uuid.uuid4().hex[:12]}",
-        "trace_id": trace_id,
-        "parent_span_id": parent,
-        "type": etype,
-        "timestamp": datetime.now().astimezone().isoformat(),
-        "data": data,
-    }
-
-
 def build_turn_events(message: str) -> list[dict]:
-    """Deterministic event script for one run call."""
-    trace_id = f"trace_{uuid.uuid4().hex[:12]}"
-    events: list[dict] = [
-        _evt(trace_id, None, "run.started", {"message": message}),
-        _evt(trace_id, None, "agent.started", {}),
+    """Deterministic event script for one run call (与 FakeAgentAdapter 同源)。"""
+    script = select_script(message)
+    return [
+        event.model_dump(mode="json")
+        for event in turn_events(message, script, f"trace_{uuid.uuid4().hex[:12]}")
     ]
-    agent_span = events[-1]["event_id"]
-
-    def add_tool(name: str, parent: str, status: str = "ok") -> None:
-        call = _evt(trace_id, parent, "tool.call", {"name": name, "arguments": {}})
-        events.append(call)
-        events.append(_evt(trace_id, call["event_id"], "tool.result", {"status": status}))
-
-    if "[subagent]" in message:
-        sub = _evt(trace_id, agent_span, "subagent.started", {"name": "researcher"})
-        events.append(sub)
-        add_tool("web_search", sub["event_id"])
-        events.append(_evt(trace_id, sub["event_id"], "subagent.finished", {"status": "ok"}))
-    for tool in ("database_schema", "execute_sql"):
-        add_tool(tool, agent_span, "error" if "[toolerror]" in message else "ok")
-
-    output = "QUERY COMPLETE: mock agent result"
-    if "30 天" in message:
-        output += "（已按最近 30 天过滤）"
-    llm_span = _evt(trace_id, agent_span, "model.request", {"model": "mock-model"})
-    events.append(llm_span)
-    events.append(
-        _evt(
-            trace_id,
-            llm_span["event_id"],
-            "model.response",
-            {"text": output, "usage": {"input_tokens": 120, "output_tokens": 80}},
-        )
-    )
-    failed = "[fail]" in message
-    if failed:
-        events.append(_evt(trace_id, agent_span, "error", {"message": "mock scripted failure"}))
-    events.append(
-        _evt(
-            trace_id,
-            None,
-            "run.finished",
-            {"status": "error" if failed else "success", "output": output},
-        )
-    )
-    return events
 
 
 class MockAgentHandler(BaseHTTPRequestHandler):

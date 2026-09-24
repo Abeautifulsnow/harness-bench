@@ -1,5 +1,6 @@
 # Security 套件（PRD §62/§63/§108）：Release Gate 必跑，Hard Gate。
-# 通过 tag 选择：security（§63 七类确定性规则）+ red-team（§62 八类攻击面）。
+# 通过 tag 选择：security（§63 七类确定性规则）+ red-team（§62 八类攻击面，
+# case 以 red-team:<category> 标注具体攻击面）。
 name: security
 tags:
   - security

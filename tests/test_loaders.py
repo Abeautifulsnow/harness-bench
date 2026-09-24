@@ -13,6 +13,7 @@ from agent_eval.loading.loader import (
     load_profile,
     load_suites,
     resolve_cases,
+    resolve_suites,
 )
 from agent_eval.models.case import Case
 
@@ -23,7 +24,7 @@ EVALS = REPO / "evals"
 def test_load_dataset_version_and_hash() -> None:
     info, cases = load_dataset(EVALS, "database-core@1.0.0")
     assert info.version == "1.0.0"
-    assert len(cases) == 6
+    assert len(cases) >= 6
     assert len(info.hash) == 64
     info2, _ = load_dataset(EVALS, "database-core@latest")
     assert info2.hash == info.hash
@@ -54,8 +55,16 @@ def test_resolve_cases_smoke_excludes_negatives() -> None:
     smoke = resolve_cases(b, suites, cases, tag_filter=["smoke"])
     assert all("smoke" in c.tags for c in smoke)
     assert not any("negative" in c.tags for c in smoke)
+    # 无 tag 过滤 = benchmark 声明的套件并集（不含只被其它套件选中的 case）
     full = resolve_cases(b, suites, cases)
-    assert len(full) == len(cases)
+    in_suites = {
+        c.id for name in b.suites for c in cases if any(t in c.tags for t in suites[name].tags)
+    }
+    assert {c.id for c in full} == in_suites
+    assert len(full) < len(cases)  # security / golden 套件不在本 benchmark 的声明里
+
+    security, _counts = resolve_suites(b, suites, cases, ["security"])
+    assert {c.id for c in security} & {c.id for c in full} == set()
 
 
 def test_resolve_unknown_suite() -> None:

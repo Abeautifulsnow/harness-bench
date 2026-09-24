@@ -580,6 +580,8 @@ class Runner:
         result.metric_results.extend(synthesize_platform_verdicts(scope, result.id))
         result.final_output = scope.final_output
         result.tool_calls = scope.tool_calls
+        result.mcp_calls = scope.mcp_calls
+        result.command_calls = scope.command_calls
         result.latency_ms = scope.latency_ms
         result.token_count = scope.tokens
         result.input_tokens = sum(turn.input_tokens for turn in turn_results)
@@ -598,17 +600,36 @@ class Runner:
 
         无条件产出会让每个普通 case 都带一组"未声明的 pass"，污染 metric 集合；
         完全不产出又会让安全套件失去 Hard Gate。触发条件取显式声明 + 安全标签。
+
+        安全断言在两个 session 挂载点都可声明（Spec §12），逐挂载点评测并在
+        metadata 里标注 ``declared_at``，否则"哪个挂载点要求的"会不可考。
         """
-        assertion = case.expected.security
-        tagged = bool(SECURITY_TAGS & set(case.tags))
-        if assertion.is_empty() and not tagged:
-            return []
-        return [
-            finding.as_metric(result.id, lambda: new_id("mr"))
-            for finding in evaluate_security(
-                assertion, scope.tool_calls, final_output=scope.final_output
-            )
+        mounts = [
+            (name, assertion)
+            for name, assertion in case.session_assertions()
+            if not assertion.security.is_empty()
         ]
+        tagged = bool(SECURITY_TAGS & set(case.tags))
+        if not mounts and not tagged:
+            return []
+        if not mounts:
+            # 只有 tag 触发（未声明任何规则）：用空声明跑一遍平台底线规则
+            # （危险命令 / 密钥泄漏），这是套件触发时的既有语义。
+            mounts = [("expected", case.expected)]
+        out: list[MetricResultModel] = []
+        for mount_name, assertion in mounts:
+            out.extend(
+                finding.as_metric(result.id, lambda: new_id("mr"), declared_at=mount_name)
+                for finding in evaluate_security(
+                    assertion.security,
+                    scope.tool_calls,
+                    mcp_names=[call.name for call in scope.mcp_calls],
+                    command_calls=scope.command_calls,
+                    final_output=scope.final_output,
+                    case_tags=list(case.tags),
+                )
+            )
+        return out
 
     async def _finish_iteration(
         self, case: Case, phase: _AgentPhase, ctx: _CaseContext
@@ -704,11 +725,22 @@ class Runner:
             )
             for span in tree.find("tool")
         ]
+        # Spec §12.1：mcp.* 与 command.* 是独立 span 类型，需要单独收集——
+        # 只收 tool 会让 forbidden_mcp / forbidden_command 永远看不到它们。
+        mcp_calls = [
+            ToolCallRecord(
+                name=span.name, arguments=span.input if isinstance(span.input, dict) else {}
+            )
+            for span in tree.find("mcp")
+        ]
+        command_calls = [ToolCallRecord(name=span.name) for span in tree.find("command")]
         usage = tree.usage_totals()
         turn = TurnResult(
             index=index,
             output=output,
             tool_calls=tool_calls,
+            mcp_calls=mcp_calls,
+            command_calls=command_calls,
             latency_ms=latency_ms,
             tokens=tree.token_count(),
             input_tokens=usage["input_tokens"],
@@ -732,6 +764,8 @@ class Runner:
                 run_status=finished_status or ("error" if agent_failed else "success"),
                 final_output=output,
                 tool_calls=tool_calls,
+                mcp_calls=mcp_calls,
+                command_calls=command_calls,
                 latency_ms=turn.latency_ms,
                 tokens=turn.tokens,
             )
@@ -872,6 +906,8 @@ def _session_scope(run_status: str, turn_results: list[TurnResult]) -> EvalScope
         run_status=run_status,
         final_output=turn_results[-1].output if turn_results else None,
         tool_calls=[tool for turn in turn_results for tool in turn.tool_calls],
+        mcp_calls=[call for turn in turn_results for call in turn.mcp_calls],
+        command_calls=[call for turn in turn_results for call in turn.command_calls],
         latency_ms=sum(turn.latency_ms for turn in turn_results),
         tokens=sum(turn.tokens for turn in turn_results),
     )

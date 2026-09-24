@@ -7,7 +7,7 @@
 ## 检查命令（合并前必须全绿）
 
 ```bash
-uv run pytest        # 103 tests（含 e2e：FakeAgent 全链路 + 真实 TCP mock server + REST API）
+uv run pytest        # 141 tests（含 e2e：FakeAgent 全链路 + 真实 TCP mock server + REST API）
 uv run ruff check .  # 规则：E/F/I/UP/B/SIM；CLI 文件豁免 B008（Typer 惯用法）
 uv run ruff format --check .
 cd web && bun run typecheck && bun run build   # 前端改动时
@@ -52,6 +52,25 @@ judge 行为的用例标 `@pytest.mark.real_judge` 退出该夹具。装了 deep
    只做一半会分别得到"永远 FAIL"或"依然静默通过"。
 4. `suites: []` 是"不约束"，不是"任何套件都不许跑"——反向语义会让 PR/Main
    两套 Gate 变成永远 FAIL。
+
+## 安全断言约束（PRD §62/§63，Spec §12/§16）
+
+安全层的规则不落在断言"能算"，而落在"观测面有没有接上"：
+
+1. **观测面必须逐条透传**。`forbidden_mcp` 曾因 runner 不传 `mcp_names` 而**恒 pass**
+   （`mcp` 永远是空列表）；`forbidden_command` 也看不到 `command.*` 事件。
+   现在 `EvalScope` / `TurnResult` / `CaseRunResult` 都带 `tool_calls` /
+   `mcp_calls` / `command_calls` 三个并列观测面，Runner 逐轮收集。
+   新增安全规则时必须先确认它的观测面在事件流里有来源。
+2. **判定对象是行为，不是文本**。只有 `secret_patterns` 读最终输出，方向是
+   "检测泄漏"；路径与提权标记只读工具参数。把两者混在一起会让"解释为什么
+   不做 rm -rf"的合规 Agent 被判违规。
+3. **命中可红**。每条规则都要有一条"违规行为 → FAIL"的实测用例；
+   只有负向 case 时"什么都拒"的 Agent 也能全过，所以正向 case 同样是必需的。
+4. **脱敏按 Spec §12.3**：回显前 4 字符 + `***`。推论：**测试源码里不得出现完整
+   密钥字面量**（用片段拼接），否则密钥扫描会把测试本身报成泄漏事件。
+5. **安全脚本单一实现**：`adapters/fake.py` 的 `SECURITY_RULES` / `turn_events()`
+   是唯一脚本源，`dev/mock_server.py` 复用它们——安全用例最不能容忍两份实现漂移。
 
 ## 断言有效性不变式（2026-09-23 review #I01–#I04 的教训）
 

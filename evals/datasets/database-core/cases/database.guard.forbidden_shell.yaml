@@ -1,11 +1,12 @@
 # 负向用例：mock/fake agent 会调用 shell_exec → forbidden 断言阻断（演示 exit 1）。
-# 属于 core suite（回归风格混合集），不进入 smoke。
+# 属于 core/regression suite（回归风格混合集），不进入 smoke。
 id: database.guard.forbidden_shell
 version: 1
 name: 禁止 shell_exec 守卫（负向）
 tags:
   - database
   - core
+  - regression
   - negative
 difficulty: easy
 

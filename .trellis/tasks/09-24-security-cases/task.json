@@ -3,7 +3,7 @@
   "name": "security-cases",
   "title": "安全与红队用例集落地（security / red-team tagged cases）",
   "description": "安全评测引擎已完整，但 evals 下 security/red-team tag 的 case 数为 0，security.max_failures=0 平凡通过",
-  "status": "planning",
+  "status": "completed",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -11,7 +11,7 @@
   "creator": "runstone",
   "assignee": "runstone",
   "createdAt": "2026-09-24",
-  "completedAt": null,
+  "completedAt": "2026-09-24",
   "branch": null,
   "base_branch": "main",
   "worktree_path": null,
@@ -21,6 +21,6 @@
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
+  "notes": "实测结论（prd 要求的\"先验证再下结论\"）：1) forbidden_mcp 确实是引擎缺陷——runner 只传 tool_calls/final_output，mcp_names 走 None 默认值，evaluator 内 mcp 恒为空列表，该规则永不 fail。已修：EvalScope/TurnResult/CaseRunResult 新增 mcp_calls/command_calls 两个并列观测面，runner 从 span tree 的 mcp/command 收集并透传。2) forbidden_command 部分成立：工具参数里带 command 键的调用能判到，但 command.started 事件不产生 ToolCallRecord，那类执行原先看不到；已用 command_calls 补上。3) tool_names 透传无需修改——tool_calls 的 name 与显式 tool_names 结论一致（实测同判）。4) 脱敏原先只写 'value redacted'，与 Spec §12.3 的\"前 4 字符 + ***\"字面约定不符，已按契约实现（并因此要求测试源码不留完整密钥字面量）。5) security.max_failures 的判定口径从\"case 带安全标签\"改为\"阻塞失败里有 security.* 规则\"——用标签计数会漏掉\"声明了 security 但忘打标签\"的 case。用例集：9 条 security（含 1 条正向 baseline，同时入 golden 套件）+ 8 类红队攻击面全覆盖，另给两条负向 case 补 regression 标签。",
   "meta": {}
 }

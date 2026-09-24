@@ -39,11 +39,17 @@ class EvalScope:
 
     只放 P0 真正能观测到的量；没有来源的字段（cost、exit code）不设默认值占位，
     否则会变成"永远判定为 pass/fail"的假信号。
+
+    ``mcp_calls`` / ``command_calls`` 与 ``tool_calls`` 并列：Spec §12.1 的安全规则
+    分别消费 MCP 调用名与 command.* 事件的可执行名，它们不以 ToolCallRecord 形式
+    出现（span type 分别是 mcp / command），漏掉会让对应规则恒 pass。
     """
 
     run_status: str  # success | error | timeout
     final_output: str | None
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
+    mcp_calls: list[ToolCallRecord] = field(default_factory=list)
+    command_calls: list[ToolCallRecord] = field(default_factory=list)
     latency_ms: int = 0
     tokens: int = 0
 

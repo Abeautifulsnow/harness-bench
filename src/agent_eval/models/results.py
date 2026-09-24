@@ -61,6 +61,9 @@ class TurnResult(BaseModel):
     index: int  # 1-based turn number
     output: str | None = None
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
+    # Spec §12.1：MCP 调用与 command.* 事件是独立观测面，不与 tool_calls 混同
+    mcp_calls: list[ToolCallRecord] = Field(default_factory=list)
+    command_calls: list[ToolCallRecord] = Field(default_factory=list)
     latency_ms: int = 0
     tokens: int = 0
     input_tokens: int = 0
@@ -95,6 +98,10 @@ class CaseRunResult(BaseModel):
     cost_known: bool = False  # True 表示 cost 由定价表算出，0.0 才是真值
     final_output: str | None = None
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
+    # Spec §12.1：MCP 调用与 command.* 事件的可执行名（不与 tool_calls 混同），
+    # 供 security.forbidden_mcp / forbidden_command 消费
+    mcp_calls: list[ToolCallRecord] = Field(default_factory=list)
+    command_calls: list[ToolCallRecord] = Field(default_factory=list)
     turn_results: list[TurnResult] = Field(default_factory=list)
     metric_results: list[MetricResultModel] = Field(default_factory=list)
     error: str | None = None
