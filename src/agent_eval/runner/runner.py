@@ -12,6 +12,7 @@ report.json / gate.json / junit.xml / report.html / summary.md。
 """
 
 import asyncio
+import dataclasses
 import json
 import subprocess
 from collections.abc import Callable
@@ -27,16 +28,20 @@ from agent_eval.adapters.base import (
     AgentSession,
     SessionContext,
 )
-from agent_eval.errors import InfraError, InvalidCallError
+from agent_eval.errors import InfraError, InvalidCallError, MetricUnavailableError
 from agent_eval.evaluators.deepeval_adapter import DeepEvalCapabilityAdapter
 from agent_eval.evaluators.native import (
     EvalScope,
     evaluate_assertions,
     synthesize_platform_verdicts,
 )
+from agent_eval.evaluators.plugin import EvaluationContext
 from agent_eval.evaluators.registry import (
+    available_providers_for,
+    plugin_for,
     provider_for,
     resolve_metric,
+    run_plugin,
     scan_unsupported_assertions,
 )
 from agent_eval.fixtures.base import FixtureHandle, get_provider
@@ -133,6 +138,7 @@ class RunOutcome:
 class _ResolvedProfile:
     profile: MetricProfile
     judge_specs: list[MetricSpec]
+    harness_specs: list[MetricSpec]  # PRD §43/§44 的确定性插件（不占 judge 槽位）
 
 
 @dataclass
@@ -148,13 +154,14 @@ class _CaseContext:
 
 @dataclass
 class _AgentPhase:
-    """Agent 执行阶段的产物：交给 judge 阶段，但不占用 agent 并发槽位。"""
+    """Agent 执行阶段的产物：交给评测阶段，但不占用 agent 并发槽位。"""
 
     result: CaseRunResult
     tree: SpanTree | None
     scope: EvalScope | None
     resolved: _ResolvedProfile
-    completed: bool  # False = 已判定为 ERROR/INFRA，judge 阶段应跳过
+    completed: bool  # False = 已判定为 ERROR/INFRA，评测阶段应跳过
+    events: list[TraceEvent] = field(default_factory=list)
 
 
 def _git_info() -> tuple[str | None, str | None, bool | None]:
@@ -396,9 +403,10 @@ class Runner:
         for name, profile in profiles.items():
             caps: dict[str, bool] = dict(probe)
             judge_specs: list[MetricSpec] = []
+            harness_specs: list[MetricSpec] = []
             for spec in profile.metrics:
                 provider = provider_for(spec)
-                caps.setdefault(spec.id, provider == "native")
+                caps.setdefault(spec.id, available_providers_for(spec))
                 effective, degraded_from = resolve_metric(spec, caps, self.cfg.no_judge)
                 if degraded_from is not None:
                     degradations[degraded_from] = effective or ""
@@ -407,8 +415,18 @@ class Runner:
                     continue  # no_judge → skipped，记录于 Run Metadata
                 if provider == "deepeval":
                     judge_specs.append(spec)
+                elif provider == "harness":
+                    # 插件在注册表里缺席时，注册表就查不到它的 default_threshold
+                    if plugin_for(spec.id) is None:
+                        raise MetricUnavailableError(
+                            f"harness metric '{spec.id}' has no registered plugin "
+                            "(PRD §43：先 register_plugin 再进 profile)"
+                        )
+                    harness_specs.append(spec)
             capabilities.update(caps)
-            resolved[name] = _ResolvedProfile(profile=profile, judge_specs=judge_specs)
+            resolved[name] = _ResolvedProfile(
+                profile=profile, judge_specs=judge_specs, harness_specs=harness_specs
+            )
         return _CaseContext(
             resolved=resolved,
             case_profile=case_profile,
@@ -494,7 +512,9 @@ class Runner:
                 result.failure_semantics = FailureSemantics.AGENT
                 result.error = f"agent run finished with status={run_status!r}"
                 result.failure_category = f"agent.{run_status}"
-            return _AgentPhase(result, span_tree, scope, resolved, completed=True)
+            return _AgentPhase(
+                result, span_tree, scope, resolved, completed=True, events=list(session_events)
+            )
         except InfraError as exc:  # SSE 流断裂等（§6.1：mandatory suite 未完整执行）
             return _AgentPhase(
                 _error(result, FailureSemantics.INFRA, str(exc)),
@@ -634,10 +654,13 @@ class Runner:
     async def _finish_iteration(
         self, case: Case, phase: _AgentPhase, ctx: _CaseContext
     ) -> CaseRunResult:
-        """Judge 阶段 + 终判：不占用 agent 并发槽位。"""
+        """确定性插件 + Judge 阶段 + 终判：不占用 agent 并发槽位。"""
         result = phase.result
         if not phase.completed:
             return result
+        plugin_error = await self._run_harness_plugins(case, phase, result)
+        if plugin_error:
+            return _error(result, FailureSemantics.EVALUATION, plugin_error)
         judge_error = await self._run_judge_metrics(
             case, phase.resolved, ctx, phase.tree, phase.scope, result
         )
@@ -651,6 +674,53 @@ class Runner:
         if result.status == CaseStatus.FAIL:
             result.failure_category = _failure_category(result)
         return result
+
+    async def _run_harness_plugins(
+        self, case: Case, phase: _AgentPhase, result: CaseRunResult
+    ) -> str:
+        """PRD §43/§44：harness 插件是过程内确定性判定，与 judge 阶段并列。
+
+        不占 judge 并发槽位、不受 --no-judge 影响（Spec §17.1）。插件抛异常按
+        EVALUATION_FAILURE 处理（PRD §46：插件是评测设施，它的失败不是 agent 的失败）。
+        """
+        specs = phase.resolved.harness_specs
+        if not specs:
+            return ""
+        scope = phase.scope
+        context = EvaluationContext(
+            case_run_id=result.id,
+            case_id=case.id,
+            iteration=result.iteration,
+            tags=list(case.tags),
+            run_status=scope.run_status if scope else "error",
+            final_output=scope.final_output if scope else None,
+            tool_calls=list(scope.tool_calls) if scope else [],
+            mcp_calls=list(scope.mcp_calls) if scope else [],
+            command_calls=list(scope.command_calls) if scope else [],
+            spans=list(phase.tree.spans) if phase.tree else [],
+            events=list(phase.events),
+            latency_ms=scope.latency_ms if scope else 0,
+            tokens=scope.tokens if scope else 0,
+        )
+        for spec in specs:
+            plugin = plugin_for(spec.id)
+            if plugin is None:  # 启动期已校验，这里只防御性兜底
+                continue
+            metric_context = dataclasses.replace(
+                context,
+                params={**plugin.default_params, **spec.params},
+                threshold=spec.threshold,
+                metric_id=spec.id,
+            )
+            try:
+                metric = await run_plugin(plugin, metric_context)
+            except Exception as exc:  # 插件崩溃不得静默变成 pass
+                return f"harness evaluator '{spec.id}' failed: {exc!r}"
+            # 阻断权以 Profile 为准（与 judge metric 同构）：插件只回答"观测说明了什么"，
+            # 是否拦门禁是 Gate 策略，同一插件在不同 Profile 下要能调整阻断力度。
+            metric.blocking = spec.blocking
+            result.metric_results.append(metric)
+        return ""
 
     def _record_degradations(self, ctx: _CaseContext, result: CaseRunResult) -> None:
         """降级链落账（Spec §7.4）：fallback 未真正产出时必须显式记 skipped。

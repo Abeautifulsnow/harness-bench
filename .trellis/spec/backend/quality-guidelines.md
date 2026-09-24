@@ -7,7 +7,7 @@
 ## 检查命令（合并前必须全绿）
 
 ```bash
-uv run pytest        # 141 tests（含 e2e：FakeAgent 全链路 + 真实 TCP mock server + REST API）
+uv run pytest        # 186 tests（含 e2e：FakeAgent 全链路 + 真实 TCP mock server + REST API）
 uv run ruff check .  # 规则：E/F/I/UP/B/SIM；CLI 文件豁免 B008（Typer 惯用法）
 uv run ruff format --check .
 cd web && bun run typecheck && bun run build   # 前端改动时
@@ -71,6 +71,33 @@ judge 行为的用例标 `@pytest.mark.real_judge` 退出该夹具。装了 deep
    密钥字面量**（用片段拼接），否则密钥扫描会把测试本身报成泄漏事件。
 5. **安全脚本单一实现**：`adapters/fake.py` 的 `SECURITY_RULES` / `turn_events()`
    是唯一脚本源，`dev/mock_server.py` 复用它们——安全用例最不能容忍两份实现漂移。
+
+## Evaluator 插件约束（PRD §43/§44，Spec §17）
+
+1. **加插件 = 只调用 `register_plugin()`**。第三方新增 Evaluator 不得修改
+   `runner.py`（PRD §109.4）；`tests/test_evaluator_plugin.py` 断言 Runner 源码里
+   不含任何具体插件名。图省事在 Runner 里写 if-else 会让"可扩展"退化成宣传语。
+2. **命名空间强制 `harness.*`**。`custom.*` 留给用户 GEval，`native.*` /
+   `security.*` 是平台自有语义——后者尤其重要：伪装成 `security.*` 等于绕过
+   唯一不可被 judge 覆盖的层。`provider_for()` 对未注册的 `harness.*` id 也必须
+   返回 `harness`，落 `native` 兜底会把"插件没注册"当成"有 native 规则在跑"。
+3. **平台字段由平台铸造**。插件的 `metric` / `evaluator` / `id` / `case_run_id`
+   一律走 `EvaluationContext.result()`；返回值与注册名不一致时判 `error`，
+   不静默改名。插件崩溃 = EVALUATION_FAILURE（PRD §46），不得变成 pass。
+4. **阻断权在 Profile，不在插件**。`result()` 的 `blocking` 缺省 False，Runner
+   以 `spec.blocking` 覆写；阈值走 `MetricSpec.params`
+   （`{**plugin.default_params, **spec.params}`）。插件是"观测说明了什么"，
+   是否拦门禁是 Gate 策略。
+5. **`harness` 是确定性 provider**（`DETERMINISTIC_PROVIDERS`）：插件是过程内
+   Python 判定，`--no-judge` 不得把它们一起关掉（PRD §86 只说 judge 与 agent
+   并发分离）。
+6. **只实现能写清算式的**。PRD §44 的 14 项里 10 项未实现，理由记在 Spec §17.3
+   （6 项缺声明侧词汇、3 项缺观测侧通道、1 项属 judge 职责）。恒 PASS 的占位比缺失
+   更危险：它会让覆盖统计说谎。新增插件前先补词汇表与观测面，顺序反了就会得到
+   "声明了却静默失效"。
+7. **必须双向测试**：命中 → FAIL、合规 → PASS。只测一侧会把"恒判 fail 的
+   evaluator"当成正确实现。声明侧缺失时的正确判决是 `skipped`（blocking=False），
+   不是 pass——没有依据的 pass 是假信号。
 
 ## 断言有效性不变式（2026-09-23 review #I01–#I04 的教训）
 

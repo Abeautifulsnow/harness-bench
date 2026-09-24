@@ -1,8 +1,9 @@
 # Agent Eval Platform Engineering Specification V2.1
 
-> 文档版本：V2.2（Engineering Specification，增补型；本版为 P1–P5 实施回填，
-> 新增 §11 评测词汇表增补 / §12 Security 挂载点 / §13 Web Platform 只读契约，
-> Changelog 见 §14；V2.1 的复核修订见 §10.1）
+> 文档版本：V2.3（Engineering Specification，增补型；P0 缺口回填与扩展面落地，
+> V2.2 增补 §11 评测词汇表增补 / §12 Security 挂载点 / §13 Web Platform 只读契约，
+> Changelog 见 §14；V2.3 增补 §15 必跑套件校验 / §16 安全用例集口径 /
+> §17 Evaluator Plugin SDK；V2.1 的复核修订见 §10.1）
 > 上游文档：`agent-evaluation-regression-platform-engineering-prd-v2.md`（下称 PRD V2.0，保持有效，不因本文档作废）
 > 状态：Engineering Ready
 > 面向对象：Agent Platform / Harness / AI Infra 团队
@@ -1230,4 +1231,105 @@ V2.3 补齐用例集，并固化三条口径：
 同一条 tag 触发语义（Spec §12）不得破坏：`expected.security` 为空但带
 `security` 标签的 case 仍要评测平台底线规则（危险命令 / 密钥泄漏）。
 
+---
 
+# 17. Evaluator Plugin SDK（V2.3）
+
+PRD §43 给了签名与一句硬约束："**新增 Evaluator 不得修改 Runner 主流程**"（§109.4）。
+V2.3 落地这条约束，并补齐 PRD §44 清单里的首批确定性项。
+
+## 17.1 三个契约决定
+
+平台内部的评测早已插件化（挂载点 / metric id / fallback 链分离），但对外没有扩展点：
+第三方要加评测只能改 `METRIC_REGISTRY` 与 `native.py`，正是 §43 想避免的。
+对外 SDK 因此固定三件事：
+
+1. **只暴露稳定观测面**。`EvaluationContext` 递出的是 PRD §8 Event Protocol
+   （`TraceEvent`）、PRD §10 Span Model（`TraceSpan`）、`ToolCallRecord`，
+   以及 §12.1 的三个并列观测面（`tool_calls` / `mcp_calls` / `command_calls`）。
+   不把 `CaseRunResult` 这类内部可变结构递出去：内部字段一改就是破坏契约。
+2. **返回值由平台铸造**。插件只提供判定，`metric` / `evaluator` / `id` /
+   `case_run_id` 由 `EvaluationContext.result()` 统一填。**插件不得自填这些字段**，
+   否则它能把自己的 metric 伪装成 `native.status` 或 `security.*`——后者是
+   不可被 judge 覆盖的 Hard Gate（§12），伪装等于绕过唯一的不可协商层。
+   返回值与注册名不一致时由 `run_plugin()` 判 `error`，不静默改名。
+3. **命名空间是强制的**。插件只能注册 `harness.*`：`custom.*` 留给用户 GEval，
+   `native.*` 与 `security.*` 是平台自有语义。注册之外的唯一动作是把它写进 Profile
+   的 `metrics`。
+
+`provider_for()` 对注册表里没有的 `harness.*` id 也必须返回 `harness`，不能落到
+`native` 兜底：`available_providers_for()` 对 native 一律返回 True，兜底会把
+"插件没注册"静默当成"有一条 native 规则在评测"，profile 里写错 metric id 就成了空转。
+
+## 17.2 params 与 blocking 的归属
+
+- **判定阈值走 `MetricSpec.params`**（声明式配置）。没有它，插件只能硬编码阈值，
+  而"每个 case 的理想值不同"正是 harness 专项指标存在的理由。Runner 传
+  `{**plugin.default_params, **spec.params}`：插件给默认值，Profile 覆盖。
+- **阻断权在 Profile，不在插件**。`EvaluationContext.result()` 的 `blocking`
+  缺省 False，Runner 一律以 `spec.blocking` 覆写（与 judge metric 同构）。
+  插件回答的是"这个观测说明了什么"，是否拦门禁是 Gate 策略；让插件按 verdict
+  自行决定拦截，会让同一插件在不同 Profile 下无法调整阻断力度。
+- **插件崩溃 = EVALUATION_FAILURE**（PRD §46），不是 agent 的失败，不得静默
+  变成 pass。
+
+**`harness` 是确定性 provider**（`DETERMINISTIC_PROVIDERS = {native, harness}`）：
+插件是过程内 Python 判定，不依赖外部 SDK，因此 `--no-judge` 不得把它们一起关掉。
+PRD §86 要求的是"judge 与 agent 并发分离"，不是"关掉确定性评测"。
+
+## 17.3 已实现四项与未实现十项
+
+PRD §44 列出 14 项。**只实现能写清算式的**，其余明确记为未实现——恒 PASS 的
+占位比缺失更危险，它会让覆盖统计说谎（与 §11 的准入门槛同一条理由）。
+
+| Evaluator | Metric ID | 判定对象 | 观测来源 | 口径 |
+| --- | --- | --- | --- | --- |
+| RetryEvaluator | `harness.retry` | 重试次数 | `retry` 事件 | ≤ `params.max_retries`（缺省 0） |
+| LoopEvaluator | `harness.loop` | 同工具连续重复 | `tool` span 序列 | ≤ `params.max_repeats`（缺省 3） |
+| MCPPermissionEvaluator | `harness.mcp_permission` | MCP 是否越权 | `mcp` span 名 | ⊂ `params.allowed`（空则 skipped） |
+| SubAgentRoutingEvaluator | `harness.subagent_routing` | 子 Agent 路由 | `subagent` span | == `params.expected`（空则 skipped） |
+
+未实现十项，按卡住的原因分三类：
+
+```text
+缺"声明侧"（观测有了，case 里没有可判的期望）
+  SkillPriorityEvaluator / SkillLoadEvaluator
+  MemoryRetrievalEvaluator / MemoryConflictEvaluator
+  ContextCompressionEvaluator / SubAgentRecoveryEvaluator
+缺"观测侧"（事件协议里没有该事实）
+  CompressionRetentionEvaluator   # 压缩后"保留了什么"不可观测，只能测长度
+  ForkEvaluator                   # EVENT_TYPES 里没有 fork，且 adapter 无分叉通道
+  InterruptEvaluator              # interrupt 是事件，但 cancel() 之外没有"打断-续跑"通道
+需语义判断（不是确定性规则）
+  MCPFallbackEvaluator            # "降级是否合理"需比较工具能力，属 judge 职责（PRD §110-3）
+```
+
+判定"缺声明侧"的依据：这些指标需要的期望值（该加载哪个 skill、该召回哪段记忆、
+压缩后该保留哪些事实）在 case 词汇表里**没有对应字段**，且不应由插件发明——
+断言词汇表（§2）是平台唯一入口，插件往里塞私有字段会绕开
+`scan_unsupported_assertions` 的启动期校验。因此正确顺序是：先补词汇表与观测面，
+再补插件；反过来做就会得到"声明了却静默失效"或"没声明也能判 pass"。
+
+## 17.4 MCPPermission 与 security.forbidden_mcp 的分工
+
+两者都看 MCP 调用名，但方向相反，不可互相替代：
+
+- `security.forbidden_mcp` 是**黑名单**，平台底线，`blocking=True` +
+  `hard_gate=True`，不可被 judge 覆盖（§12）；
+- `harness.mcp_permission` 是**白名单**，授权集合由 case/profile 声明，
+  默认不阻塞。
+
+未声明 `params.allowed` 时判 `skipped`（blocking=False）而不是 pass：
+没有声明就没有依据，凭空全判 pass 是假信号。`SubAgentRoutingEvaluator` 同理。
+
+## 17.5 验收口径
+
+- **双向**：每个插件都要有"命中 → FAIL"与"合规 → PASS"两侧实测。
+  只测一侧会把"恒判 fail 的 evaluator"当成正确实现（PRD §44 明确要求双向）。
+- **零改动**：以测试固定"把插件写在仓库之外、只调用 `register_plugin`，
+  run 结果里就出现它的 metric"，并断言 `runner.py` 源码里不含任何具体插件名。
+  没有这条断言，"可扩展"只是文档承诺。
+- **边界**：交替型工具调用（A,B,A,B）不算循环——读写交替是正常流程，
+  误报比漏报更快让指标失去信誉（§11 准入原则）。
+
+---

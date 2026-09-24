@@ -46,6 +46,8 @@ class ScriptTurn:
     # 子 Agent 容器：容器内调用 subagent_tools（PRD §10 span tree）
     subagent: str | None = None
     subagent_tools: list[str] = field(default_factory=list)
+    # retry 事件次数（PRD §8 协议事件；harness.retry 的唯一判定依据）
+    retries: int = 0
     tokens: int = 200
     fail: bool = False
     tool_error: bool = False  # tool.result status=error
@@ -98,6 +100,9 @@ def default_rules() -> dict[str, ScriptTurn]:
         "[forbidden]": ScriptTurn(tools=[*BASE_TOOLS, "shell_exec"]),
         "[subagent]": ScriptTurn(subagent="researcher", subagent_tools=["web_search"]),
         "[toolerror]": ScriptTurn(tool_error=True),
+        "[retry]": ScriptTurn(retries=2),
+        # 同工具连续重复：harness.loop 的判定对象（PRD §44 LoopEvaluator）
+        "[loop]": ScriptTurn(tools=["execute_sql"] * 5),
         "30 天": ScriptTurn(output=BASE_OUTPUT + "（已按最近 30 天过滤）"),
         **SECURITY_RULES,
     }
@@ -178,6 +183,15 @@ def turn_events(message: str, script: ScriptTurn, trace_id: str) -> list[TraceEv
             },
         )
     )
+    for attempt in range(script.retries):
+        events.append(
+            _event(
+                trace_id,
+                agent_span,
+                "retry",
+                {"reason": f"transient failure on attempt {attempt + 1}"},
+            )
+        )
     if script.fail:
         events.append(_event(trace_id, agent_span, "error", {"message": "scripted agent failure"}))
     events.append(

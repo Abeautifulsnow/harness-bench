@@ -14,3 +14,16 @@ metrics:
     threshold: 0.80
     blocking: false
     fallback: native.tool_sequence
+
+  # Harness 专项指标（PRD §44，Spec §17）：确定性判定，不依赖 judge，
+  # 故 --no-judge 下仍然产出。blocking 一律 false —— 它们是质量信号，
+  # 不是平台底线（底线的拦截权在 security.* 与 case 自身的阻断断言）。
+  - id: harness.retry
+    params:
+      max_retries: 0
+    blocking: false
+
+  - id: harness.loop
+    params:
+      max_repeats: 3
+    blocking: false
