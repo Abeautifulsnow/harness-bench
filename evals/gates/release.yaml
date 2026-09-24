@@ -1,0 +1,26 @@
+# Release Gate（PRD §67/§108）：严格模式。
+# 必须执行 Golden / Regression / Security / Core Business 四类套件（下面 suites 列出），
+# 任一 Hard Gate 失败 → Release Gate = FAIL；strict: true 使"任何 blocking FAIL"都阻断。
+# baseline 缺省 release 模式（Spec §4.1）：无显式 pin 时 fail-fast，不放行。
+gate: release
+strict: true
+
+suites:
+  - golden
+  - regression
+  - security
+  - core
+
+rules:
+  task_success:
+    max_regression_percent: 0      # 严格模式：不允许回归
+  tool_calls:
+    max_regression_percent: 10
+  tokens:
+    max_regression_percent: 10
+  latency:
+    max_regression_percent: 10
+  security:
+    max_failures: 0
+  golden:
+    required_pass_rate: 1.0

@@ -1,0 +1,19 @@
+# Main Gate（PRD §66）：100~500 cases、repeat=3，阈值与 PR 一致但 baseline 必须为 main-latest
+gate: main
+strict: false
+
+suites: []
+
+rules:
+  task_success:
+    max_regression_percent: 1
+  tool_calls:
+    max_regression_percent: 20
+  tokens:
+    max_regression_percent: 25
+  latency:
+    max_regression_percent: 20
+  security:
+    max_failures: 0
+  golden:
+    required_pass_rate: 1.0

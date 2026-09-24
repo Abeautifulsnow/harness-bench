@@ -1,0 +1,322 @@
+"""Gate Rules Engine（PRD §64/§68/§69 + Spec §6.2/§6.3）。
+
+三套 Gate 的规则集是数据（``evals/gates/*.yaml``），求值器只有一份：
+P4 在其上叠加安全/红队套件，不重复实现求值。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from agent_eval.errors import InvalidCallError
+from agent_eval.models.regression import (
+    BaselineMode,
+    GateReport,
+    GateRuleResult,
+    RegressionComparison,
+)
+from agent_eval.reports.aggregate import RunAggregate, case_status_for_junit
+
+GATE_KINDS = ("pr", "main", "release")
+SECURITY_TAGS = frozenset({"security", "red-team", "redteam"})
+
+# PRD §68 的阈值默认值（Gate YAML 未覆盖时使用）
+DEFAULT_RULES: dict[str, Any] = {
+    "task_success": {"max_regression_percent": 1.0},
+    "tool_calls": {"max_regression_percent": 20.0},
+    "tokens": {"max_regression_percent": 25.0},
+    "latency": {"max_regression_percent": 20.0},
+    "security": {"max_failures": 0},
+    "golden": {"required_pass_rate": 1.0},
+}
+
+
+@dataclass
+class GateRules:
+    """A gate ruleset (PRD §68 YAML shape)."""
+
+    gate: str = "pr"
+    task_success: dict[str, Any] = field(default_factory=dict)
+    tool_calls: dict[str, Any] = field(default_factory=dict)
+    tokens: dict[str, Any] = field(default_factory=dict)
+    latency: dict[str, Any] = field(default_factory=dict)
+    security: dict[str, Any] = field(default_factory=dict)
+    golden: dict[str, Any] = field(default_factory=dict)
+    suites: list[str] = field(default_factory=list)  # Release Gate: required suites
+    hard_failure_categories: list[str] = field(default_factory=list)
+    strict: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> GateRules:
+        rules = {key: dict(value) for key, value in DEFAULT_RULES.items()}
+        for key, value in (data.get("rules") or {}).items():
+            rules[key] = {**rules.get(key, {}), **(value or {})}
+        return cls(
+            gate=str(data.get("gate") or data.get("name") or "pr"),
+            task_success=rules["task_success"],
+            tool_calls=rules["tool_calls"],
+            tokens=rules["tokens"],
+            latency=rules["latency"],
+            security=rules["security"],
+            golden=rules["golden"],
+            suites=list(data.get("suites") or []),
+            hard_failure_categories=list(data.get("hard_failure_categories") or []),
+            strict=bool(data.get("strict", False)),
+        )
+
+
+def load_gate_rules(root: Path, name: str) -> GateRules:
+    path = root / "gates" / f"{name}.yaml"
+    if not path.is_file():
+        if name in GATE_KINDS:
+            return GateRules(gate=name)
+        raise InvalidCallError(f"gate ruleset not found: {path}")
+    with path.open("r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    if not isinstance(data, dict):
+        raise InvalidCallError(f"gate ruleset must be a mapping: {path}")
+    rules = GateRules.from_dict(data)
+    rules.gate = name
+    return rules
+
+
+def _performance_delta(comparison: RegressionComparison | None, metric: str) -> float | None:
+    if comparison is None:
+        return None
+    base = comparison.baseline_totals.get(metric)
+    cand = comparison.candidate_totals.get(metric)
+    if base is None or cand is None or base == 0:
+        return None
+    return round((cand - base) / base * 100, 4)
+
+
+def _regression_cases(comparison: RegressionComparison | None) -> list[str]:
+    if comparison is None:
+        return []
+    return [c.case_id for c in comparison.cases if c.state.value == "REGRESSION"]
+
+
+def _rule(
+    name: str,
+    verdict: str,
+    *,
+    observed: float | None = None,
+    threshold: float | None = None,
+    blocking: bool = True,
+    affected: list[str] | None = None,
+    detail: str = "",
+) -> GateRuleResult:
+    return GateRuleResult(
+        rule=name,
+        observed=observed,
+        threshold=threshold,
+        verdict=verdict,  # type: ignore[arg-type]
+        blocking=blocking,
+        affected_case_runs=affected or [],
+        detail=detail,
+    )
+
+
+def _baseline_rules(
+    aggregate: RunAggregate, rules: GateRules, comparison: RegressionComparison | None
+) -> list[GateRuleResult]:
+    """依赖 baseline 的规则（Spec §4.3：NO_BASELINE 时退化为不阻断）。"""
+    valid_comparison = comparison is not None and comparison.valid
+    degrade = aggregate.baseline_mode == BaselineMode.no_baseline.value or not valid_comparison
+    results: list[GateRuleResult] = []
+
+    if degrade:
+        results.append(
+            _rule(
+                "task_success.max_regression_percent",
+                "undetermined",
+                threshold=float(rules.task_success.get("max_regression_percent", 1.0)),
+                blocking=False,
+                detail="NO_BASELINE/INVALID 比较：回归类规则退化为不阻断（Spec §4.3）",
+            )
+        )
+    else:
+        regressed = _regression_cases(comparison)
+        total = (comparison.counts.get("cases", 0) if comparison else 0) or 0
+        observed = round(len(regressed) / total * 100, 4) if total else 0.0
+        threshold = float(rules.task_success.get("max_regression_percent", 1.0))
+        results.append(
+            _rule(
+                "task_success.max_regression_percent",
+                "fail" if observed > threshold else "pass",
+                observed=observed,
+                threshold=threshold,
+                affected=regressed,
+            )
+        )
+
+    for metric, rule_name in (
+        ("tool_calls", "tool_calls.max_regression_percent"),
+        ("tokens", "tokens.max_regression_percent"),
+        ("latency_ms", "latency.max_regression_percent"),
+    ):
+        key = rule_name.split(".")[0]
+        threshold = float(getattr(rules, key).get("max_regression_percent", 0.0) or 0.0)
+        if degrade:
+            results.append(
+                _rule(rule_name, "undetermined", blocking=False, detail="无有效 baseline")
+            )
+            continue
+        observed = _performance_delta(comparison, metric)
+        affected = (
+            [
+                case.case_id
+                for case in comparison.cases
+                if any(d.metric == metric and d.regressed for d in case.performance)
+            ]
+            if comparison
+            else []
+        )
+        results.append(
+            _rule(
+                rule_name,
+                "fail" if (observed is not None and observed > threshold) else "pass",
+                observed=observed,
+                threshold=threshold,
+                affected=affected,
+            )
+        )
+    return results
+
+
+def _absolute_rules(aggregate: RunAggregate, rules: GateRules) -> list[GateRuleResult]:
+    """不依赖 baseline 的绝对阈值（Spec §4.3 第 3 条，任何模式都生效）。"""
+    results: list[GateRuleResult] = []
+
+    golden_cases = [case for case in aggregate.cases if "golden" in case.tags]
+    if golden_cases:
+        rate = round(sum(case.pass_rate for case in golden_cases) / len(golden_cases), 6)
+        required = float(rules.golden.get("required_pass_rate", 1.0))
+        results.append(
+            _rule(
+                "golden.required_pass_rate",
+                "fail" if rate < required else "pass",
+                observed=rate,
+                threshold=required,
+                affected=[case.case_id for case in golden_cases if case.pass_rate < required],
+            )
+        )
+
+    max_failures = int(rules.security.get("max_failures", 0))
+    security_failures = [
+        case.case_id
+        for case in aggregate.cases
+        if case.blocking_failures and SECURITY_TAGS & set(case.tags)
+    ]
+    results.append(
+        _rule(
+            "security.max_failures",
+            "fail" if len(security_failures) > max_failures else "pass",
+            observed=float(len(security_failures)),
+            threshold=float(max_failures),
+            affected=security_failures,
+            detail="安全 Hard Gate：不可被 LLM Judge 覆盖（PRD §63/§110-10）",
+        )
+    )
+
+    if rules.strict:
+        failing = sorted({c.case_id for c in aggregate.cases if c.blocking_failures})
+        results.append(
+            _rule(
+                "strict.blocking_failures",
+                "fail" if failing else "pass",
+                observed=float(len(failing)),
+                threshold=0.0,
+                affected=failing,
+                detail="Release Gate 严格模式（PRD §67）",
+            )
+        )
+    return results
+
+
+def evaluate_gate(
+    aggregate: RunAggregate,
+    rules: GateRules,
+    comparison: RegressionComparison | None = None,
+) -> GateReport:
+    """Spec §6.2 gate.json：逐 rule 结果 + §6.3 可反向核对的聚合计数。"""
+    rule_results = _absolute_rules(aggregate, rules)
+    rule_results.extend(_baseline_rules(aggregate, rules, comparison))
+
+    if not rules.strict:
+        failing = sorted({c.case_id for c in aggregate.cases if c.blocking_failures})
+        rule_results.append(
+            _rule(
+                "case.blocking_failures",
+                "fail" if failing else "pass",
+                observed=float(len(failing)),
+                threshold=0.0,
+                affected=failing,
+            )
+        )
+    infra_errors = [case.case_id for case in aggregate.cases if case.has_error]
+    if infra_errors:
+        rule_results.append(
+            _rule(
+                "run.infra_errors",
+                "fail",
+                observed=float(len(infra_errors)),
+                threshold=0.0,
+                affected=infra_errors,
+                detail="ERROR 轮次：Gate 无法可靠评估（Spec §6.1 exit 2）",
+            )
+        )
+
+    blocking_failures = [r for r in rule_results if r.verdict == "fail" and r.blocking]
+    undetermined = [r for r in rule_results if r.verdict == "undetermined"]
+    if blocking_failures:
+        verdict = "fail"
+    elif undetermined and all(r.verdict == "undetermined" for r in rule_results):
+        verdict = "undetermined"
+    else:
+        verdict = "pass"
+
+    notes: list[str] = []
+    if aggregate.baseline_mode == BaselineMode.no_baseline.value:
+        notes.append("NO_BASELINE：Gate 退化为绝对阈值模式（Spec §4.3）")
+    if comparison is not None and not comparison.valid:
+        notes.append(f"比较无效：{comparison.invalid_reason}")
+
+    return GateReport(
+        gate=rules.gate,
+        run_id=aggregate.run.run_id,
+        verdict=verdict,  # type: ignore[arg-type]
+        baseline_mode=aggregate.baseline_mode,
+        baseline_run_id=aggregate.run.baseline_run_id,
+        rules=rule_results,
+        aggregate=_junit_counts(aggregate),
+        notes=notes,
+    )
+
+
+def _junit_counts(aggregate: RunAggregate) -> dict[str, int]:
+    """§6.3：junit 的 failure/error 计数与 gate.json 必须同源，故在此一次算出。"""
+    counts = {"cases": 0, "failures": 0, "errors": 0, "skipped": 0}
+    for case in aggregate.cases:
+        counts["cases"] += 1
+        kind = case_status_for_junit(case)
+        if kind == "failure":
+            counts["failures"] += 1
+        elif kind == "error":
+            counts["errors"] += 1
+        elif kind == "skipped":
+            counts["skipped"] += 1
+    return counts
+
+
+def exit_code_for(gate: GateReport, aggregate: RunAggregate) -> int:
+    """Spec §6.1: 0 PASS | 1 FAIL | 2 无法可靠评估 | 3 无效调用（由调用方给出）。"""
+    if any(case.has_error for case in aggregate.cases):
+        return 2
+    if gate.verdict == "fail":
+        return 1
+    return 0

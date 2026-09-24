@@ -1,0 +1,21 @@
+# PR Gate（PRD §65）：speed-first，repeat=1
+# 说明：baseline 缺省 main-latest（Spec §4.1）；无合格 baseline 时回归类规则退化为不阻断。
+gate: pr
+strict: false
+
+# Release Gate 必跑套件（PRD §67/§108）；PR Gate 只跑 benchmark 声明的 suites
+suites: []
+
+rules:
+  task_success:
+    max_regression_percent: 1      # PRD §68 默认
+  tool_calls:
+    max_regression_percent: 20
+  tokens:
+    max_regression_percent: 25
+  latency:
+    max_regression_percent: 20
+  security:
+    max_failures: 0                # Hard Gate（PRD §69：安全 Assert 为 Hard Gate）
+  golden:
+    required_pass_rate: 1.0

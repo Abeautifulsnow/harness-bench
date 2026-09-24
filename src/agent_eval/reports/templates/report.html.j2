@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Run {{ report.run_id }} · {{ report.benchmark_id }}</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 32px; font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         background: #f8fafc; color: #101828; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 28px 0 10px; }
+  .muted { color: #667085; }
+  .card { background: #fff; border: 1px solid #eaecf0; border-radius: 10px; padding: 18px 20px;
+          margin-bottom: 18px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .kpi { background: #fff; border: 1px solid #eaecf0; border-radius: 10px; padding: 12px 14px; }
+  .kpi .label { font-size: 12px; color: #667085; text-transform: uppercase; letter-spacing: .04em; }
+  .kpi .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eaecf0; vertical-align: top; }
+  th { background: #f9fafb; font-weight: 600; color: #475467; }
+  tr:last-child td { border-bottom: none; }
+  code { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px;
+           font-weight: 600; color: #fff; }
+  .warn { background: #fffaeb; border: 1px solid #fedf89; color: #b54708; border-radius: 8px;
+          padding: 10px 12px; margin-bottom: 10px; }
+  .fail-list li { margin-bottom: 4px; }
+  .scroll { overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>{{ report.benchmark_id }} · {{ report.run_id }}</h1>
+<p class="muted">
+  dataset <code>{{ report.dataset.id }}@{{ report.dataset.version }}</code>
+  · profile <code>{{ report.profile }}</code>
+  · status <code>{{ report.status }}</code>
+  · baseline <code>{{ report.baseline_mode }}</code>
+  · {{ report.started_at }} → {{ report.finished_at }}
+</p>
+
+{% for warning in report.warnings %}
+<div class="warn">{{ warning }}</div>
+{% endfor %}
+
+<div class="grid">
+  <div class="kpi"><div class="label">Verdict</div>
+    <div class="value"><span class="badge" style="background:{{ state_colors.get(report.verdict, '#475467') }}">{{ report.verdict }}</span></div></div>
+  <div class="kpi"><div class="label">Gate</div>
+    <div class="value"><span class="badge" style="background:{{ state_colors.get(gate.verdict, '#475467') }}">{{ gate.gate }}:{{ gate.verdict }}</span></div></div>
+  <div class="kpi"><div class="label">Cases</div><div class="value">{{ report.totals.cases }}</div></div>
+  <div class="kpi"><div class="label">Iterations</div><div class="value">{{ report.totals.iterations }}</div></div>
+  <div class="kpi"><div class="label">Flaky</div><div class="value">{{ report.totals.flaky_cases }}</div></div>
+  <div class="kpi"><div class="label">Regression</div><div class="value">{{ report.totals.regression_cases }}</div></div>
+  <div class="kpi"><div class="label">Avg Tool Calls</div><div class="value">{{ report.totals.avg_tool_calls }}</div></div>
+  <div class="kpi"><div class="label">Avg Latency</div><div class="value">{{ report.totals.avg_latency_ms }} ms</div></div>
+</div>
+
+<h2>Gate Rules</h2>
+<div class="card scroll">
+<table>
+  <thead><tr><th>Rule</th><th>Observed</th><th>Threshold</th><th>Verdict</th><th>Blocking</th><th>Affected</th></tr></thead>
+  <tbody>
+  {% for rule in gate.rules %}
+    <tr>
+      <td><code>{{ rule.rule }}</code></td>
+      <td>{{ rule.observed if rule.observed is not none else '—' }}</td>
+      <td>{{ rule.threshold if rule.threshold is not none else '—' }}</td>
+      <td><span class="badge" style="background:{{ state_colors.get(rule.verdict, '#475467') }}">{{ rule.verdict }}</span></td>
+      <td>{{ 'yes' if rule.blocking else 'no' }}</td>
+      <td>{% if rule.affected_case_runs %}{{ rule.affected_case_runs | join(', ') }}{% else %}—{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+{% if comparison %}
+<h2>Regression · baseline {{ comparison.baseline_run_id }} → candidate {{ comparison.candidate_run_id }}</h2>
+<div class="card">
+  {% if not comparison.valid %}<div class="warn">比较无效：{{ comparison.invalid_reason }}</div>{% endif %}
+  <p class="muted">
+    cases {{ comparison.counts.get('cases', 0) }}
+    · regression {{ comparison.counts.get('regression', 0) }}
+    · improved {{ comparison.counts.get('improved', 0) }}
+    · flaky {{ comparison.counts.get('flaky', 0) }}
+    · unchanged {{ comparison.counts.get('unchanged', 0) }}
+    · undetermined {{ comparison.counts.get('undetermined', 0) }}
+  </p>
+  {% if comparison.performance_regressions %}
+  <p><strong>PERFORMANCE_REGRESSION</strong>：{{ comparison.performance_regressions | join(', ') }}</p>
+  {% endif %}
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Case</th><th>Baseline</th><th>Candidate</th><th>State</th>
+      <th>Tool calls</th><th>Tokens</th><th>Latency</th></tr></thead>
+    <tbody>
+    {% for case in comparison.cases %}
+      <tr>
+        <td><code>{{ case.case_id }}</code></td>
+        <td>{{ case.baseline_stability }}</td>
+        <td>{{ case.candidate_stability }}</td>
+        <td><span class="badge" style="background:{{ state_colors.get(case.state, '#475467') }}">{{ case.state }}</span></td>
+        {% set perf = {} %}
+        {% for entry in case.performance %}{% set _ = perf.update({entry.metric: entry}) %}{% endfor %}
+        <td>{{ perf.get('tool_calls').baseline if perf.get('tool_calls') else '—' }} → {{ perf.get('tool_calls').candidate if perf.get('tool_calls') else '—' }}</td>
+        <td>{{ perf.get('tokens').baseline if perf.get('tokens') else '—' }} → {{ perf.get('tokens').candidate if perf.get('tokens') else '—' }}</td>
+        <td>{{ perf.get('latency_ms').baseline if perf.get('latency_ms') else '—' }} → {{ perf.get('latency_ms').candidate if perf.get('latency_ms') else '—' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+
+<h2>Cases</h2>
+<div class="card scroll">
+<table>
+  <thead><tr><th>Case</th><th>Ver</th><th>Tags</th><th>Stability</th><th>Pass rate</th>
+    <th>Regression</th><th>Tool calls</th><th>Tokens</th><th>Latency</th><th>Failures</th></tr></thead>
+  <tbody>
+  {% for case in report.cases %}
+    <tr>
+      <td><code>{{ case.case_id }}</code></td>
+      <td>{{ case.case_version }}</td>
+      <td class="muted">{{ case.tags | join(', ') }}</td>
+      <td><span class="badge" style="background:{{ state_colors.get(case.stability, '#475467') }}">{{ case.stability }}</span></td>
+      <td>{{ case.pass_rate | pct }}</td>
+      <td><span class="badge" style="background:{{ state_colors.get(case.regression_state, '#475467') }}">{{ case.regression_state }}</span></td>
+      <td>{{ case.tool_calls_mean }}</td>
+      <td>{{ case.tokens_mean }}</td>
+      <td>{{ case.latency_mean }} ms</td>
+      <td>{{ case.blocking_failures | length }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+{% set all_failures = [] %}
+{% for case in report.cases %}{% for failure in case.blocking_failures %}
+  {% set _ = all_failures.append({'case_id': case.case_id, 'failure': failure}) %}
+{% endfor %}{% endfor %}
+{% if all_failures %}
+<h2>Blocking Failures</h2>
+<div class="card">
+<ul class="fail-list">
+  {% for item in all_failures %}
+  <li><code>{{ item.case_id }}</code> iter{{ item.failure.iteration }}
+    <strong>{{ item.failure.metric }}</strong>
+    @ {{ item.failure.mount or '—' }} ({{ item.failure.verdict }}): {{ item.failure.reason }}</li>
+  {% endfor %}
+</ul>
+</div>
+{% endif %}
+
+{% if report.metric_degradations %}
+<h2>Judge Degradations (Spec §7.4)</h2>
+<div class="card">
+<ul>{% for metric_id, fallback in report.metric_degradations.items() %}
+  <li><code>{{ metric_id }}</code> → <code>{{ fallback }}</code></li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+<h2>Run Metadata</h2>
+<div class="card">
+  <p class="muted">
+    platform <code>{{ report.metric_capability_snapshot | length }}</code> metric capability entries
+    · no_judge <code>{{ report.no_judge }}</code>
+  </p>
+  <details><summary>metric_capability_snapshot</summary>
+    <pre><code>{{ report.metric_capability_snapshot | tojson_pretty }}</code></pre>
+  </details>
+  <details><summary>metrics</summary>
+    <pre><code>{{ report.metrics | tojson_pretty }}</code></pre>
+  </details>
+</div>
+</body>
+</html>

@@ -31,6 +31,19 @@ def _latency_cv(iterations: list[CaseRunResult]) -> float | None:
     return round(statistics.stdev(latencies) / statistics.mean(latencies), 6)
 
 
+def _pass_at_k(valid: list[CaseRunResult], repeat: int) -> dict[str, float]:
+    """PRD §31：pass@k 仅当 repeat ≥ k 时输出，否则该 key 不出现。
+
+    V1 口径：repeat 次里至少一次 PASS 即 pass@k=1.0（k 次独立试验的成功覆盖）。
+    """
+    passes = sum(1 for it in valid if it.status == CaseStatus.PASS)
+    out: dict[str, float] = {}
+    for k in (1, 3, 5):
+        if repeat >= k:
+            out[f"pass@{k}"] = 1.0 if passes > 0 else 0.0
+    return out
+
+
 def compute_stability(case_id: str, iterations: list[CaseRunResult]) -> CaseStability:
     valid = [it for it in iterations if it.status in {CaseStatus.PASS, CaseStatus.FAIL}]
     infra_errors = [it for it in iterations if it.status == CaseStatus.ERROR]
@@ -53,6 +66,8 @@ def compute_stability(case_id: str, iterations: list[CaseRunResult]) -> CaseStab
         for m in it.metric_results
         if m.score is not None and m.metric.startswith("agent.")
     ]
+    tokens = [float(it.token_count) for it in valid]
+    repeat = len(iterations)
     return CaseStability(
         case_id=case_id,
         stability=stability,
@@ -63,6 +78,12 @@ def compute_stability(case_id: str, iterations: list[CaseRunResult]) -> CaseStab
         score_stddev=round(statistics.stdev(scores), 6) if len(scores) >= 2 else None,
         tool_sequence_variance=_tool_sequence_variance(valid),
         latency_cv=_latency_cv(valid),
+        token_variance=(
+            round(statistics.stdev(tokens) / statistics.mean(tokens), 6)
+            if len(tokens) >= 2 and statistics.mean(tokens) > 0
+            else None
+        ),
+        pass_at_k=_pass_at_k(valid, repeat),
     )
 
 
