@@ -1,0 +1,98 @@
+@import "tailwindcss";
+
+/* shadcn/ui 设计令牌（Tailwind v4 @theme 版本）。
+   平台整体是常暗色的控制台：默认主题即深色，light 令牌保留给嵌入/打印场景。
+   色相选择：中性底色 + 语义色只用于判定（PASS/FAIL/REGRESSION/SECURITY），
+   避免"用颜色代替结论"的读图成本。 */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* 判定语义色：pass / fail / warn / info / neutral */
+  --color-pass: var(--pass);
+  --color-fail: var(--fail);
+  --color-warn: var(--warn);
+  --color-info: var(--info);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+}
+
+:root {
+  --background: oklch(0.16 0.012 264);
+  --foreground: oklch(0.96 0.005 264);
+  --card: oklch(0.2 0.014 264);
+  --card-foreground: oklch(0.96 0.005 264);
+  --popover: oklch(0.21 0.014 264);
+  --popover-foreground: oklch(0.96 0.005 264);
+  --primary: oklch(0.71 0.16 250);
+  --primary-foreground: oklch(0.16 0.012 264);
+  --secondary: oklch(0.27 0.016 264);
+  --secondary-foreground: oklch(0.94 0.005 264);
+  --muted: oklch(0.25 0.014 264);
+  --muted-foreground: oklch(0.7 0.015 264);
+  --accent: oklch(0.3 0.02 264);
+  --accent-foreground: oklch(0.96 0.005 264);
+  --destructive: oklch(0.62 0.2 25);
+  --destructive-foreground: oklch(0.98 0.01 25);
+  --border: oklch(0.3 0.015 264);
+  --input: oklch(0.32 0.015 264);
+  --ring: oklch(0.71 0.16 250);
+
+  --pass: oklch(0.75 0.16 155);
+  --fail: oklch(0.65 0.2 25);
+  --warn: oklch(0.8 0.15 85);
+  --info: oklch(0.72 0.13 235);
+
+  --radius: 0.6rem;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family:
+      ui-sans-serif, system-ui, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    font-feature-settings: "tnum" 1;
+  }
+
+  /* 表格数字对齐：一排指标列如果数字不对齐，横向比较会退化成逐个读 */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 999px;
+  }
+}
