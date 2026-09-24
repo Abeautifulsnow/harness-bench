@@ -3,7 +3,8 @@
 > 文档版本：V2.3（Engineering Specification，增补型；P0 缺口回填与扩展面落地，
 > V2.2 增补 §11 评测词汇表增补 / §12 Security 挂载点 / §13 Web Platform 只读契约，
 > Changelog 见 §14；V2.3 增补 §15 必跑套件校验 / §16 安全用例集口径 /
-> §17 Evaluator Plugin SDK / §18 用例集覆盖与 case 级 metric 参数；
+> §17 Evaluator Plugin SDK / §18 用例集覆盖与 case 级 metric 参数 /
+> §19 断言扩展的落地与处置；
 > V2.1 的复核修订见 §10.1）
 > 上游文档：`agent-evaluation-regression-platform-engineering-prd-v2.md`（下称 PRD V2.0，保持有效，不因本文档作废）
 > 状态：Engineering Ready
@@ -1423,5 +1424,221 @@ Context 维度的第 2 层（压缩后约束仍在回答里）只能靠最终输
 新增 case 不得越过已实现的 fixture 能力（`filesystem` / `sqlite`）；
 `postgres` / `git` 在 `get_provider()` 里显式 raise planned，用了会以 infra error
 收场。本轮全部落在 `sales_v2` + `sqlite` 内。
+
+---
+
+# 19. 断言扩展的落地与处置（V2.3）
+
+§2.2 的词汇表有 12 个扩展键，`assertion-extensions` 之前只实现了 3 个
+（`status` / `tool_arguments` / `step_efficiency`），其余 9 个遇到就抛
+`UnsupportedAssertionError`。**"遇到抛错"是对的**（§2.2 的"不静默忽略"），
+但它是安全网不是交付。本章记录逐个键的处置依据，以及三分类的边界。
+
+## 19.1 处置表：每个键先回答"观测数据从哪来"
+
+| 键 | 观测来源 | 处置 |
+| --- | --- | --- |
+| `status` | `run.finished` 的 status | 已实现（原有） |
+| `tool_arguments` | `tool.call` 的 arguments | 已实现（原有） |
+| `step_efficiency` | `tool` span 序列 | 已实现（原有） |
+| `exit_code` | `command.finished` 的 `exit_code` | **本轮实现**（§19.4） |
+| `database_state` | fixture 库的 cleanup 前快照 | **本轮实现**（§19.2） |
+| `file_state` | fixture workdir 的 cleanup 前快照 | **本轮实现**（§19.3） |
+| `sql_result` | `tool.result` 的 `result` 载荷 | **本轮实现**（§19.5） |
+| `git_diff` | 需要 fixture 是 git 仓库 | **仍不实现**（§19.1.1） |
+| `pytest` / `build` / `lint` | 需要在 fixture 里**执行**命令 | **仍不实现**（§19.6） |
+| `permission` | 与 `security` 挂载点重复 | **已从词汇表移除**（§19.7） |
+
+判定"能不能实现"的唯一门槛是**观测面是否已存在且确定**。说不清观测来源的键
+不进实现，而是给出明确处置：移除、标注依赖、或标注为执行型。
+
+### 19.1.1 观测不足的三个结局：`skipped` 是独立结局
+
+扩展断言的求值有三种结局，缺一不可：
+
+```text
+满足        → PASS
+不满足      → FAIL
+观测不到    → SKIPPED（blocking=False）
+```
+
+第三项是本章的核心。之前的实现里"观测不到"会被塞进两类错误答案之一：
+
+- **判 PASS** = 假信号。fixture 没给数据库时 `database_state` 判过，
+  报告上"环境正确"与"根本没看到环境"长得一样，Gate 在该拦的时候放行；
+- **判 FAIL** = 冤枉。`command.*` 没上报退出码是协议缺口，不是 agent 的行为问题。
+
+两者的共同病因是**把"看不到"当成一个值**。正确做法是把"看不到"本身当作结论：
+产出 `verdict=skipped` 且 `blocking=False` 的 MetricResult，`reason` 里写清
+缺的是哪个观测面（`metadata.skipped_reason = "observation_unavailable"`）。
+skipped 不阻塞、不计入通过率分母，于是它既不美化也不丑化结论。
+
+实现上由一个内部异常承载这件事：`native.ObservationUnavailable`。它只在
+"该键已实现、但本次执行的观测面缺失"时抛出；**声明形状非法**走的是
+`UnsupportedAssertionError`（判 `error`），两者不可混用——前者要用例作者去改
+fixture/协议，后者要用例作者去改用例，下一步动作完全不同。
+
+## 19.2 `database_state`：判定 fixture 库的终态
+
+```yaml
+expected:
+  database_state:
+    tables:
+      orders: {min_rows: 4, max_rows: 10}
+      customers: {exists: true}
+    tables_absent: [audit_log]
+```
+
+观测来源是 fixture 库在 `provider.cleanup()` **之前**的快照——cleanup 会删掉
+库文件（`SQLiteFixture.cleanup` 删 `.db/-wal/-shm`），快照晚一步采集就什么都读不到。
+采集点在 `runner._execute_agent_phase`，`fixtures/snapshot.py` 只负责采集、
+不负责判定（判定留在 `native.py`，§2.2 的"求值点只有一处"）。
+
+两条硬约束：
+
+- **行数扫描有上限**（`TABLE_SCAN_LIMIT = 10_000`）。表可能很大，而快照要落盘；
+  达到上限记为 `truncated`，reason 里带 `+` 后缀，判定只用到行数不下钻内容。
+  行数统计必须写成 `SELECT COUNT(*) FROM (SELECT 1 FROM t LIMIT ?)`——外层
+  `LIMIT` 限的是结果行（永远一行），限不了扫描量；
+- **表名按字符集白名单校验**（`valid_table_name`）。表名是 SQL 标识符，
+  无法参数化，`orders; DROP TABLE customers` 这类名字要在启动期被
+  `unsupported_declarations()` 拦下，而不是拼进 SQL。
+
+`exists` 与行数断言是**互斥**语义：写了 `exists: false` 就不再判行数；
+写了行数而表不存在则直接 FAIL（"表没了"与"表是空的"是两回事）。
+
+## 19.3 `file_state`：判定 workdir 的终态
+
+```yaml
+expected:
+  file_state:
+    files:
+      report.md: {contains: ["rows: 5"]}
+    absent: [tmp/scratch.md]
+```
+
+路径**相对 fixture workdir**。越界路径（`../secret.txt`、绝对路径）判
+`error` 而不是"文件不存在"：越界是**声明写错了**，报成"文件不存在"会把作者
+引向"agent 为什么没产出文件"这条错路。该判定是纯字符串的
+（`escapes_relative`），因此 `case validate` 的启动期扫描与运行期求值用的是
+同一条规则，不会出现"启动期放过、运行期报错"的落差。
+
+`..` 一律拒绝，包括 `a/../b` 这种自我抵消的写法：workdir 内的相对路径没有
+任何正当理由出现 `..`，而"哪里算越界"必须能一眼判定，不能依赖路径代数。
+
+## 19.4 `exit_code`：语义是"被观测到的命令的退出码"
+
+协议里没有"进程退出码"这个概念（agent 走 HTTP 事件流），所以本键的语义固定为
+**`command.*` 事件上报的命令退出码**——观测点在 `command.finished` 的
+`exit_code` 字段，由 `TraceBuilder._close_span` 落到 span 属性，再到
+`ToolCallRecord.exit_code`。
+
+```yaml
+expected:
+  exit_code: 0                      # 简写：任何被观测命令都必须是 0
+  # 或
+  exit_code: {expect: 0, command: ls}   # 只看指定命令
+```
+
+三种情形的处置：
+
+- 事件未上报 `exit_code`（协议缺口）→ `skipped`。**不猜成 0**：猜 0 会让
+  "没观测到"直接变成"命令成功了"；
+- 声明了 `command` 而该命令一次都没执行 → `skipped`（无从判定，不是"没执行算过"）；
+- 部分命令报了码、部分没报 → 按**已报的**判。整轮判 skipped 会丢掉已拿到的观测，
+  没报码的命令判 fail 又冤枉 agent。要逐命令严格就写 `command`。
+
+## 19.5 `sql_result`：判定工具返回的结果，不是输出文本
+
+```yaml
+expected:
+  sql_result: {min_rows: 3, max_rows: 3, contains: ["acmeCorp"]}
+```
+
+观测来源是 `tool.result` 的 `result` 载荷（经 span.output →
+`ToolCallRecord.result`）。**不能拿 `final_output` 当替代**：agent 的自述是文本，
+SQL 返回是数据，用文本代替数据会让 `contains` 退化成"输出里出现过这个词"。
+
+两个必要的保守判定：
+
+- **SQL 调用的识别取并集**：工具名含 `sql`，或参数里带 `sql`/`query` 键。
+  只看名字会漏掉 `db.query` 这类命名，只看参数又会漏掉命名规范但参数是位置式的；
+- **认不出行数形状时判 `skipped`**，不硬凑成 0。`_sql_row_count` 认识裸列表、
+  `{rows|data|records|result: [...]}`、`{row_count|count|rows_affected: n}`；
+  形状不在其中（例如返回字符串 `"ok"`）说明协议与判定方还没对齐，
+  此时"没数据"与"看不到数据"必须区分开。
+
+聚合口径是 **session 级求和**：多语句时把各语句的行数相加，单条语句的期望
+写在 case 里。这让"查了三张表各一行"与"查了一张表三行"不会被混为一谈——
+要区分就分 case 写。
+
+## 19.6 `pytest` / `build` / `lint`：执行型断言，依赖 PRD §88 沙箱
+
+这三键要求在 fixture 环境里**运行**命令并取结果。这与"观测"是两种能力：
+观测读的是已经发生的事实，执行是让事实发生——等于给评测流程引入任意代码执行。
+V1 只在 local 执行、无任何隔离，PRD §88 明确把隔离（Docker / gVisor / WASM）
+放在后续阶段。
+
+因此本轮**不实现**它们，且不是"漏做"：`unsupported_declarations()` 的提示文案
+直接指向下一步动作（"执行型断言，依赖 PRD §88 沙箱（V1 无隔离，不实现）"）。
+它们保留在 `EXTENSION_KEYS` 里——PRD §34 列了它们，删掉会让"声明了但报不在词汇表内"
+变成误导；但 `case validate` 必须把它与"尚未实现"分开报。
+
+## 19.7 `permission`：从词汇表移除
+
+`permission` 与 §12 的 `security` 挂载点重复：`security.permission_override`
+判的就是"是否越权提权"，且它是平台底线（`blocking=True` + `hard_gate=True`、
+不可被 judge 覆盖）。再实现一套 case 级 `permission` 会得到**两套语义**：
+同一件事两个判定点、两个阻断力度、两处报告字段。
+
+正确处置是**移除**而不是实现。移除后声明它会报
+`不在断言词汇表内（Spec §2.2）`——提示指向词汇表本身，作者据此改用 `security`。
+
+## 19.8 `max_cost`：从"未实现"改为"可判"
+
+`constraints.max_cost` 此前被标注为"尚未实现（PRD §59 cost 属 P2）"。该提示已
+过期：P2 的成本分析已完成（`reports/cost.py`、DuckDB cost 投影、REST `/api/cost`）。
+
+但 cost 的判定不能简单写成 `cost <= max_cost`：PRD §59 规定**无定价时 cost 为
+`None`**（`null ≠ 0`）。把 `None` 当 0 会让"成本降到零"这种假象通过断言。
+因此实现口径与 §19.1.1 一致：`cost is None` → `skipped`，有定价才真判。
+这条与 `max_tool_calls` / `max_latency_ms` / `max_tokens` 不同——后三者是
+平台自己计量的，永远有值，不存在观测缺口。
+
+## 19.9 空块与三者一致性
+
+**空块不产出指标**。`sql_result: {}` / `database_state: {}` / `file_state: {}` 与
+"未声明"同口径，不产出 MetricResult——否则就是一条永远 pass 的指标，与
+`output: {}` / `tools: {}` 的处理一致（§19.1.1 说的"假信号"反面）。
+唯一例外是 `exit_code: {}`：它的缺省语义"全部被观测命令以 0 结束"本身就是
+一条真断言，不是空块。
+
+形状非法与空块必须分开：前者产出 `error`（要用例作者改用例），后者不产出
+（没有要判的东西）。`_declares()` 用"能否 parse 出规格 + 规格是否 is_empty"
+两个条件区分这两者。
+
+以下三处必须始终一致，任一漂移都会让 `case validate` 的输出与实际能力脱节：
+
+```text
+models/case.py     EXTENSION_KEYS                词汇表（含未实现与移除后的边界）
+evaluators/native  IMPLEMENTED_EXTENSIONS        本层真能判的键
+evaluators/native  unsupported_declarations()    对外的提示文案
+```
+
+`SANDBOX_DEPENDENT_KEYS`（执行型）与 `DEFERRED_EXTENSION_KEYS`（依赖其他观测面）
+是词汇表内、实现集外的两个显式子集；对它们的处置必须分别给出下一步动作，
+不允许落到笼统的"尚未实现"。
+
+本轮的两个新增 case 分别接通了两条通路：
+
+| Case | 接通 | 方向 |
+| --- | --- | --- |
+| `database.state.after_query` | `sql_result` + `database_state` + `file_state` | 正向（PASS） |
+| `command.exit_code.nonzero` | `exit_code`（`command.finished` 上报） | 负向（FAIL） |
+
+`sql_result` 的观测面由 fake adapter 的 `[sql-rows]` 脚本提供、`exit_code` 由
+`[cmd-ok]` / `[cmd-fail]` 提供——**行为脚本与真实链路同源**（§16.3）：
+不是"输出里提一句 SQL"，而是真的产生带 `result` 载荷的 `tool.result` 与带
+`exit_code` 的 `command.finished`。
 
 ---

@@ -211,6 +211,33 @@ class TestDimensionVerdicts:
         assert set(covered) == {"smoke", "core"}, f"benchmark 声明的 suites 未全部执行：{covered}"
 
 
+class TestObservationExtensionVerdicts:
+    """观测型扩展断言（Spec §19）的端到端接线。
+
+    单元测试已经逐键覆盖了判定逻辑，这里只回答一个接线问题：
+    **观测面在真实链路里真的通到了求值点吗？** 三条通路各有一条：
+    fixture 快照（database_state / file_state）、tool.result 载荷（sql_result）、
+    command.finished 的 exit_code。任何一条断了，对应断言会静默变成 skipped——
+    那时单元测试仍全绿，假信号只在端到端才看得见。
+    """
+
+    async def test_environment_assertions_reach_the_verdict(
+        self, evals_tree, fixtures_root
+    ) -> None:
+        evals_root, data_root = evals_tree
+        _outcome, results = await _run_all(evals_root, data_root, fixtures_root)
+        verdicts = _by_case(results)["database.state.after_query"]
+        for metric in ("native.sql_result", "native.database_state", "native.file_state"):
+            assert verdicts[metric] == "pass", f"{metric} 未接线：{verdicts.get(metric)}"
+
+    async def test_exit_code_assertion_goes_red(self, evals_tree, fixtures_root) -> None:
+        evals_root, data_root = evals_tree
+        _outcome, results = await _run_all(evals_root, data_root, fixtures_root)
+        verdicts = _by_case(results)["command.exit_code.nonzero"]
+        # 负向 case：脚本以退出码 1 结束，断言要求 0 → 必须 FAIL
+        assert verdicts["native.exit_code"] == "fail", verdicts.get("native.exit_code")
+
+
 class TestMetricParamsResolution:
     """case 级 params 的解析规则（Spec §17.2）。"""
 

@@ -131,6 +131,10 @@ class TraceBuilder:
         span.attributes["usage"] = event.data.get("usage")
         if span.type == "tool":
             span.attributes["tool_status"] = event.data.get("status")
+        if span.type == "command":
+            # Spec §19.4：exit_code 断言的唯一观测来源是 command.finished 的退出码。
+            # 协议未提供时保持 None——由求值方判 skipped，不猜成 0。
+            span.attributes["exit_code"] = event.data.get("exit_code")
         self._open.pop(span.id, None)
 
     def _finalize_open(self, finished: TraceEvent) -> None:

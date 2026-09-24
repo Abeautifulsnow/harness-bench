@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -15,10 +16,16 @@ from jsonschema import ValidationError
 from jsonschema import validate as jsonschema_validate
 
 from agent_eval.errors import UnsupportedAssertionError
+from agent_eval.fixtures.snapshot import EnvironmentSnapshot, escapes_relative, valid_table_name
 from agent_eval.ids import new_id
 from agent_eval.models.case import (
     EXTENSION_KEYS,
+    SANDBOX_DEPENDENT_KEYS,
     Assertion,
+    DatabaseStateAssertion,
+    ExitCodeAssertion,
+    FileStateAssertion,
+    SqlResultAssertion,
     StepEfficiencyAssertion,
     ToolArgumentMatcher,
     argument_path,
@@ -28,9 +35,27 @@ from agent_eval.models.results import MetricResultModel, ToolCallRecord
 # Case 级扩展断言中本层已实现的部分。
 # 未列出的词汇（无论是否在 Spec 词汇表内）一律 fail-fast，而不是静默接受后失效：
 # 声明了却永不生效的断言与"永不失败的断言"都会污染 Gate 结论。
-IMPLEMENTED_EXTENSIONS = {"status", "tool_arguments", "step_efficiency"}
-# Spec §2.2 词汇表内、但尚未实现的扩展（观察量无来源或未定义语义）
+IMPLEMENTED_EXTENSIONS = {
+    "status",
+    "exit_code",
+    "database_state",
+    "file_state",
+    "sql_result",
+    "tool_arguments",
+    "step_efficiency",
+}
+# Spec §2.2 词汇表内、但本层不实现的扩展：执行型（依赖 PRD §88 沙箱）与
+# 依赖别的任务观测面的键（Spec §19.1 的处置表）。
 KNOWN_EXTENSIONS = EXTENSION_KEYS - IMPLEMENTED_EXTENSIONS
+
+
+class ObservationUnavailable(Exception):
+    """观测面不足以判定（Spec §19.1）。
+
+    这不是失败也不是通过：fixture 没提供数据库、命令没上报退出码、
+    agent 从没调用过 SQL 工具——这些情况下"判 pass"是假信号，"判 fail"是冤枉。
+    统一处置为 ``skipped``，并在 reason 里说明缺的是哪个观测面。
+    """
 
 
 @dataclass
@@ -43,6 +68,10 @@ class EvalScope:
     ``mcp_calls`` / ``command_calls`` 与 ``tool_calls`` 并列：Spec §12.1 的安全规则
     分别消费 MCP 调用名与 command.* 事件的可执行名，它们不以 ToolCallRecord 形式
     出现（span type 分别是 mcp / command），漏掉会让对应规则恒 pass。
+
+    ``environment`` 是执行结束后的环境事实（Spec §19）：``database_state`` /
+    ``file_state`` 判定的是"环境变成了什么样"，不是 agent 说了什么。它由 fixture
+    层提供，缺省 None = 观测不足（判 skipped，不判 pass）。
     """
 
     run_status: str  # success | error | timeout
@@ -52,6 +81,10 @@ class EvalScope:
     command_calls: list[ToolCallRecord] = field(default_factory=list)
     latency_ms: int = 0
     tokens: int = 0
+    # PRD §59：无定价时 cost 为 None，不是 0.0。max_cost 因此只在 cost is not None
+    # 时可判；缺定价的 run 判 skipped（而不是"0 <= max_cost → pass"）。
+    cost: float | None = None
+    environment: EnvironmentSnapshot | None = None
 
 
 def _result(
@@ -127,10 +160,14 @@ def _check_constraints(assertion: Assertion, scope: EvalScope) -> list[str]:
     if limits.is_empty():
         return problems
     if limits.max_cost is not None:
-        raise UnsupportedAssertionError(
-            "constraints.max_cost is not implemented by the P0 native evaluator "
-            "(PRD §59 cost 属 P2；P0 不计算成本，无法观测)"
-        )
+        # PRD §59：无定价时 cost 为 None。把 None 当 0 会让"成本降到零"这种假象
+        # 通过 max_cost 断言，所以这里判 skipped 而不是 pass（Spec §19.1）。
+        if scope.cost is None:
+            raise ObservationUnavailable(
+                "constraints.max_cost 无法评测：本次 run 无定价表，cost 未计算（PRD §59）"
+            )
+        if scope.cost > limits.max_cost:
+            problems.append(f"cost {scope.cost} > max_cost {limits.max_cost}")
     if limits.max_tool_calls is not None and len(scope.tool_calls) > limits.max_tool_calls:
         problems.append(
             f"tool calls {len(scope.tool_calls)} > max_tool_calls {limits.max_tool_calls}"
@@ -153,6 +190,240 @@ def _check_extensions(assertion: Assertion, scope: EvalScope) -> list[str]:
         expected_status = str(assertion.extensions["status"])
         if scope.run_status != expected_status:
             problems.append(f"run status {scope.run_status!r} != expected {expected_status!r}")
+    return problems
+
+
+def parse_database_state(assertion: Assertion) -> DatabaseStateAssertion | None:
+    raw = assertion.extensions.get("database_state")
+    if raw is None:
+        return None
+    try:
+        return DatabaseStateAssertion.model_validate(raw)
+    except Exception:
+        return None
+
+
+def _check_database_state(assertion: Assertion, scope: EvalScope) -> list[str]:
+    """``database_state``（Spec §19.2）：判定执行结束后的 fixture 库，不是输出文本。"""
+    spec = parse_database_state(assertion)
+    if spec is None:
+        raise UnsupportedAssertionError(
+            "database_state must be a mapping {tables: {name: {...}}, tables_absent: [...]} "
+            "(Spec §19.2)"
+        )
+    for name in [*spec.tables, *spec.tables_absent]:
+        if not valid_table_name(name):
+            raise UnsupportedAssertionError(f"database_state: 非法表名 {name!r}")
+    if scope.environment is None:
+        raise ObservationUnavailable("database_state 无法评测：本次执行没有可读的环境快照")
+    problems: list[str] = []
+    for name, expectation in spec.tables.items():
+        state = scope.environment.table(name)
+        if state is None:
+            raise ObservationUnavailable(
+                "database_state 无法评测：fixture 未提供数据库（仅 sqlite fixture 支持）"
+            )
+        if expectation.exists is True and not state.exists:
+            problems.append(f"table '{name}' expected to exist but does not")
+            continue
+        if expectation.exists is False:
+            if state.exists:
+                problems.append(f"table '{name}' expected to be absent but exists")
+            continue
+        if not state.exists:
+            problems.append(f"table '{name}' does not exist (row-count assertion)")
+            continue
+        rows = state.rows or 0
+        suffix = "+" if state.truncated else ""
+        if expectation.min_rows is not None and rows < expectation.min_rows:
+            problems.append(f"table '{name}' rows {rows}{suffix} < min_rows {expectation.min_rows}")
+        if expectation.max_rows is not None and rows > expectation.max_rows:
+            problems.append(f"table '{name}' rows {rows}{suffix} > max_rows {expectation.max_rows}")
+    for name in spec.tables_absent:
+        state = scope.environment.table(name)
+        if state is None:
+            raise ObservationUnavailable(
+                "database_state 无法评测：fixture 未提供数据库（仅 sqlite fixture 支持）"
+            )
+        if state.exists:
+            problems.append(f"table '{name}' expected to be absent but exists")
+    return problems
+
+
+def parse_file_state(assertion: Assertion) -> FileStateAssertion | None:
+    raw = assertion.extensions.get("file_state")
+    if raw is None:
+        return None
+    try:
+        return FileStateAssertion.model_validate(raw)
+    except Exception:
+        return None
+
+
+def _check_file_state(assertion: Assertion, scope: EvalScope) -> list[str]:
+    """``file_state``（Spec §19.3）：路径相对 fixture workdir。"""
+    spec = parse_file_state(assertion)
+    if spec is None:
+        raise UnsupportedAssertionError(
+            "file_state must be a mapping {files: {path: {...}}, absent: [...]} (Spec §19.3)"
+        )
+    if scope.environment is None:
+        raise ObservationUnavailable("file_state 无法评测：本次执行没有工作目录快照")
+    problems: list[str] = []
+    for path in [*spec.files, *spec.absent]:
+        if escapes_relative(path):
+            raise UnsupportedAssertionError(
+                f"file_state: 路径 {path!r} 越出 fixture workdir（声明非法，Spec §19.3）"
+            )
+    for path, expectation in spec.files.items():
+        exists = scope.environment.file_exists(path)
+        if exists is None:
+            raise ObservationUnavailable("file_state 无法评测：fixture 未提供工作目录")
+        if expectation.exists is False:
+            if exists:
+                problems.append(f"file '{path}' expected to be absent but exists")
+            continue
+        if not exists:
+            problems.append(f"file '{path}' does not exist")
+            continue
+        if not expectation.contains and not expectation.not_contains:
+            continue
+        text = scope.environment.file_text(path)
+        if text is None:
+            raise ObservationUnavailable(f"file_state: file '{path}' 存在但无法读取")
+        for needle in expectation.contains:
+            if needle not in text:
+                problems.append(f"file '{path}' missing expected substring {needle!r}")
+        for needle in expectation.not_contains:
+            if needle in text:
+                problems.append(f"file '{path}' contains forbidden substring {needle!r}")
+    for path in spec.absent:
+        exists = scope.environment.file_exists(path)
+        if exists is None:
+            raise ObservationUnavailable("file_state 无法评测：fixture 未提供工作目录")
+        if exists:
+            problems.append(f"file '{path}' expected to be absent but exists")
+    return problems
+
+
+def parse_exit_code(assertion: Assertion) -> ExitCodeAssertion | None:
+    raw = assertion.extensions.get("exit_code")
+    if raw is None:
+        return None
+    try:
+        if isinstance(raw, int):  # 简写：`exit_code: 0`
+            return ExitCodeAssertion(expect=int(raw))
+        return ExitCodeAssertion.model_validate(raw)
+    except Exception:
+        return None
+
+
+def _check_exit_code(assertion: Assertion, scope: EvalScope) -> list[str]:
+    """``exit_code``（Spec §19.4）：判定"被观测到的命令"的退出码。
+
+    协议没有进程退出码这个概念（agent 走事件流），所以语义固定为命令退出码。
+    ``command.*`` 事件未上报退出码时判 skipped——那是观测不足，不是"命令成功了"。
+
+    部分观测（有的命令报了码、有的没报）按已报的判：没报码是协议缺口，不是
+    agent 的行为问题，判 fail 会冤枉它；整轮判 skipped 又会丢掉已经拿到的观测。
+    想要逐命令严格，就在声明里写上 ``command``——那时"命令未执行"本身即 skipped。
+    """
+    spec = parse_exit_code(assertion)
+    if spec is None:
+        raise UnsupportedAssertionError(
+            "exit_code must be an int or a mapping {expect: int, command?: str} (Spec §19.4)"
+        )
+    calls = scope.command_calls
+    if spec.command is not None:
+        calls = [call for call in calls if call.name == spec.command]
+        if not calls:
+            # 指定命令一次都没执行：这条断言无从判定（不是"没执行就算过"）
+            raise ObservationUnavailable(
+                f"exit_code 无法评测：命令 '{spec.command}' 未被执行（无退出码可观测）"
+            )
+    reported = [call for call in calls if call.exit_code is not None]
+    if not reported:
+        raise ObservationUnavailable(
+            "exit_code 无法评测：command.* 事件未上报退出码（协议未提供该字段）"
+        )
+    return [
+        f"command '{call.name}' exit_code {call.exit_code} != expected {spec.expect}"
+        for call in reported
+        if call.exit_code != spec.expect
+    ]
+
+
+def parse_sql_result(assertion: Assertion) -> SqlResultAssertion | None:
+    raw = assertion.extensions.get("sql_result")
+    if raw is None:
+        return None
+    try:
+        return SqlResultAssertion.model_validate(raw)
+    except Exception:
+        return None
+
+
+def _sql_row_count(result: object) -> int | None:
+    """从 SQL 工具返回里认出"行数"：行列表 / {rows: [...]} / {row_count: n}。"""
+    if isinstance(result, list):
+        return len(result)
+    if isinstance(result, dict):
+        for key in ("rows", "data", "records", "result"):
+            value = result.get(key)
+            if isinstance(value, list):
+                return len(value)
+        for key in ("row_count", "count", "rows_affected"):
+            value = result.get(key)
+            if isinstance(value, int):
+                return value
+    return None
+
+
+def _sql_calls(scope: EvalScope) -> list[ToolCallRecord]:
+    """认出 SQL 工具的调用：名字含 sql，或参数里带 sql/query 键。
+
+    只用"有返回值"当判据会把任何返回 list 的工具都当成 SQL 工具，
+    只用 name 会把 `db.query` 这类命名漏掉——两条判据取并集。
+    """
+    return [
+        call
+        for call in scope.tool_calls
+        if call.result is not None
+        and ("sql" in call.name.lower() or {"sql", "query"} & set(call.arguments))
+    ]
+
+
+def _check_sql_result(assertion: Assertion, scope: EvalScope) -> list[str]:
+    """``sql_result``（Spec §19.5）：判定 SQL 工具的返回结果，不是输出文本。"""
+    spec = parse_sql_result(assertion)
+    if spec is None:
+        raise UnsupportedAssertionError(
+            "sql_result must be a mapping {min_rows?, max_rows?, contains?} (Spec §19.5)"
+        )
+    sql_calls = _sql_calls(scope)
+    if not sql_calls:
+        raise ObservationUnavailable("sql_result 无法评测：没有带返回结果的 SQL 工具调用可观测")
+    problems: list[str] = []
+    rows = [_sql_row_count(call.result) for call in sql_calls]
+    known = [value for value in rows if value is not None]
+    if spec.min_rows is not None or spec.max_rows is not None:
+        if not known:
+            raise ObservationUnavailable(
+                "sql_result 无法评测：工具返回结果里认不出行数（形状未知）"
+            )
+        # 多语句取跨语句总和：单条语句的期望写在 case 里，聚合口径是 session
+        total = sum(known)
+        if spec.min_rows is not None and total < spec.min_rows:
+            problems.append(f"sql result rows {total} < min_rows {spec.min_rows}")
+        if spec.max_rows is not None and total > spec.max_rows:
+            problems.append(f"sql result rows {total} > max_rows {spec.max_rows}")
+    if spec.contains:
+        serialized = [
+            json.dumps(call.result, ensure_ascii=False, default=str) for call in sql_calls
+        ]
+        for needle in spec.contains:
+            if not any(needle in text for text in serialized):
+                problems.append(f"sql result missing expected substring {needle!r}")
     return problems
 
 
@@ -250,28 +521,39 @@ def step_ratio(assertion: Assertion, scope: EvalScope) -> float:
     return round(min(1.0, baseline / actual), 6)
 
 
-def _has_extensions(assertion: Assertion) -> bool:
-    for key in assertion.extensions:
-        if key not in IMPLEMENTED_EXTENSIONS:
-            raise UnsupportedAssertionError(
-                f"assertion extension '{key}' is outside the implemented surface"
-            )
-    return bool(assertion.extensions)
+def _needs_status_group(assertion: Assertion) -> bool:
+    """``native.status`` 组的声明条件：声明了 ``status``，或出现了本层不实现的键。
+
+    只在两者之一成立时产出。`database_state` 这类**已实现**的扩展有自己的组，
+    让 native.status 陪跑只会多出一条永远 pass 的指标——那是假覆盖（Spec §19.1）。
+
+    但词汇表外的键（未知键 / git_diff / 执行型键）必须落在这里报 error：
+    `_GROUPS` 里它们没有别的组可归属，取消这条就会把"看不懂的声明"静默吞掉。
+    """
+    if "status" in assertion.extensions:
+        return True
+    return any(key not in IMPLEMENTED_EXTENSIONS for key in assertion.extensions)
 
 
 def unsupported_declarations(assertion: Assertion, mount: str) -> list[str]:
     """列出该挂载点上无法评测的声明（启动期 fail-fast 的输入，Spec §2.2）。
 
-    区分两类，便于报错信息可执行：
-      - 词汇表内但未实现（如 exit_code / max_cost）→ 明确说明"未实现"
-      - 完全不在词汇表内 → 说明违反 Spec §2.2
+    报错要可执行：不说"尚未实现"，而是说清**下一步动作**——
+      1. 执行型键（pytest / build / lint）→ 依赖 PRD §88 沙箱，是设计选择不是漏做；
+      2. 依赖别的观测面的键（git_diff）→ 指出依赖哪个任务；
+      3. 形状非法（tool_arguments / step_efficiency / database_state / file_state /
+         sql_result / exit_code）→ 给出正确形状，不静默接受后失效。
     """
     problems: list[str] = []
     for key in assertion.extensions:
         if key in IMPLEMENTED_EXTENSIONS:
             continue
-        if key in KNOWN_EXTENSIONS:
-            problems.append(f"{mount}.{key}: 在词汇表内但尚未实现")
+        if key in SANDBOX_DEPENDENT_KEYS:
+            problems.append(
+                f"{mount}.{key}: 执行型断言，依赖 PRD §88 沙箱（V1 无隔离，不实现）——Spec §19.6"
+            )
+        elif key in KNOWN_EXTENSIONS:
+            problems.append(f"{mount}.{key}: 尚未实现（观测面依赖其他任务，Spec §19.1）")
         else:
             problems.append(f"{mount}.{key}: 不在断言词汇表内（Spec §2.2）")
     if parse_tool_arguments(assertion) is None and "tool_arguments" in assertion.extensions:
@@ -281,8 +563,39 @@ def unsupported_declarations(assertion: Assertion, mount: str) -> list[str]:
             f"{mount}.step_efficiency: 形状非法，应为 "
             "{baseline_steps: int, max_ratio_delta?: float}"
         )
-    if assertion.constraints.max_cost is not None:
-        problems.append(f"{mount}.constraints.max_cost: 尚未实现（PRD §59 cost 属 P2）")
+    if parse_database_state(assertion) is None and "database_state" in assertion.extensions:
+        problems.append(
+            f"{mount}.database_state: 形状非法，应为 "
+            "{tables: {name: {min_rows?/max_rows?/exists?}}, tables_absent?: [name]}"
+        )
+    if parse_file_state(assertion) is None and "file_state" in assertion.extensions:
+        problems.append(
+            f"{mount}.file_state: 形状非法，应为 "
+            "{files: {path: {exists?/contains?/not_contains?}}, absent?: [path]}"
+        )
+    if parse_exit_code(assertion) is None and "exit_code" in assertion.extensions:
+        problems.append(f"{mount}.exit_code: 形状非法，应为 int 或 {{expect: int, command?: str}}")
+    if parse_sql_result(assertion) is None and "sql_result" in assertion.extensions:
+        problems.append(
+            f"{mount}.sql_result: 形状非法，应为 "
+            "{min_rows?: int, max_rows?: int, contains?: [str]}"
+        )
+    if "database_state" in assertion.extensions:
+        spec = parse_database_state(assertion)
+        if spec is not None:
+            problems.extend(
+                f"{mount}.database_state: 非法表名 {name!r}"
+                for name in [*spec.tables, *spec.tables_absent]
+                if not valid_table_name(name)
+            )
+    if "file_state" in assertion.extensions:
+        spec = parse_file_state(assertion)
+        if spec is not None:
+            problems.extend(
+                f"{mount}.file_state: 路径 {path!r} 越出 fixture workdir（Spec §19.3）"
+                for path in [*spec.files, *spec.absent]
+                if escapes_relative(path)
+            )
     return problems
 
 
@@ -304,13 +617,44 @@ def synthesize_platform_verdicts(scope: EvalScope, case_run_id: str) -> list[Met
     ]
 
 
+def _declares(key: str, parser: Callable[[Assertion], Any]) -> Callable[[Assertion], bool]:
+    """扩展键的声明条件：声明了该键，且**不是空块**。
+
+    空块（`sql_result: {}`）与未声明同口径——`output: {}` / `tools: {}` 一直是
+    这个处理方式：不产出 metric，于是也不会产出"永远 pass"的指标（Spec §19.1）。
+
+    形状非法时仍要产出：那里必须报 error，不能与"没声明"合并
+    （Spec §19.3 的"声明写错了"与"没声明"是两件事）。
+    """
+
+    def predicate(assertion: Assertion) -> bool:
+        if key not in assertion.extensions:
+            return False
+        spec = parser(assertion)
+        if spec is None:
+            return True  # 交给 checker 报 error
+        return not spec.is_empty()
+
+    return predicate
+
+
 _GROUPS = (
-    ("native.status", _has_extensions, _check_extensions),
+    ("native.status", _needs_status_group, _check_extensions),
     ("native.output_checks", lambda a: not a.output.is_empty(), _check_output),
     ("native.tool_sequence", lambda a: not a.tools.is_empty(), _check_tools),
     ("native.argument_checks", lambda a: "tool_arguments" in a.extensions, _check_tool_arguments),
     ("native.performance", lambda a: not a.constraints.is_empty(), _check_constraints),
     ("native.step_ratio", lambda a: "step_efficiency" in a.extensions, _check_step_ratio),
+    ("native.sql_result", _declares("sql_result", parse_sql_result), _check_sql_result),
+    (
+        "native.database_state",
+        _declares("database_state", parse_database_state),
+        _check_database_state,
+    ),
+    ("native.file_state", _declares("file_state", parse_file_state), _check_file_state),
+    # exit_code 没有"空块"形态：`exit_code: {}` 就是 expect=0（缺省全部命令以 0 结束），
+    # 是一条真断言，不该被当成空块丢掉。
+    ("native.exit_code", lambda a: "exit_code" in a.extensions, _check_exit_code),
 )
 
 
@@ -326,6 +670,10 @@ def evaluate_assertions(
 
     每个声明了检查的组产出一条 MetricResult（组内全过 → pass）；
     未声明任何检查的组不产出，避免空断言刷分。
+
+    观测不足（``ObservationUnavailable``）判 ``skipped`` 且 blocking=False：
+    它既不是通过也不是失败，进不了 ``blocking_failed``——把"看不到"当成
+    "没问题"会让 Gate 在该拦的时候放行（Spec §19.1）。
     """
     results: list[MetricResultModel] = []
     extra_meta: dict[str, Any] = {}
@@ -338,6 +686,18 @@ def evaluate_assertions(
             if not declared(assertion):
                 continue
             problems = checker(assertion, scope)
+        except ObservationUnavailable as exc:
+            results.append(
+                _result(
+                    case_run_id,
+                    metric_id,
+                    "skipped",
+                    str(exc),
+                    metadata={**extra_meta, "skipped_reason": "observation_unavailable"},
+                    blocking=False,
+                )
+            )
+            continue
         except UnsupportedAssertionError as exc:
             results.append(
                 _result(case_run_id, metric_id, "error", str(exc), metadata=dict(extra_meta))

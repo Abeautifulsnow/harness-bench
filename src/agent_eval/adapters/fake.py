@@ -9,6 +9,8 @@
   - ``[subagent]``  → 额外产生 subagent.started/finished + 内部工具调用
   - ``30 天``       → 输出带过滤说明
   - ``[sec-*]``     → PRD §62/§63 的安全/红队行为（见 SECURITY_RULES）
+  - ``[sql-rows]`` / ``[cmd-ok]`` / ``[cmd-fail]``
+                    → Spec §19 观测型断言的观测面（工具返回值 / 命令退出码）
 
 测试可通过 rules= 注入自定义 ScriptTurn。
 """
@@ -43,6 +45,13 @@ class ScriptTurn:
     mcp: list[str] = field(default_factory=list)
     # command.* 事件的可执行名（这类行为不产生 ToolCallRecord）
     commands: list[str] = field(default_factory=list)
+    # command.finished 上报的退出码（Spec §19.4：exit_code 断言只认这个来源）
+    command_exit_code: int = 0
+    # tool.result 的 result 载荷。缺省 None = 协议不给返回值，那条调用在
+    # `sql_result` 眼里不进候选集（没有"查到了什么"可判）；带了形状不认识的
+    # 载荷（例如字符串）则进候选集但判 skipped（Spec §19.5）。
+    # 注意：真的返回 `None` 的载荷与"没给"在事件层不可区分，两者都落 skipped。
+    tool_result: object = None
     # 子 Agent 容器：容器内调用 subagent_tools（PRD §10 span tree）
     subagent: str | None = None
     subagent_tools: list[str] = field(default_factory=list)
@@ -150,6 +159,20 @@ def default_rules() -> dict[str, ScriptTurn]:
         "[retry-exhausted]": ScriptTurn(retries=3, fail=True),
         # Error Recovery：单轮超时（sleep 远超 execution.timeout）
         "[slow]": ScriptTurn(sleep_s=3.0),
+        # --- 观测型断言（Spec §19）用的行为脚本 ------------------------------
+        # SQL 工具带回结果：`sql_result` 断言的观测面（tool.result 的 result 字段）。
+        # 三行聚合结果与 fixtures/sales_v2 的种子数据同源，行数与内容都可核对。
+        "[sql-rows]": ScriptTurn(
+            tools=["execute_sql"],
+            tool_result=[
+                {"customer_id": 1, "name": "acmeCorp", "total": 20000.0},
+                {"customer_id": 2, "name": "globex", "total": 9500.0},
+                {"customer_id": 3, "name": "initech", "total": 4300.0},
+            ],
+        ),
+        # 命令退出码：`exit_code` 断言的观测面（command.finished 的 exit_code 字段）
+        "[cmd-ok]": ScriptTurn(commands=["ls"], command_exit_code=0),
+        "[cmd-fail]": ScriptTurn(commands=["ls"], command_exit_code=1),
         # 自然语言触发词放最后：显式标记必须能覆盖它
         "30 天": ScriptTurn(output=BASE_OUTPUT + "（已按最近 30 天过滤）"),
         **SECURITY_RULES,
@@ -184,14 +207,10 @@ def turn_events(message: str, script: ScriptTurn, trace_id: str) -> list[TraceEv
             {"name": name, "arguments": script.tool_arguments.get(name) or {"query": message[:32]}},
         )
         events.append(call)
-        events.append(
-            _event(
-                trace_id,
-                call.event_id,
-                "tool.result",
-                {"status": "error" if script.tool_error else "ok"},
-            )
-        )
+        payload: dict = {"status": "error" if script.tool_error else "ok"}
+        if script.tool_result is not None:
+            payload["result"] = script.tool_result
+        events.append(_event(trace_id, call.event_id, "tool.result", payload))
 
     if script.subagent is not None:
         sub = _event(trace_id, agent_span, "subagent.started", {"name": script.subagent})
@@ -229,7 +248,14 @@ def turn_events(message: str, script: ScriptTurn, trace_id: str) -> list[TraceEv
             {"name": command, "arguments": {"command": command}},
         )
         events.append(started)
-        events.append(_event(trace_id, started.event_id, "command.finished", {"status": "ok"}))
+        events.append(
+            _event(
+                trace_id,
+                started.event_id,
+                "command.finished",
+                {"status": "ok", "exit_code": script.command_exit_code},
+            )
+        )
 
     llm_span = _event(trace_id, agent_span, "model.request", {"model": "fake-model"})
     events.append(llm_span)

@@ -45,6 +45,7 @@ from agent_eval.evaluators.registry import (
     scan_unsupported_assertions,
 )
 from agent_eval.fixtures.base import FixtureHandle, get_provider
+from agent_eval.fixtures.snapshot import EnvironmentSnapshot, snapshot_from_handle
 from agent_eval.ids import new_id
 from agent_eval.loading.loader import (
     load_benchmark,
@@ -520,7 +521,14 @@ class Runner:
                 self.store.append_events(key, session_events)
                 result.trace_path = str(self.store.run_dir / "traces" / f"{key}.events.jsonl")  # type: ignore[union-attr]
 
-            scope = _session_scope(run_status, turn_results)
+            # Spec §19：环境快照必须在 provider.cleanup 之前采集（finally 会清理
+            # 库文件与工作目录）。它服务 database_state / file_state 两类断言——
+            # 那两条判的是"环境变成了什么样"，不是 agent 说了什么。
+            scope = _session_scope(
+                run_status,
+                turn_results,
+                environment=snapshot_from_handle(handle) if handle is not None else None,
+            )
             self._evaluate_session(case, scope, turn_results, result)
             if run_status != "success":
                 result.failure_semantics = FailureSemantics.AGENT
@@ -813,6 +821,10 @@ class Runner:
                 name=span.name,
                 arguments=span.input if isinstance(span.input, dict) else {},
                 status=span.attributes.get("tool_status"),
+                # Spec §19.5：sql_result 断言判定的是"查到了什么"——工具的返回
+                # payload 落在 span.output（tool.result 的 result/text）。不采集它
+                # 就只能看 agent 的自述输出，那是文本不是结果。
+                result=span.output,
             )
             for span in tree.find("tool")
         ]
@@ -824,7 +836,10 @@ class Runner:
             )
             for span in tree.find("mcp")
         ]
-        command_calls = [ToolCallRecord(name=span.name) for span in tree.find("command")]
+        command_calls = [
+            ToolCallRecord(name=span.name, exit_code=span.attributes.get("exit_code"))
+            for span in tree.find("command")
+        ]
         usage = tree.usage_totals()
         turn = TurnResult(
             index=index,
@@ -991,8 +1006,14 @@ def _new_case_run(case: Case, iteration: int, run_id: str) -> CaseRunResult:
     )
 
 
-def _session_scope(run_status: str, turn_results: list[TurnResult]) -> EvalScope:
+def _session_scope(
+    run_status: str,
+    turn_results: list[TurnResult],
+    *,
+    environment: EnvironmentSnapshot | None = None,
+) -> EvalScope:
     """session 聚合口径（Spec §2.4）：output=最终轮，其余按 session 总量。"""
+    costs = [turn.cost for turn in turn_results if turn.cost is not None]
     return EvalScope(
         run_status=run_status,
         final_output=turn_results[-1].output if turn_results else None,
@@ -1001,6 +1022,10 @@ def _session_scope(run_status: str, turn_results: list[TurnResult]) -> EvalScope
         command_calls=[call for turn in turn_results for call in turn.command_calls],
         latency_ms=sum(turn.latency_ms for turn in turn_results),
         tokens=sum(turn.tokens for turn in turn_results),
+        # PRD §59：一个 turn 有定价就说明整轮有定价；全为 None 时保持 None
+        # （不是 0.0）——max_cost 断言靠这个区分"没有定价"与"成本为零"。
+        cost=round(sum(costs), 10) if costs else None,
+        environment=environment,
     )
 
 

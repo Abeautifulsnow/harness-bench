@@ -30,11 +30,19 @@ EXTENSION_KEYS = frozenset(
         "build",
         "lint",
         "sql_result",
-        "permission",
         "tool_arguments",
         "step_efficiency",
     }
 )
+
+# 词汇表内但明确不实现（执行型断言）：Spec §19。
+# 它们要在 fixture 里**运行**命令并取结果，等于给评测流程引入任意代码执行，
+# 与 PRD §88 的沙箱规划直接冲突（V1 只在 local 执行、无隔离）。
+# 保留在词汇表里是因为 PRD §34 列了它们；但 `case validate` 必须报"依赖沙箱"，
+# 而不是笼统的"尚未实现"——前者的下一步动作是明确的。
+SANDBOX_DEPENDENT_KEYS = frozenset({"pytest", "build", "lint"})
+# 依赖别的任务的观测面（Spec §19.1 的处置表）
+DEFERRED_EXTENSION_KEYS = frozenset({"git_diff"})
 
 
 class OutputAssertion(BaseModel):
@@ -146,6 +154,87 @@ class StepEfficiencyAssertion(BaseModel):
 
     def limit(self) -> float:
         return self.baseline_steps * (1.0 + self.max_ratio_delta)
+
+
+class TableExpectation(BaseModel):
+    """单表期望（Spec §19.2，扩展键 ``database_state``）。三者可并用，是 AND。"""
+
+    model_config = {"extra": "forbid"}
+
+    min_rows: int | None = None
+    max_rows: int | None = None
+    exists: bool | None = None  # None = 只判行数，不要求存在性
+
+
+class DatabaseStateAssertion(BaseModel):
+    """``database_state`` 扩展（Spec §19.2）。
+
+    判定对象是**执行结束后的 fixture 库**，不是 agent 的输出：agent 说"已清理"
+    与表真的空了是两件事，这条断言只认后者。观测来源是 fixture handle 的
+    ``db_path``——只有 sqlite fixture 提供，其余环境判 skipped（不判 pass）。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    tables: dict[str, TableExpectation] = Field(default_factory=dict)
+    tables_absent: list[str] = Field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return not self.tables and not self.tables_absent
+
+
+class FileExpectation(BaseModel):
+    """单文件期望（Spec §19.3，扩展键 ``file_state``）。"""
+
+    model_config = {"extra": "forbid"}
+
+    exists: bool | None = None
+    contains: list[str] = Field(default_factory=list)
+    not_contains: list[str] = Field(default_factory=list)
+
+
+class FileStateAssertion(BaseModel):
+    """``file_state`` 扩展（Spec §19.3）。路径相对 fixture workdir，越界即报错。"""
+
+    model_config = {"extra": "forbid"}
+
+    files: dict[str, FileExpectation] = Field(default_factory=dict)
+    absent: list[str] = Field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return not self.files and not self.absent
+
+
+class ExitCodeAssertion(BaseModel):
+    """``exit_code`` 扩展（Spec §19.4）。
+
+    语义固定为"**被观测到的命令**的退出码"，不是"agent 进程的退出码"——
+    Agent 走事件协议，没有进程退出码这个东西。缺省要求全部命令以 0 结束：
+    忽略了失败命令的 agent 是最常见的退化路径。``command`` 只看指定可执行名。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    expect: int = 0
+    command: str | None = None
+
+
+class SqlResultAssertion(BaseModel):
+    """``sql_result`` 扩展（Spec §19.5）。
+
+    判定对象是 SQL 工具的**返回结果**（``tool.result`` 的 payload），不是输出文本。
+    能判的行数/内容都必须能在不引入语义判断的前提下算出来；结果形状无法识别时
+    判 skipped（观测不足），不判 pass。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    min_rows: int | None = None
+    max_rows: int | None = None
+    contains: list[str] = Field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return self.min_rows is None and self.max_rows is None and not self.contains
 
 
 class SecurityAssertion(BaseModel):

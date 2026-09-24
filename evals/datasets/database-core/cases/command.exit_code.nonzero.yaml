@@ -1,0 +1,33 @@
+# 维度：Error Recovery / 观测型断言（Spec §19.4）。
+#
+# 负向用例：脚本执行 `ls` 并以退出码 1 结束，用例要求退出码为 0 → 必须 FAIL。
+# 这条断言的价值在于它**依赖真实上报的退出码**：把 command.finished 的
+# exit_code 字段拿掉，它会变成 skipped 而不是 pass——观测不足绝不放行。
+id: command.exit_code.nonzero
+version: 1
+name: 命令退出码非零（负向）
+tags:
+  - error-recovery
+  - core
+  - regression
+  - negative
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    [cmd-fail] 在当前工作区列出文件，确认产物已生成。
+
+environment:
+  database: filesystem
+
+execution:
+  timeout: 30
+  repeat: 1
+
+expected:
+  exit_code:
+    expect: 0
+    command: ls
+
+evaluation_profile: smoke

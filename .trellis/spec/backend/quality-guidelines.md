@@ -7,7 +7,7 @@
 ## 检查命令（合并前必须全绿）
 
 ```bash
-uv run pytest        # 207 tests（含 e2e：FakeAgent 全链路 + 真实 TCP mock server + REST API）
+uv run pytest        # 235 tests（含 e2e：FakeAgent 全链路 + 真实 TCP mock server + REST API）
 uv run ruff check .  # 规则：E/F/I/UP/B/SIM；CLI 文件豁免 B008（Typer 惯用法）
 uv run ruff format --check .
 cd web && bun run typecheck && bun run build   # 前端改动时
@@ -107,6 +107,37 @@ judge 行为的用例标 `@pytest.mark.real_judge` 退出该夹具。装了 deep
 10. **聚合指标不拆名**：同一观测面的两个 PRD 名字（SkillPriority + SkillLoad）
     合成一条 metric。拆开只会得到两条永远同时红/同时绿的指标，让覆盖统计虚高。
 
+## 断言扩展约束（Spec §19）
+
+词汇表 11 个键（`permission` 已移除），处置分三类：已实现 7 个、执行型 3 个
+（`pytest` / `build` / `lint`，依赖 PRD §88 沙箱）、依赖其他观测面 1 个（`git_diff`）。
+守住六条：
+
+1. **先回答"观测数据从哪来"**。说不清观测来源的键不实现，而是给出明确处置
+   （移除 / 标注依赖 / 标注执行型）。处置表在 Spec §19.1，改实现就要同步改它。
+2. **`skipped` 是独立结局**。满足 → PASS、不满足 → FAIL、**观测不到 → skipped**
+   （`blocking=False`）。缺第三项时"看不到"会被塞进 PASS（假信号）或 FAIL（冤枉），
+   两者都污染结论。实现上由 `ObservationUnavailable` 承载，它在
+   `evaluate_assertions` 里被转成 skipped + `metadata.skipped_reason`。
+3. **观测不足 ≠ 声明非法**。前者 `ObservationUnavailable`（判 skipped，要用例作者
+   改 fixture/协议），后者 `UnsupportedAssertionError`（判 error，要用例作者改用例）。
+   混用会让"下一步动作"指向错误的文件。形状校验、越界路径、非法表名、未实现的键
+   都属后者，且必须在 `unsupported_declarations()` 里也能提前报出来——
+   启动期放过、运行期报错是最难查的一类落差。
+4. **`null ≠ 0`（PRD §59）**。`max_cost` 在无定价时是 `None`，判 skipped 而不是
+   `0 <= max_cost → pass`；`exit_code` 未被协议上报时保持 `None`，不猜成 0。
+   把"没观测到"归一化成 0 会让最需要拦的假象过闸。
+5. **三者一致**：`EXTENSION_KEYS`（词汇表）== `IMPLEMENTED_EXTENSIONS`
+   ∪ `SANDBOX_DEPENDENT_KEYS` ∪ `DEFERRED_EXTENSION_KEYS`，且
+   `unsupported_declarations()` 对每个子集给出各自的下一步动作。漂移会让
+   `case validate` 的输出与实际能力脱节。
+6. **别让陪跑组污染分母**。`native.status` 只在声明了 `status` 或出现未实现键时产出；
+   让它在每个有扩展断言的 case 上都产出，会得到一条永远 pass 的指标——
+   与"恒 PASS 的占位"同类（§17 第 6 条）。同理，已实现的扩展各有自己的 metric id，
+   **空块（`sql_result: {}`）与未声明同口径、不产出 metric**；形状非法则必须产出
+   `error`（与"没声明"是两件事）。`exit_code: {}` 是例外：缺省语义"全部被观测命令
+   以 0 结束"是真断言。
+
 ## 用例集覆盖约束（PRD §103，Spec §18）
 
 "用例数量够"与"维度真被覆盖"是两件事。守住三条：
@@ -132,9 +163,10 @@ judge 行为的用例标 `@pytest.mark.real_judge` 退出该夹具。装了 deep
    `expect` 的判定都必须进入 `CaseRunResult.all_metric_results`，由 `blocking_failed`
    统一消费。新增挂载点时必须同时接进这个聚合视图。
 2. **没有观测来源就不得评测**：观测切片 `EvalScope` 只放真正能观测到的量。
-   词汇表内但尚无来源的声明（`exit_code`、`max_cost`）必须在启动期
-   `scan_unsupported_assertions` fail-fast（exit 3），绝不允许落进
-   "默认值恒 pass / 恒 fail" 的分支——两者都会污染 Gate 结论。
+   尚未实现的声明必须在启动期 `scan_unsupported_assertions` fail-fast（exit 3），
+   绝不允许落进"默认值恒 pass / 恒 fail"的分支——两者都会污染 Gate 结论。
+   **已实现但本次观测不到的**走第三条路：判 `skipped`（blocking=False），
+   见下面的"断言扩展约束"第 2 条。
 3. **新增断言词汇的步骤**：先在 `native.py` 实现 checker + 加入
    `IMPLEMENTED_EXTENSIONS`/约束实现面，再补 `unsupported_declarations` 的放行，
    最后补正向+边界测试。顺序反了就会复现"声明了却静默失效"。

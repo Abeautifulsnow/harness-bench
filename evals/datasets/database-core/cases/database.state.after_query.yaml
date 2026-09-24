@@ -1,0 +1,64 @@
+# 维度：Database（环境终态 / 工具结果，Spec §19.2–§19.5）。
+#
+# 这条用例存在的意义是**接通观测面**，而不是再验一次输出文本：
+#   sql_result      ← tool.result 的 result 载荷（不是 agent 的自述）
+#   database_state  ← fixture 库在 cleanup 之前的快照
+#   file_state      ← fixture workdir 的快照
+# 三者判的都是"环境/结果变成了什么样"。把行数上限写成 3 就能让它红——
+# 它们是真断言，不是"看起来在断言"。
+id: database.state.after_query
+version: 1
+name: 查询结果与环境终态断言（sql_result / database_state / file_state）
+tags:
+  - database
+  - core
+  - golden
+  - tool-use
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    [sql-rows] 查询销售额最高的客户，给出客户名与合计金额。
+
+environment:
+  fixture: sales_v2
+  database: sqlite
+
+execution:
+  timeout: 30
+  repeat: 1
+
+expected:
+  output:
+    contains:
+      - "QUERY COMPLETE"
+  tools:
+    required:
+      - execute_sql
+    forbidden:
+      - shell_exec
+  constraints:
+    max_tool_calls: 4
+  sql_result:
+    min_rows: 3
+    max_rows: 3
+    contains:
+      - "acmeCorp"
+  database_state:
+    tables:
+      customers:
+        min_rows: 3
+      orders:
+        min_rows: 4
+        max_rows: 10
+    tables_absent:
+      - audit_log
+  file_state:
+    files:
+      fixture.db:
+        exists: true
+    absent:
+      - tmp/report.md
+
+evaluation_profile: smoke

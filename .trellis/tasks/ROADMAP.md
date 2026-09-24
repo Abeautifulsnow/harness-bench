@@ -105,3 +105,46 @@ case-scheduler（独立，可一直不做）
 3. **批次三（扩展面）**：`semantic-trace-diff` / `case-artifacts` /
    `assertion-extensions` 按依赖顺序推进。
 4. **可选**：`case-scheduler`。
+
+---
+
+## 执行中的发现（未立项，先记账）
+
+实现 `assertion-extensions` 时暴露、但不属于该任务表面的问题。记在这里是为了
+不让它随一次绿灯消失。
+
+### 发现的 1：run-level metric diff 没有噪声下限
+
+`regression/compare.py::_metric_diffs` 对两侧都存在的 metric 一律给方向
+（`improved` / `regressed`），只看数值是否相等（阈值 `1e-9`）。而 `latency_ms`
+是 wall-clock 时长：进程内 mock 的量级在 0~数 ms，调度抖动就会让均值从 `0`
+变成 `0.4`，Run-level Diff（PRD §105）于是打出一行 `latency_ms regressed`。
+
+- **证据**：`tests/test_api.py::test_regression_between_two_runs` 曾间歇失败
+  （`{'regressed', 'unchanged'} == {'unchanged'}`）；在外部 CPU 负载下复现，
+  同一 mock 连跑时 `run_metrics()["latency_ms"]` 出现 `0.4 → 0`。
+- **影响面**：仅呈现层（`cli compare` 的 Run-level Diff 表、`/api/regressions`）。
+  gate 不消费它——case 级性能回归走的是 `DEFAULT_PERFORMANCE_THRESHOLDS`（有阈值），
+  run 级没有，这个不对称看起来是遗漏而非设计。
+- **修法建议**：给 run 级的资源类 metric 也用上相对噪声下限（与 case 级
+  `_performance_diff` 同源），而不是无条件给方向。改它要连带改
+  `test_compare.py` 的方向语义用例——那是回归引擎的契约，应由
+  `09-24-p1-regression-platform` 的后续增量来做，不在 `assertion-extensions` 里顺手改。
+- **当下的处置**：`test_api` 那条用例把 `latency_ms` 显式列为 wall-clock 例外并
+  写明原因，其余确定性指标仍要求 `unchanged`。这是"不拿更弱的断言盖住问题"，
+  不是把问题判成通过。
+
+### 发现的 2：baseline 解析不看"跑了哪些 suite"
+
+`_resolve_main_latest`（`storage/baseline_store.py`）只按
+`benchmark_id + dataset_version + Gate PASS + started_at 最新` 选基线，
+**不比较 suites_covered**。于是 `--suite smoke`（3 条）会跟最近一次 PASS 的
+`--suite golden`（24 条）比 `tool_calls.max_regression_percent`，得到
+`25.2% > 20% → FAIL`——两个不同的 case 集合比平均工具调用数。
+
+- **证据**：本机连续 `--suite smoke` 两次，基线都解析到 golden 那次 run
+  （失败的 run 被 `_gate_passed` 过滤掉，于是"最近一次 PASS"一直是 golden）。
+- **影响面**：只在按 suite 分批跑时出现；`.agent-eval/` 是本地数据，
+  CI 一次跑全量时不触发。**不是本次改动引入的**（baseline 逻辑未改动）。
+- **修法建议**：基线候选加一条"suites_covered 覆盖当前 run"的约束，
+  或在不匹配时降级 `NO_BASELINE` 并给出提示（Spec §4.3 已有降级语义）。

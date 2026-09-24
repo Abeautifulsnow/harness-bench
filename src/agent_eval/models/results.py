@@ -55,6 +55,11 @@ class ToolCallRecord(BaseModel):
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     status: str | None = None  # from tool.result event
+    # 工具返回的 payload（`tool.result` 的 result/text 字段）。
+    # `sql_result` 断言判定的是"查到了什么"，没有它就只能看 agent 的自述输出。
+    result: Any = None
+    # command.* 事件上报的退出码；协议未提供时为 None（= 观测不足，不判 pass）
+    exit_code: int | None = None
 
 
 class TurnResult(BaseModel):
