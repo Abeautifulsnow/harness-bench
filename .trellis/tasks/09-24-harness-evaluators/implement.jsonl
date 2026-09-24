@@ -1,0 +1,4 @@
+{"file": "docs/agent-evaluation-regression-platform-engineering-prd-v2.md", "reason": "PRD §44 列出首批 14 个 harness evaluator（只有名字，判定口径要自己定义）；§45 MetricResult 形状；§110-3「能程序判断的不交给 LLM Judge」是分类依据"}
+{"file": "docs/agent-eval-engineering-spec-v2.1.md", "reason": "Spec §7 Metric Registry 与 provider 命名空间（native/agent/harness/custom）、fallback 链规则；§7.4 的降级语义要与现有约定一致"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门槛与 judge 隔离夹具约定；新增 evaluator 的双向测试要求"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "evaluators/ 包与 evals/profiles/ 的关系：新 metric 要进 profile 才生效"}

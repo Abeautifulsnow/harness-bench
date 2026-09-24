@@ -1,0 +1,4 @@
+{"file": "docs/agent-evaluation-regression-platform-engineering-prd-v2.md", "reason": "PRD §85 CaseScheduler 的五项职责（Queue/Concurrency/Timeout/Cancellation/Retry）；§86 agent_concurrency 与 judge_concurrency 必须分开；§87 三类 Retry 的区分；§109.1/§109.2 性能与可靠性要求"}
+{"file": "docs/agent-eval-engineering-spec-v2.1.md", "reason": "Spec §6.1 exit code 契约与 §6.2 gate.json 形状——重构不得改变这些外部契约；§2.4 session/turn 生命周期"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门槛；「规则 8 派生层只读」；重构验收的基线（103 测试全绿）"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "失败语义三分法与 Infrastructure Retry 的既有边界（PRD §87）——重试分类要落在这套语义里"}

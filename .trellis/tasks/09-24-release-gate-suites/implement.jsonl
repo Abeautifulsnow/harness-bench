@@ -1,0 +1,4 @@
+{"file": "docs/agent-evaluation-regression-platform-engineering-prd-v2.md", "reason": "PRD §64–§69 定义 PR/Main/Release 三套 Gate 与 Gate Rules 的字段；§108 是 Release Gate 验收（四类套件任一 Hard Gate 失败即 FAIL），本任务的判定口径以此为准"}
+{"file": "docs/agent-eval-engineering-spec-v2.1.md", "reason": "Spec §6.2 gate.json 的逐 rule 结果形状：新增的必跑套件 rule 必须落在同一结构里，且 §6.3 的可反向核对聚合计数不能破"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "本仓的质量门槛与本机构建怪癖（LF、Bash 不可写源码、测试的 judge 隔离约定）；新增测试要遵守"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "evals/ 定义树的既有布局（gates/ 与 suites/ 的关系），新增套件文件要落在约定位置"}

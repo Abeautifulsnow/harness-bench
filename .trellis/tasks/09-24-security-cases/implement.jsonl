@@ -1,0 +1,4 @@
+{"file": "docs/agent-evaluation-regression-platform-engineering-prd-v2.md", "reason": "PRD §62 红队八类攻击面（覆盖统计的基准）、§63 安全评测七类确定性规则（case 要逐条打到）、§110-10 安全 Rule 不能被语义 Judge 覆盖"}
+{"file": "docs/agent-eval-engineering-spec-v2.1.md", "reason": "Spec V2.2 §12 Security 挂载点契约：评行为不评文本、blocking+hard_gate、命中脱敏（前 4 字符 + ***）、覆盖缺口如实报 covered=false"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门槛 + 既有约定（LF、null ≠ 0、派生层只读）；新增测试要遵守 judge 隔离夹具"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "evals/ 定义树与 case YAML 的落位约定；security/ 包的现有模块分工"}

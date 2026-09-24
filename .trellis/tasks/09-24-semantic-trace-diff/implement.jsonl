@@ -1,0 +1,4 @@
+{"file": "docs/agent-evaluation-regression-platform-engineering-prd-v2.md", "reason": "PRD §56 Trace Diff 与 §57 Semantic Trace Diff（structural vs semantic、SQL 用 SQLGlot AST diff、文件修改支持 git diff）——本任务的范围直接由这两节定义"}
+{"file": "docs/agent-eval-engineering-spec-v2.1.md", "reason": "Spec V2.2 §11.2 tool_arguments 的路径语法（a.b.c / a[0]）与 matcher 语义（exact/contains/regex）——归一化规则不能与此冲突，否则 argument_checks 与 trace diff 会给出矛盾结论"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门槛；「规则 8 派生层只读」与 LF 约定；新增测试的位置与隔离夹具"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "regression/ 包的模块分工与 reports/templates 的呈现位置"}

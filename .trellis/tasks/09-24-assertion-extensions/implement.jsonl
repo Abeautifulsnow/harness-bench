@@ -1,0 +1,4 @@
+{"file": "docs/agent-eval-engineering-spec-v2.1.md", "reason": "Spec §2.2 断言词汇表（EXTENSION_KEYS 的来源）：词汇表、IMPLEMENTED_EXTENSIONS 与 unsupported_declarations() 的提示必须三者一致，本任务要同步这一节"}
+{"file": "docs/agent-evaluation-regression-platform-engineering-prd-v2.md", "reason": "PRD §59 Cost Evaluation（max_cost 的语义与 null ≠ 0）；§88 Environment 只实现 local（pytest/build/lint 三个执行型断言的沙箱前提在此）；§110-3 deterministic 优先"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门槛与既有断言不变量（含「不隐式取基线」）；新增键的双向测试要求"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "失败语义三分法：声明形状非法要 fail-fast（exit 3），不能静默通过；与 UnsupportedAssertionError 的既有处理一致"}

@@ -1,0 +1,4 @@
+{"file": "docs/agent-evaluation-regression-platform-engineering-prd-v2.md", "reason": "PRD §43 Evaluator Plugin SDK 的接口定义（EvaluatorPlugin.name / async evaluate / EvaluationContext）；§109.4「新增 Evaluator 不得修改主 Runner」是硬验收；§45 MetricResult"}
+{"file": "docs/agent-eval-engineering-spec-v2.1.md", "reason": "Spec §2.2/§2.3 断言挂载点与 Case Schema；§7 Metric Registry 的 provider 命名空间与 fallback 链——SDK 的注册路径必须与之一致"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门槛与测试约定；「runner 零改动」的验收方式要落到测试里"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "evaluators/ 层的现有模块分工（registry / native / deepeval_adapter），SDK 要落在同一层"}

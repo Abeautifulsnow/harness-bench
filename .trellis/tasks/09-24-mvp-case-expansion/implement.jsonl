@@ -1,0 +1,4 @@
+{"file": "docs/agent-evaluation-regression-platform-engineering-prd-v2.md", "reason": "PRD §14–§21 case/suite/set 的定义与 case 来源；§103 是 MVP 用例数量与六个覆盖维度的验收基准；§89 fixture provider 能力边界"}
+{"file": "docs/agent-eval-engineering-spec-v2.1.md", "reason": "Spec §2.3 Case Schema 与 §2.2 断言词汇表——决定新 case 能写哪些断言（当前只实现 status/tool_arguments/step_efficiency）"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门槛；新增 case 的命名与 tag 约定，以及「不造不断言的 case」这一判断要用到的既有规则"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "evals/datasets/<ds>/cases/ 与 dataset.yaml 的索引关系；fixtures/ 布局"}

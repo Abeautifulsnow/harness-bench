@@ -3,7 +3,7 @@
   "name": "00-bootstrap-guidelines",
   "title": "Bootstrap Guidelines",
   "description": "Fill in project development guidelines for AI agents",
-  "status": "in_progress",
+  "status": "completed",
   "dev_type": "docs",
   "scope": null,
   "package": null,
@@ -11,11 +11,11 @@
   "creator": "runstone",
   "assignee": "runstone",
   "createdAt": "2026-09-23",
-  "completedAt": null,
+  "completedAt": "2026-09-24",
   "branch": null,
   "base_branch": null,
   "worktree_path": null,
-  "commit": null,
+  "commit": "83be168, 24e3f1a",
   "pr_url": null,
   "subtasks": [],
   "children": [],
@@ -23,6 +23,6 @@
   "relatedFiles": [
     ".trellis/spec/backend/"
   ],
-  "notes": "First-time setup task created by trellis init (backend project)",
+  "notes": "backend 三个指南已填实：directory-structure（分层 + evals 定义树 + 运行产物布局）、error-handling（失败语义三分法 + exit code 0–3）、quality-guidelines（质量门槛 + 本机构建怪癖）。83be168 首填，24e3f1a 随 P1–P5 实施更新（103 测试、前端命令、judge 隔离、null ≠ 0、派生层只读）。",
   "meta": {}
 }
