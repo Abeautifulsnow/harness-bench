@@ -64,6 +64,34 @@ class RunStore:
                 results.append(CaseRunResult.model_validate(_read_json(path)))
         return meta, results
 
+    def run_dir_for(self, run_id: str) -> Path:
+        return self.root / run_id
+
+    def load_events(self, run_id: str, case_file_key: str) -> list[TraceEvent]:
+        """Raw Trace 回放（PRD §52；Span Tree 可由事件流重建）。"""
+        path = self.run_dir_for(run_id) / "traces" / f"{_safe(case_file_key)}.events.jsonl"
+        if not path.is_file():
+            return []
+        events: list[TraceEvent] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(TraceEvent.model_validate(json.loads(line)))
+            except Exception:  # 撕裂写：跳过坏行，保留可解析部分
+                continue
+        return events
+
+    def load_report(self, run_id: str) -> dict:
+        path = self.run_dir_for(run_id) / "report.json"
+        if not path.is_file():
+            raise InvalidCallError(f"report not found for run: {run_id}")
+        return _read_json(path)
+
+    def report_path(self, run_id: str, name: str) -> Path:
+        return self.run_dir_for(run_id) / name
+
     def list_runs(self) -> list[RunMetadata]:
         metas: list[RunMetadata] = []
         if not self.root.is_dir():

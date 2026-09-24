@@ -65,3 +65,17 @@ class SpanTree:
             total += int(usage.get("input_tokens") or 0)
             total += int(usage.get("output_tokens") or 0)
         return total
+
+    def usage_totals(self) -> dict[str, int]:
+        """PRD §59 的成本输入：分项累计 input / output / cache tokens。"""
+        totals = {"input_tokens": 0, "output_tokens": 0, "cache_tokens": 0}
+        for s in self.spans:
+            usage = s.attributes.get("usage") or {}
+            for key in totals:
+                totals[key] += int(usage.get(key) or 0)
+        return totals
+
+    def model_names(self) -> list[str]:
+        return sorted(
+            {str(s.attributes.get("model")) for s in self.spans if s.attributes.get("model")}
+        )

@@ -39,20 +39,32 @@ METRIC_REGISTRY: dict[str, MetricDef] = {
     "native.tool_sequence": MetricDef(
         "native.tool_sequence", "native", description="required/forbidden tools"
     ),
+    "native.argument_checks": MetricDef(
+        "native.argument_checks",
+        "native",
+        description="tool_arguments 声明式参数断言（Spec V2.2 §11.2）",
+    ),
     "native.performance": MetricDef(
         "native.performance", "native", description="tool_calls/latency/tokens/cost 上限"
+    ),
+    "native.step_ratio": MetricDef(
+        "native.step_ratio",
+        "native",
+        description="步数效率 min(1, baseline_steps/actual_steps)（Spec V2.2 §11.1）",
     ),
     # --- agent：DeepEval 语义评测（Spec §7.5）+ 官方 fallback 链 ---
     "agent.task_completion": MetricDef(
         "agent.task_completion", "deepeval", "native.output_checks", 0.70
     ),
     "agent.step_efficiency": MetricDef(
-        "agent.step_efficiency", "deepeval", "native.performance", 0.70
+        "agent.step_efficiency", "deepeval", "native.step_ratio", 0.70
     ),
     "agent.tool_correctness": MetricDef(
         "agent.tool_correctness", "deepeval", "native.tool_sequence", 0.80
     ),
-    "agent.argument_correctness": MetricDef("agent.argument_correctness", "deepeval"),
+    "agent.argument_correctness": MetricDef(
+        "agent.argument_correctness", "deepeval", "native.argument_checks"
+    ),
     "agent.plan_quality": MetricDef("agent.plan_quality", "deepeval"),
     "agent.plan_adherence": MetricDef("agent.plan_adherence", "deepeval"),
 }

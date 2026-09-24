@@ -63,6 +63,10 @@ class TurnResult(BaseModel):
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
     latency_ms: int = 0
     tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_tokens: int = 0
+    cost: float | None = None  # None = 该 turn 无定价可算（PRD §59）
     status: Literal["ok", "timeout", "error"] = "ok"
     error: str | None = None
     metric_results: list[MetricResultModel] = Field(default_factory=list)
@@ -75,6 +79,7 @@ class CaseRunResult(BaseModel):
     run_id: str
     case_id: str
     case_version: int
+    case_tags: list[str] = Field(default_factory=list)  # denormalized for suite-level slicing
     iteration: int  # 1-based
     status: CaseStatus = CaseStatus.FAIL
     failure_semantics: FailureSemantics | None = None
@@ -83,7 +88,11 @@ class CaseRunResult(BaseModel):
     failure_category: str | None = None
     latency_ms: int = 0
     token_count: int = 0
-    cost: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_tokens: int = 0
+    cost: float = 0.0  # 0.0 = 无定价可算（PRD §59）；判定见 metric_results 的 cost 说明
+    cost_known: bool = False  # True 表示 cost 由定价表算出，0.0 才是真值
     final_output: str | None = None
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
     turn_results: list[TurnResult] = Field(default_factory=list)
@@ -122,4 +131,7 @@ class CaseStability(BaseModel):
     score_stddev: float | None = None
     tool_sequence_variance: float | None = None
     latency_cv: float | None = None
+    token_variance: float | None = None
+    # PRD §31: pass@k 仅在 repeat >= k 时输出（repeat=1 的 PR Gate 不输出）
+    pass_at_k: dict[str, float] = Field(default_factory=dict)
     regression_state: RegressionState = RegressionState.UNDETERMINED

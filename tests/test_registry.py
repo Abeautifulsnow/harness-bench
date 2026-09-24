@@ -53,6 +53,7 @@ def test_no_judge_skips_judge_metrics() -> None:
     assert effective is None and degraded is None
 
 
+@pytest.mark.real_judge
 def test_deepeval_probe_without_package() -> None:
     adapter = DeepEvalCapabilityAdapter()
     probe = adapter.probe()
@@ -97,6 +98,7 @@ def test_deepeval_convert_shape() -> None:
     assert trace["type"] == "llm"
 
 
+@pytest.mark.real_judge
 def test_deepeval_evaluate_with_fake_module(monkeypatch) -> None:
     fake_metrics = types.ModuleType("deepeval.metrics")
 
@@ -150,7 +152,7 @@ def test_scan_unsupported_assertions() -> None:
         }
     )
     found = scan_unsupported_assertions([bad])
-    assert found == ["bad: expected[expected].database_state: 在词汇表内但超出 P0 实现面"]
+    assert found == ["bad: expected[expected].database_state: 在词汇表内但尚未实现"]
 
 
 def test_scan_covers_all_three_mount_points() -> None:

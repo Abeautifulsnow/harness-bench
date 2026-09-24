@@ -90,16 +90,14 @@ def test_unsupported_extension_is_error_verdict() -> None:
 
 
 def test_exit_code_declaration_is_reported_unsupported() -> None:
-    """exit_code 在词汇表内但 P0 无观测来源 → 必须报为不可评测，不得静默恒 fail。"""
+    """exit_code 在词汇表内但无观测来源 → 必须报为不可评测，不得静默恒 fail。"""
     a = Assertion.model_validate({"exit_code": 0})
     assert evaluate_assertions(a, scope(), "cr1")[0].verdict == "error"
-    assert unsupported_declarations(a, "expected") == [
-        "expected.exit_code: 在词汇表内但超出 P0 实现面"
-    ]
+    assert unsupported_declarations(a, "expected") == ["expected.exit_code: 在词汇表内但尚未实现"]
 
 
 def test_max_cost_declaration_is_reported_unsupported() -> None:
-    """max_cost 同理：P0 不计算成本，声明它不能变成一条永不失败的断言。"""
+    """max_cost 同理：未接入定价前声明它不能变成一条永不失败的断言。"""
     a = Assertion.model_validate({"constraints": {"max_cost": 0.001}})
     assert evaluate_assertions(a, scope(), "cr1")[0].verdict == "error"
     assert any("max_cost" in problem for problem in unsupported_declarations(a, "expected"))

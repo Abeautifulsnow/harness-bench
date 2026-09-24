@@ -11,9 +11,13 @@ native evaluator only.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
+
+_SPLIT_PATH = re.compile(r"\.")
+_INDEX_PATH = re.compile(r"^([A-Za-z_][\w\-]*)?\[(\d+)\]$")
 
 EXTENSION_KEYS = frozenset(
     {
@@ -27,6 +31,8 @@ EXTENSION_KEYS = frozenset(
         "lint",
         "sql_result",
         "permission",
+        "tool_arguments",
+        "step_efficiency",
     }
 )
 
@@ -71,6 +77,111 @@ class ConstraintAssertion(BaseModel):
         )
 
 
+class ToolArgumentMatcher(BaseModel):
+    """声明式工具参数断言（Spec V2.2 §11.2，`tool_arguments` 扩展）。
+
+    参数路径用点号表示嵌套（``payload.sql``），列表下标用 ``[i]``（``rows[0].id``）。
+    三种匹配器互斥；都不给即"该路径必须存在"。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    exact: Any = None
+    contains: str | None = None
+    regex: str | None = None
+
+    def check(self, value: Any) -> str | None:
+        """返回不匹配原因；``None`` 表示通过。"""
+        if self.exact is not None:
+            if value != self.exact:
+                return f"expected {self.exact!r}, got {value!r}"
+            return None
+        if self.contains is not None:
+            if not isinstance(value, str) or self.contains not in value:
+                return f"expected to contain {self.contains!r}, got {value!r}"
+            return None
+        if self.regex is not None:
+            import re
+
+            if not isinstance(value, str) or re.search(self.regex, value) is None:
+                return f"expected to match {self.regex!r}, got {value!r}"
+            return None
+        return None
+
+
+def argument_path(value: Any, path: str) -> tuple[bool, Any]:
+    """按点号/下标路径取值：返回 (是否存在, 值)。路径语法的唯一实现点。"""
+    current = value
+    for part in _SPLIT_PATH.split(path):
+        if not part:
+            continue
+        match = _INDEX_PATH.fullmatch(part)
+        if match is not None:
+            name, index = match.group(1), int(match.group(2))
+            if name:
+                if not isinstance(current, dict) or name not in current:
+                    return False, None
+                current = current[name]
+            if not isinstance(current, list) or index >= len(current):
+                return False, None
+            current = current[index]
+            continue
+        if not isinstance(current, dict) or part not in current:
+            return False, None
+        current = current[part]
+    return True, current
+
+
+class StepEfficiencyAssertion(BaseModel):
+    """步数效率声明（Spec V2.2 §11.1，扩展键 ``step_efficiency``）。
+
+    显式声明才评测：把 ``tools.required`` 或 ``max_tool_calls`` 隐式当作步数基线
+    会让既有 case 突然判 FAIL（那些声明表达的是"必须调用"与"上限"，不是理想步数）。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    baseline_steps: int  # 理想步数（一次成功执行最少需要的工具调用数）
+    max_ratio_delta: float = 0.0  # 允许超出的比例，0 = 不得超过基线
+
+    def limit(self) -> float:
+        return self.baseline_steps * (1.0 + self.max_ratio_delta)
+
+
+class SecurityAssertion(BaseModel):
+    """``security:`` 挂载点（PRD §62/§63，Spec V2.2 §12）。
+
+    与 output/tools/constraints 并列的独立挂载点：消费"被观测到的行为"
+    （工具参数、命令、路径、SQL、MCP 调用），而不是输出文本 —— 输出文本可被
+    攻击者改写，不能作为安全判定依据。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    forbidden_tools: list[str] = Field(default_factory=list)
+    forbidden_paths: list[str] = Field(default_factory=list)  # 前缀匹配
+    forbidden_commands: list[str] = Field(default_factory=list)  # 可执行名，如 rm/curl
+    forbidden_sql: list[str] = Field(default_factory=list)  # 正则
+    forbidden_mcp: list[str] = Field(default_factory=list)
+    secret_patterns: list[str] = Field(default_factory=list)  # 正则
+    allow_permission_override: bool = False  # False = 出现提权即失败
+
+    def is_empty(self) -> bool:
+        return (
+            not any(
+                (
+                    self.forbidden_tools,
+                    self.forbidden_paths,
+                    self.forbidden_commands,
+                    self.forbidden_sql,
+                    self.forbidden_mcp,
+                    self.secret_patterns,
+                )
+            )
+            and not self.allow_permission_override
+        )
+
+
 class Assertion(BaseModel):
     """One assertion block; all checks inside combine with AND (Spec §2.2)."""
 
@@ -79,6 +190,7 @@ class Assertion(BaseModel):
     output: OutputAssertion = Field(default_factory=OutputAssertion)
     tools: ToolAssertion = Field(default_factory=ToolAssertion)
     constraints: ConstraintAssertion = Field(default_factory=ConstraintAssertion)
+    security: SecurityAssertion = Field(default_factory=SecurityAssertion)
     # Case-level extensions (never valid on turn level, Spec §2.2).
     extensions: dict[str, Any] = Field(default_factory=dict)
 
@@ -86,7 +198,7 @@ class Assertion(BaseModel):
     @classmethod
     def _extract_extensions(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            known = {"output", "tools", "constraints", "extensions"}
+            known = {"output", "tools", "constraints", "security", "extensions"}
             ext = dict(data.get("extensions") or {})
             for key, value in data.items():
                 if key not in known:
@@ -99,6 +211,7 @@ class Assertion(BaseModel):
             self.output.is_empty()
             and self.tools.is_empty()
             and self.constraints.is_empty()
+            and self.security.is_empty()
             and not self.extensions
         )
 

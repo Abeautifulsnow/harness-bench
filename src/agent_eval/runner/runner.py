@@ -1,4 +1,4 @@
-"""Eval Orchestrator（PRD §5/§85 + Spec V2.1.1 §2.4/§3/§6.1/§7.4）。
+"""Eval Orchestrator（PRD §5/§85 + Spec V2.1.1 §2.4/§3/§4/§6/§7.4）。
 
 1 turn = 同一 session 上的一次 run 调用；每个 iteration：prepare fixture →
 create session → 逐轮 run → teardown，iteration 之间不共享任何状态（Spec §2.4）。
@@ -6,9 +6,13 @@ create session → 逐轮 run → teardown，iteration 之间不共享任何状�
 INFRA_FAILURE；Judge 异常 → EVALUATION_FAILURE。ERROR 轮使 Run 进入 partial。
 
 并发：Agent 阶段持有 agent 并发槽位，Judge 阶段不持有（PRD §86 的分离要求）。
+
+终态产物由同一个 RunAggregate 一次写出（Spec §6.2/§6.3）：
+report.json / gate.json / junit.xml / report.html / summary.md。
 """
 
 import asyncio
+import json
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -23,13 +27,7 @@ from agent_eval.adapters.base import (
     AgentSession,
     SessionContext,
 )
-from agent_eval.errors import (
-    EXIT_GATE_FAIL,
-    EXIT_INFRA,
-    EXIT_OK,
-    InfraError,
-    InvalidCallError,
-)
+from agent_eval.errors import InfraError, InvalidCallError
 from agent_eval.evaluators.deepeval_adapter import DeepEvalCapabilityAdapter
 from agent_eval.evaluators.native import (
     EvalScope,
@@ -54,9 +52,9 @@ from agent_eval.models.benchmark import BenchmarkDef, DatasetInfo
 from agent_eval.models.case import Case
 from agent_eval.models.events import TraceEvent
 from agent_eval.models.profile import MetricProfile, MetricSpec
+from agent_eval.models.regression import Baseline, BaselineMode, GateReport
 from agent_eval.models.results import (
     CaseRunResult,
-    CaseStability,
     CaseStatus,
     MetricResultModel,
     ToolCallRecord,
@@ -64,17 +62,26 @@ from agent_eval.models.results import (
 )
 from agent_eval.models.run import FailureSemantics, RunMetadata, RunStatus
 from agent_eval.models.spans import SpanTree
-from agent_eval.regression.stability import compute_stability
-from agent_eval.reports.report import (
-    build_report,
-    compute_verdict,
-    render_summary,
-    write_report,
+from agent_eval.quality.gates import (
+    SECURITY_TAGS,
+    GateRules,
+    evaluate_gate,
+    exit_code_for,
+    load_gate_rules,
 )
+from agent_eval.regression.compare import compare_runs
+from agent_eval.reports.aggregate import RunAggregate, build_aggregate
+from agent_eval.reports.cost import PricingTable
+from agent_eval.reports.html import render_html_safe
+from agent_eval.reports.report import write_reports
+from agent_eval.security.evaluator import evaluate_security
+from agent_eval.storage.analytics import Analytics
+from agent_eval.storage.baseline_store import BaselineStore
 from agent_eval.storage.run_store import RunStore, _safe
 from agent_eval.trace.builder import TraceBuilder
 
 INFRA_RETRIES = 2  # PRD §87 Infrastructure Retry（会话建立阶段）
+DEFAULT_GATE = "pr"
 
 
 @dataclass
@@ -90,9 +97,22 @@ class RunConfig:
     tag_filter: list[str] = field(default_factory=list)
     baseline_policy: str | None = None
     baseline_run_id: str | None = None
+    gate: str = DEFAULT_GATE
     no_judge: bool = False
     timeout: float | None = None
     save_trace: bool = True
+    experiment_id: str | None = None
+    variant_id: str | None = None
+    agent_model: str | None = None
+    judge_model: str | None = None
+
+    @property
+    def state_root(self) -> Path:
+        return self.data_root / "state"
+
+    @property
+    def runs_root(self) -> Path:
+        return self.data_root / "runs"
 
 
 @dataclass
@@ -102,6 +122,9 @@ class RunOutcome:
     verdict: str
     exit_code: int
     report: dict
+    gate: GateReport | None = None
+    aggregate: RunAggregate | None = None
+    artifacts: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -114,6 +137,7 @@ class _ResolvedProfile:
 class _CaseContext:
     resolved: dict[str, _ResolvedProfile]
     case_profile: dict[str, str]
+    case_by_id: dict[str, Case]
     judge: DeepEvalCapabilityAdapter
     judge_sem: asyncio.Semaphore
     capabilities: dict[str, bool]
@@ -156,7 +180,9 @@ def _git_info() -> tuple[str | None, str | None, bool | None]:
 class Runner:
     def __init__(self, cfg: RunConfig) -> None:
         self.cfg = cfg
-        self.store = RunStore(cfg.data_root / "runs")
+        self.store = RunStore(cfg.runs_root)
+        self.baselines = BaselineStore(cfg.state_root, cfg.runs_root)
+        self.pricing = PricingTable.load(cfg.evals_root)
         self.adapter: AgentAdapter = open_adapter(cfg.agent_endpoint)
 
     # ------------------------------------------------------------------ entry
@@ -171,7 +197,7 @@ class Runner:
         unsupported = scan_unsupported_assertions(selected)
         if unsupported:
             raise InvalidCallError(
-                "cases carry assertions the P0 native evaluator cannot honor: "
+                "cases carry assertions the native evaluator cannot honor: "
                 + "; ".join(unsupported)
             )
 
@@ -182,13 +208,15 @@ class Runner:
         profiles = {
             name: load_profile(cfg.evals_root, name) for name in sorted(set(case_profile.values()))
         }
-        ctx = self._resolve_profiles(profiles, case_profile)
+        ctx = self._resolve_profiles(profiles, case_profile, selected)
+        rules = load_gate_rules(cfg.evals_root, cfg.gate)
+        baseline = self._resolve_baseline(benchmark, info, rules)
 
         health = await self.adapter.health_check()
         if not health.ok:
             raise InfraError(f"agent endpoint unhealthy: {health.detail}")
 
-        meta = self._build_meta(benchmark, info)
+        meta = self._build_meta(benchmark, info, baseline)
         run_dir = self.store.create_run(meta)
         meta.metric_capability_snapshot = ctx.capabilities
         meta.metric_degradations = ctx.degradations
@@ -213,31 +241,133 @@ class Runner:
             self.store.save_meta(meta)
             raise
 
-        stabilities: list[CaseStability] = []
-        for case_id in sorted({r.case_id for r in results}):
-            stabilities.append(
-                compute_stability(case_id, [r for r in results if r.case_id == case_id])
-            )
         any_error = any(r.status == CaseStatus.ERROR for r in results)
         meta.status = RunStatus.partial if any_error else RunStatus.completed
         meta.finished_at = _now()
         self.store.save_meta(meta)
 
-        report = build_report(meta, results, stabilities)
-        write_report(run_dir, report, render_summary(report))
-        verdict = compute_verdict(meta, results)
-        if verdict == "fail":
-            exit_code = EXIT_GATE_FAIL
-        elif meta.status == RunStatus.partial:
-            exit_code = EXIT_INFRA
-        else:
-            exit_code = EXIT_OK
-        return RunOutcome(meta.run_id, meta.status.value, verdict, exit_code, report)
+        comparison = self._compare_with_baseline(meta, results, baseline, rules)
+        aggregate = build_aggregate(meta, results, comparison)
+        gate = evaluate_gate(aggregate, rules, comparison)
+        artifacts = self._write_artifacts(run_dir, aggregate, gate)
+        self._record_analytics(gate)
+        return RunOutcome(
+            run_id=meta.run_id,
+            status=meta.status.value,
+            verdict=gate.verdict,
+            exit_code=exit_code_for(gate, aggregate),
+            report=_read_report(run_dir),
+            gate=gate,
+            aggregate=aggregate,
+            artifacts={name: str(path) for name, path in artifacts.items()},
+        )
+
+    # ------------------------------------------------------------- baseline
+
+    def _resolve_baseline(
+        self, benchmark: BenchmarkDef, info: DatasetInfo, rules: GateRules
+    ) -> Baseline | None:
+        """Spec §4.1 默认策略 + §4.5 运行时覆盖；未命中 → NO_BASELINE（§4.3）。"""
+        cfg = self.cfg
+        if cfg.baseline_run_id:
+            meta_path = self.store.run_dir_for(cfg.baseline_run_id) / "run.json"
+            if not meta_path.is_file():
+                raise InvalidCallError(f"baseline run not found: {cfg.baseline_run_id}")
+            return Baseline(
+                id=f"bs-adhoc-{cfg.baseline_run_id}",
+                benchmark_id=benchmark.name,
+                dataset_version=info.version,
+                mode=BaselineMode.explicit,
+                pinned_run_id=cfg.baseline_run_id,
+                note="runtime --baseline-run override",
+            )
+        policy = cfg.baseline_policy
+        if policy is None:
+            if rules.gate == "release":
+                policy = BaselineMode.release.value
+            elif cfg.experiment_id:
+                policy = BaselineMode.explicit.value
+            else:
+                policy = BaselineMode.main_latest.value
+        if policy == BaselineMode.no_baseline.value:
+            return None
+        if policy == BaselineMode.explicit.value:
+            raise InvalidCallError(
+                "baseline policy 'explicit' requires --baseline-run <run-id> (Spec §4.5)"
+            )
+        try:
+            mode = BaselineMode(policy)
+        except ValueError as exc:
+            raise InvalidCallError(
+                f"unknown baseline policy '{policy}' "
+                f"(expected explicit | release | main-latest | NO_BASELINE)"
+            ) from exc
+        resolved = self.baselines.resolve(benchmark.name, info.version, mode)
+        if resolved is None and rules.gate == "release":
+            # Spec §4.1: Release Gate 缺省时 fail-fast，不得退化为绝对阈值静默通过
+            raise InvalidCallError(
+                f"Release Gate 需要显式 pin 的 release baseline，"
+                f"但 benchmark '{benchmark.name}' dataset {info.version} 无 release pin"
+            )
+        return resolved
+
+    def _compare_with_baseline(
+        self,
+        meta: RunMetadata,
+        results: list[CaseRunResult],
+        baseline: Baseline | None,
+        rules: GateRules,
+    ):
+        if baseline is None or baseline.pinned_run_id is None:
+            meta.baseline_mode = BaselineMode.no_baseline.value
+            meta.baseline_reason = "no qualifying baseline run for this dataset_version"
+            self.store.save_meta(meta)
+            return None
+        try:
+            base_meta, base_results = self.store.load_run(baseline.pinned_run_id)
+        except InvalidCallError as exc:
+            meta.baseline_reason = f"baseline run unreadable: {exc.message}"
+            self.store.save_meta(meta)
+            return None
+        meta.baseline_mode = baseline.mode.value
+        meta.baseline_run_id = baseline.pinned_run_id
+        meta.baseline_reason = None
+        self.store.save_meta(meta)
+        thresholds = {
+            "tool_calls": _num(rules.tool_calls.get("max_regression_percent")),
+            "tokens": _num(rules.tokens.get("max_regression_percent")),
+            "latency_ms": _num(rules.latency.get("max_regression_percent")),
+        }
+        return compare_runs(
+            base_meta,
+            base_results,
+            meta,
+            results,
+            performance_thresholds={k: v for k, v in thresholds.items() if v is not None},
+            trace_loader=lambda case_run: self._load_spans(base_meta.run_id, case_run),
+        )
+
+    def _load_spans(self, run_id: str, candidate: CaseRunResult) -> dict[str, list]:
+        """两侧 span 由 Raw Trace 重放（PRD §56 需要 llm/subagent/retry 计数）。"""
+        out: dict[str, list] = {}
+        for side, rid in (("baseline", run_id), ("candidate", candidate.run_id)):
+            key = f"{_safe(candidate.case_id)}.iter{candidate.iteration}"
+            events = self.store.load_events(rid, key)
+            if not events:
+                out[side] = []
+                continue
+            builder = TraceBuilder()
+            builder.feed_all(events)
+            out[side] = builder.build().spans
+        return out
 
     # -------------------------------------------------------------- profiles
 
     def _resolve_profiles(
-        self, profiles: dict[str, MetricProfile], case_profile: dict[str, str]
+        self,
+        profiles: dict[str, MetricProfile],
+        case_profile: dict[str, str],
+        selected: list[Case],
     ) -> _CaseContext:
         needs_judge = any(
             provider_for(spec) == "deepeval"
@@ -261,8 +391,6 @@ class Runner:
                 caps.setdefault(spec.id, provider == "native")
                 effective, degraded_from = resolve_metric(spec, caps, self.cfg.no_judge)
                 if degraded_from is not None:
-                    # 降级目标是 native 断言组时，信息已由 Native Evaluator 覆盖，
-                    # 不重复执行，仅记录降级（Spec §7.4）
                     degradations[degraded_from] = effective or ""
                     continue
                 if effective is None:
@@ -274,6 +402,7 @@ class Runner:
         return _CaseContext(
             resolved=resolved,
             case_profile=case_profile,
+            case_by_id={case.id: case for case in selected},
             judge=DeepEvalCapabilityAdapter(),
             judge_sem=asyncio.Semaphore(
                 max((p.judge_concurrency for p in profiles.values()), default=2)
@@ -354,6 +483,7 @@ class Runner:
             if run_status != "success":
                 result.failure_semantics = FailureSemantics.AGENT
                 result.error = f"agent run finished with status={run_status!r}"
+                result.failure_category = f"agent.{run_status}"
             return _AgentPhase(result, span_tree, scope, resolved, completed=True)
         except InfraError as exc:  # SSE 流断裂等（§6.1：mandatory suite 未完整执行）
             return _AgentPhase(
@@ -382,7 +512,12 @@ class Runner:
         for attempt in range(INFRA_RETRIES + 1):
             try:
                 return await self.adapter.create_session(
-                    SessionContext(eval_run_id=result.run_id, case_id=case.id, iteration=iteration)
+                    SessionContext(
+                        eval_run_id=result.run_id,
+                        case_id=case.id,
+                        variant_id=self.cfg.variant_id,
+                        iteration=iteration,
+                    )
                 )
             except InfraError as exc:
                 last_error = exc
@@ -426,17 +561,44 @@ class Runner:
         turn_results: list[TurnResult],
         result: CaseRunResult,
     ) -> None:
-        """session 级评测：两个挂载点（case / final）+ 平台级判定（Spec §2.2/§2.4）。"""
+        """session 级评测：三个挂载点（case / final / security）+ 平台级判定。"""
         for mount_name, assertion in case.session_assertions():
             result.metric_results.extend(
                 evaluate_assertions(assertion, scope, result.id, mount=mount_name)
             )
+        result.metric_results.extend(self._security_verdicts(case, scope, result))
         result.metric_results.extend(synthesize_platform_verdicts(scope, result.id))
         result.final_output = scope.final_output
         result.tool_calls = scope.tool_calls
         result.latency_ms = scope.latency_ms
         result.token_count = scope.tokens
+        result.input_tokens = sum(turn.input_tokens for turn in turn_results)
+        result.output_tokens = sum(turn.output_tokens for turn in turn_results)
+        result.cache_tokens = sum(turn.cache_tokens for turn in turn_results)
+        costs = [turn.cost for turn in turn_results if turn.cost is not None]
+        if costs:
+            result.cost = round(sum(costs), 10)
+            result.cost_known = True
         result.turn_results = turn_results
+
+    def _security_verdicts(
+        self, case: Case, scope: EvalScope, result: CaseRunResult
+    ) -> list[MetricResultModel]:
+        """PRD §63：安全规则 deterministic，且只在 Case 声明或安全套件中评测。
+
+        无条件产出会让每个普通 case 都带一组"未声明的 pass"，污染 metric 集合；
+        完全不产出又会让安全套件失去 Hard Gate。触发条件取显式声明 + 安全标签。
+        """
+        assertion = case.expected.security
+        tagged = bool(SECURITY_TAGS & set(case.tags))
+        if assertion.is_empty() and not tagged:
+            return []
+        return [
+            finding.as_metric(result.id, lambda: new_id("mr"))
+            for finding in evaluate_security(
+                assertion, scope.tool_calls, final_output=scope.final_output
+            )
+        ]
 
     async def _finish_iteration(
         self, case: Case, phase: _AgentPhase, ctx: _CaseContext
@@ -450,11 +612,41 @@ class Runner:
         )
         if judge_error:
             return _error(result, FailureSemantics.EVALUATION, judge_error)
+        self._record_degradations(ctx, result)
         # turn 级判定参与终判（Spec §2.2：挂载点之间 AND），故遍历 all_metric_results
         if any(metric.verdict == "error" for metric in result.all_metric_results):
             return _error(result, FailureSemantics.EVALUATION, "native evaluator error verdict")
         result.status = CaseStatus.FAIL if result.blocking_failed else CaseStatus.PASS
+        if result.status == CaseStatus.FAIL:
+            result.failure_category = _failure_category(result)
         return result
+
+    def _record_degradations(self, ctx: _CaseContext, result: CaseRunResult) -> None:
+        """降级链落账（Spec §7.4）：fallback 未真正产出时必须显式记 skipped。
+
+        native fallback（native.output_checks / native.step_ratio ...）只有在 Case
+        真的声明了对应断言组时才会产出 MetricResult。没产出却把降级记成"已覆盖"，
+        等于静默跳过约束 —— 与 Spec §7.4 禁止的行为同类。
+        """
+        produced = {metric.metric for metric in result.all_metric_results}
+        for original, fallback in ctx.degradations.items():
+            if not fallback or fallback in produced:
+                continue
+            result.metric_results.append(
+                MetricResultModel(
+                    id=new_id("mr"),
+                    case_run_id=result.id,
+                    metric=original,
+                    evaluator="native",
+                    verdict="skipped",
+                    blocking=False,
+                    reason=(
+                        f"degraded to '{fallback}' but the case declares no assertion that "
+                        f"produces it (Spec §7.4); 该 metric 未被评测"
+                    ),
+                    metadata={"degraded_from": original, "fallback": fallback},
+                )
+            )
 
     async def _run_turn(
         self, session: AgentSession, case: Case, index: int, message: str, case_run_id: str
@@ -495,15 +687,29 @@ class Runner:
         if root is not None and root.finished_at is not None:
             latency_ms = int((root.finished_at - root.started_at).total_seconds() * 1000)
         tool_calls = [
-            ToolCallRecord(name=span.name, arguments={}, status=span.attributes.get("tool_status"))
+            ToolCallRecord(
+                name=span.name,
+                arguments=span.input if isinstance(span.input, dict) else {},
+                status=span.attributes.get("tool_status"),
+            )
             for span in tree.find("tool")
         ]
+        usage = tree.usage_totals()
         turn = TurnResult(
             index=index,
             output=output,
             tool_calls=tool_calls,
             latency_ms=latency_ms,
             tokens=tree.token_count(),
+            input_tokens=usage["input_tokens"],
+            output_tokens=usage["output_tokens"],
+            cache_tokens=usage["cache_tokens"],
+            cost=self.pricing.cost(
+                self.cfg.agent_model,
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+                cache_tokens=usage["cache_tokens"],
+            ),
             status=status,
             error=error,
         )
@@ -570,7 +776,9 @@ class Runner:
 
     # ---------------------------------------------------------------- helpers
 
-    def _build_meta(self, benchmark: BenchmarkDef, info: DatasetInfo) -> RunMetadata:
+    def _build_meta(
+        self, benchmark: BenchmarkDef, info: DatasetInfo, baseline: Baseline | None
+    ) -> RunMetadata:
         commit, branch, dirty = _git_info()
         return RunMetadata(
             run_id=new_id("run"),
@@ -583,12 +791,20 @@ class Runner:
             git_commit=commit,
             git_branch=branch,
             git_dirty=dirty,
+            agent_model=self.cfg.agent_model,
+            judge_model=self.cfg.judge_model,
             deepeval_version=DeepEvalCapabilityAdapter().version(),
             eval_platform_version=__version__,
             status=RunStatus.queued,
-            baseline_policy=self.cfg.baseline_policy,
-            baseline_run_id=self.cfg.baseline_run_id,
-            baseline_mode=self.cfg.baseline_policy or "NO_BASELINE",
+            experiment_id=self.cfg.experiment_id,
+            variant_id=self.cfg.variant_id,
+            variant=self.cfg.variant_id,
+            baseline_policy=self.cfg.baseline_policy or self._default_policy(),
+            baseline_run_id=baseline.pinned_run_id if baseline else None,
+            baseline_mode=baseline.mode.value if baseline else BaselineMode.no_baseline.value,
+            baseline_reason=(
+                None if baseline else "no qualified baseline for this dataset_version"
+            ),
             no_judge=self.cfg.no_judge,
             cli_params={
                 "repeat": self.cfg.repeat,
@@ -596,8 +812,32 @@ class Runner:
                 "tag_filter": self.cfg.tag_filter,
                 "timeout": self.cfg.timeout,
                 "save_trace": self.cfg.save_trace,
+                "gate": self.cfg.gate,
             },
         )
+
+    def _default_policy(self) -> str:
+        if self.cfg.baseline_run_id:
+            return BaselineMode.explicit.value
+        if self.cfg.gate == "release":
+            return BaselineMode.release.value
+        if self.cfg.experiment_id:
+            return BaselineMode.explicit.value
+        return BaselineMode.main_latest.value
+
+    def _write_artifacts(
+        self, run_dir: Path, aggregate: RunAggregate, gate: GateReport
+    ) -> dict[str, Path]:
+        return write_reports(run_dir, aggregate, gate, html=render_html_safe(aggregate, gate))
+
+    def _record_analytics(self, gate: GateReport) -> None:
+        """DuckDB 是派生层：投影失败不得影响已产出的报告（派生层可随时重建）。"""
+        try:
+            with Analytics(self.cfg.data_root / "analytics.duckdb") as analytics:
+                analytics.rebuild(self.cfg.runs_root, self.cfg.evals_root)
+                analytics.record_gate(gate)
+        except Exception:  # noqa: BLE001 — 分析层不可用时不掩盖运行结果
+            return
 
 
 def _new_case_run(case: Case, iteration: int, run_id: str) -> CaseRunResult:
@@ -606,6 +846,7 @@ def _new_case_run(case: Case, iteration: int, run_id: str) -> CaseRunResult:
         run_id=run_id,
         case_id=case.id,
         case_version=case.version,
+        case_tags=list(case.tags),
         iteration=iteration,
     )
 
@@ -621,11 +862,32 @@ def _session_scope(run_status: str, turn_results: list[TurnResult]) -> EvalScope
     )
 
 
+def _failure_category(result: CaseRunResult) -> str | None:
+    """兜底分类：第一个 blocking 失败的 metric id（P3 由 Failure Taxonomy 细化）。"""
+    for metric in result.all_metric_results:
+        if metric.blocking and metric.verdict in {"fail", "error"}:
+            return metric.metric
+    return None
+
+
 def _error(result: CaseRunResult, semantics: FailureSemantics, msg: str) -> CaseRunResult:
     result.status = CaseStatus.ERROR
     result.failure_semantics = semantics
     result.error = msg
+    result.failure_category = f"infra.{semantics.value.lower()}"
     return result
+
+
+def _num(value: object) -> float | None:
+    try:
+        return float(value) if value is not None else None  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_report(run_dir: Path) -> dict:
+    path = run_dir / "report.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
 
 
 def _now() -> datetime:

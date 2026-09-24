@@ -35,6 +35,9 @@ class RunMetadata(BaseModel):
     profile: str
     suite: str | None = None
     tag_filter: list[str] = Field(default_factory=list)
+    # PRD §22–§25: an experiment run belongs to exactly one variant (Spec §1.2)
+    experiment_id: str | None = None
+    variant_id: str | None = None
     variant: str | None = None
     agent_version: str | None = None
     agent_endpoint: str = ""
@@ -50,10 +53,11 @@ class RunMetadata(BaseModel):
     environment: str = "local"  # PRD §88: local | docker | remote
     status: RunStatus = RunStatus.queued
 
-    # Baseline policy (Spec §4.5): recorded per run; P0 resolves to NO_BASELINE.
+    # Baseline policy (Spec §4.5): recorded per run; NO_BASELINE when unresolved.
     baseline_policy: str | None = None
     baseline_run_id: str | None = None
     baseline_mode: str = "NO_BASELINE"
+    baseline_reason: str | None = None  # why the baseline is unresolved (§4.3)
 
     # Capability snapshot for this run (Spec §7.3): metric id -> available
     metric_capability_snapshot: dict[str, bool] = Field(default_factory=dict)

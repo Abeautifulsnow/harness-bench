@@ -293,6 +293,7 @@ def test_invalid_benchmark_exits_3(evals_tree, fixtures_root) -> None:
         asyncio.run(Runner(cfg).run())
 
 
+@pytest.mark.real_judge
 async def test_judge_phase_does_not_hold_agent_slot(evals_tree, fixtures_root, monkeypatch) -> None:
     """回归 #C01：Judge 阶段不得占用 agent 并发槽位（PRD §86）。
 
