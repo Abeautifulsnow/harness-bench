@@ -11,11 +11,16 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.7",
     "jsonschema>=4.21",
+    "duckdb>=1.5.5",
+    "jinja2>=3.1.6",
 ]
 
 [project.optional-dependencies]
 # DeepEval judge engine (Spec V2.1.1 §7: capability-probed, optional at runtime)
 judge = ["deepeval>=1.0"]
+# P5 Web Platform: read-only REST API (PRD §84). The CLI works without this extra;
+# `agent-eval serve` exits 3 with an actionable message when it is absent.
+api = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
 
 [project.scripts]
 agent-eval = "agent_eval.cli.app:main"
@@ -26,6 +31,10 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
 ]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
 
 # Native uv build backend: the generic PEP 517 bridge subprocess is broken on
 # this host ("stream did not contain valid UTF-8"), uv_build avoids it entirely.
@@ -71,7 +80,12 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.ruff.lint.per-file-ignores]
 # typer.Option()/typer.Argument() in defaults is the canonical Typer pattern
 "src/agent_eval/cli/app.py" = ["B008"]
+"src/agent_eval/cli/commands/*.py" = ["B008"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    # 退出 conftest 的 deepeval_absent 夹具，跑真实 judge 路径（需要凭据，默认不跑）
+    "real_judge: 用例需要真实 judge 能力探针",
+]

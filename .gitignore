@@ -20,3 +20,18 @@ run.id
 .DS_Store
 .idea/
 .vscode/
+
+# Web 前端（web/）：依赖与构建产物都不入库
+node_modules/
+web/dist/
+*.tsbuildinfo
+
+# 前端包管理器：bun 是唯一权威（CI 与本地都跑 bun install），
+# 提交 pnpm/npm 的锁文件会让"装的到底是哪份依赖树"变得不可判定。
+web/package-lock.json
+web/pnpm-lock.yaml
+web/yarn.lock
+
+# Python 构建产物
+dist/
+build/
