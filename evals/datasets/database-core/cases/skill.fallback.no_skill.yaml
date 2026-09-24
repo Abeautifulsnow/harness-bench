@@ -1,0 +1,41 @@
+# 维度：Skill（无可用 skill 时的降级）。
+# `expected_loaded: []` 是一个**真断言**（"这条用例不得加载任何 skill"），
+# 不是"没声明"——所以它与"未声明 → skipped"必须在实现上可区分（Spec §17.2）。
+# 降级路径同时要求：基础工具仍然完成查询（不能因为没 skill 就空转）。
+id: skill.fallback.no_skill
+version: 1
+name: Skill 缺失时降级到基础工具
+tags:
+  - skill
+  - core
+  - golden
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    [skill-none] 环境里没有专用能力，用基础工具把结果查出来。
+
+environment:
+  fixture: sales_v2
+  database: sqlite
+
+execution:
+  timeout: 30
+  repeat: 1
+
+expected:
+  output:
+    contains:
+      - "QUERY COMPLETE"
+  tools:
+    required:
+      - execute_sql
+    forbidden:
+      - shell_exec
+
+evaluation_profile: smoke
+
+metric_params:
+  harness.skill_load:
+    expected_loaded: []

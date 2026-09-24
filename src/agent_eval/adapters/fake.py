@@ -48,6 +48,10 @@ class ScriptTurn:
     subagent_tools: list[str] = field(default_factory=list)
     # retry 事件次数（PRD §8 协议事件；harness.retry 的唯一判定依据）
     retries: int = 0
+    # skill.discovered / skill.loaded 事件（PRD §8 协议事件；harness.skill_load 的观测面）
+    skills: list[str] = field(default_factory=list)
+    # context.compaction.* 事件配对数（harness.context_compaction 的观测面）
+    compactions: int = 0
     tokens: int = 200
     fail: bool = False
     tool_error: bool = False  # tool.result status=error
@@ -95,6 +99,12 @@ SECURITY_RULES: dict[str, ScriptTurn] = {
 
 
 def default_rules() -> dict[str, ScriptTurn]:
+    """消息标记 → 行为脚本。**顺序即优先级**（``select_script`` 取首个命中）。
+
+    方括号标记是显式指令，优先级高于 ``30 天`` 这类自然语言触发词：
+    一条 prompt 同时含 "[compact-retain]" 与 "30 天" 时，前者才是脚本的意图，
+    让后者抢先会把"含该措辞的用例"静默换成另一套行为。
+    """
     return {
         "[fail]": ScriptTurn(fail=True),
         "[forbidden]": ScriptTurn(tools=[*BASE_TOOLS, "shell_exec"]),
@@ -103,6 +113,44 @@ def default_rules() -> dict[str, ScriptTurn]:
         "[retry]": ScriptTurn(retries=2),
         # 同工具连续重复：harness.loop 的判定对象（PRD §44 LoopEvaluator）
         "[loop]": ScriptTurn(tools=["execute_sql"] * 5),
+        # --- 六维覆盖（PRD §103）用到的行为脚本 -----------------------------
+        # Skill：正常加载两个、按优先级首个为 sql_optimizer
+        "[skill]": ScriptTurn(skills=["sql_optimizer", "schema_reader"]),
+        # Skill：无可用 skill → 降级到基础工具（声明 expected_loaded: [] 的用例）
+        "[skill-none]": ScriptTurn(skills=[]),
+        # Skill：加载顺序错误（通用 helper 先赢），用于验证优先级断言能红
+        "[skill-wrong-order]": ScriptTurn(skills=["generic_helper", "sql_optimizer"]),
+        # MCP：调用已授权 server（白名单放行）
+        "[mcp-ok]": ScriptTurn(mcp=["db_tools"]),
+        # Context：压缩循环 / 压缩后仍保留约束
+        "[compact-loop]": ScriptTurn(compactions=5),
+        "[compact-retain]": ScriptTurn(
+            compactions=1,
+            output=BASE_OUTPUT + "（已按最近 30 天过滤；上下文压缩后该约束仍保留）",
+        ),
+        # Tool：多工具串联（schema → SQL → 格式化）
+        "[tools-chain]": ScriptTurn(tools=["database_schema", "execute_sql", "format_result"]),
+        # Tool：参数级断言的对象（Spec §11.2 tool_arguments）
+        "[orders-args]": ScriptTurn(
+            tools=["execute_sql"],
+            tool_arguments={
+                "execute_sql": {
+                    "sql": (
+                        "SELECT customer_id, SUM(amount) AS total FROM orders "
+                        "WHERE created_at >= '2026-08-01' "
+                        "GROUP BY customer_id ORDER BY total DESC LIMIT 5"
+                    ),
+                    "limit": 5,
+                }
+            },
+        ),
+        # Error Recovery：重试后成功（2 次重试，最终 success）
+        "[retry-ok]": ScriptTurn(retries=2),
+        # Error Recovery：重试耗尽（3 次重试后仍失败）
+        "[retry-exhausted]": ScriptTurn(retries=3, fail=True),
+        # Error Recovery：单轮超时（sleep 远超 execution.timeout）
+        "[slow]": ScriptTurn(sleep_s=3.0),
+        # 自然语言触发词放最后：显式标记必须能覆盖它
         "30 天": ScriptTurn(output=BASE_OUTPUT + "（已按最近 30 天过滤）"),
         **SECURITY_RULES,
     }
@@ -151,6 +199,22 @@ def turn_events(message: str, script: ScriptTurn, trace_id: str) -> list[TraceEv
         for tool in script.subagent_tools:
             add_tool(tool, sub.event_id)
         events.append(_event(trace_id, sub.event_id, "subagent.finished", {"status": "ok"}))
+    for skill in script.skills:
+        events.append(_event(trace_id, agent_span, "skill.discovered", {"name": skill}))
+        events.append(_event(trace_id, agent_span, "skill.loaded", {"name": skill}))
+    for _ in range(script.compactions):
+        started = _event(
+            trace_id, agent_span, "context.compaction.started", {"trigger": "token_budget"}
+        )
+        events.append(started)
+        events.append(
+            _event(
+                trace_id,
+                started.event_id,
+                "context.compaction.finished",
+                {"status": "ok", "retained_ratio": 0.6},
+            )
+        )
     for tool in script.tools:
         add_tool(tool, agent_span)
     for server in script.mcp:

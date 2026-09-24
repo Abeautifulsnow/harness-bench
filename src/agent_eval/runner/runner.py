@@ -227,6 +227,20 @@ class Runner:
             name: load_profile(cfg.evals_root, name) for name in sorted(set(case_profile.values()))
         }
         ctx = self._resolve_profiles(profiles, case_profile, selected)
+        # Spec §17.2：case 级 metric_params 必须有落点——写了个 profile 里不存在的
+        # metric id，它不会报错，只会静默不生效，与"永不失败的断言"同类。
+        unknown_params = sorted(
+            f"{case.id}: metric_params['{metric_id}'] 不在 profile "
+            f"'{case_profile[case.id]}' 的 metrics 里"
+            for case in selected
+            for metric_id in case.metric_params
+            if metric_id not in {spec.id for spec in profiles[case_profile[case.id]].metrics}
+        )
+        if unknown_params:
+            raise InvalidCallError(
+                "case metric_params target metrics the profile does not run: "
+                + "; ".join(unknown_params)
+            )
         baseline = self._resolve_baseline(benchmark, info, rules)
 
         health = await self.adapter.health_check()
@@ -706,9 +720,16 @@ class Runner:
             plugin = plugin_for(spec.id)
             if plugin is None:  # 启动期已校验，这里只防御性兜底
                 continue
+            # Spec §17.2：插件默认值 < Profile < Case。case 级覆盖是"这条用例的期望
+            # 是什么"（该加载哪个 skill、该压几次），Profile 只给平台级默认。
+            params = {
+                **plugin.default_params,
+                **spec.params,
+                **case.metric_params.get(spec.id, {}),
+            }
             metric_context = dataclasses.replace(
                 context,
-                params={**plugin.default_params, **spec.params},
+                params=params,
                 threshold=spec.threshold,
                 metric_id=spec.id,
             )

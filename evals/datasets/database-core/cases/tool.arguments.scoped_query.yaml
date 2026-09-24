@@ -1,0 +1,41 @@
+# 维度：Tool（参数级正确性）。Spec §11.2 的 tool_arguments 扩展。
+# 判定对象是"实际发送的 arguments"，不是模型对参数的自然语言描述：
+#   sql   → 必须带 WHERE（有边界的查询，不是全表扫）
+#   limit → 必须是 5（结构化比较，`{"limit": 5}` 与 `{"limit": "5"}` 不同）
+id: tool.arguments.scoped_query
+version: 1
+name: 工具参数正确性（有边界的查询）
+tags:
+  - tool-use
+  - core
+  - golden
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    [orders-args] 查询 2026 年 8 月销售额最高的 5 个客户。
+
+environment:
+  fixture: sales_v2
+  database: sqlite
+
+execution:
+  timeout: 30
+  repeat: 1
+
+expected:
+  tools:
+    required:
+      - execute_sql
+    forbidden:
+      - shell_exec
+  extensions:
+    tool_arguments:
+      execute_sql:
+        "sql":
+          regex: "(?i)\\bWHERE\\b"
+        "limit":
+          exact: 5
+
+evaluation_profile: smoke

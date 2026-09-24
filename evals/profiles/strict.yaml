@@ -1,0 +1,38 @@
+name: strict
+description: >
+  负向用例 profile：harness 专项指标参与阻断（Spec §17.2 的 blocking 归 Profile）。
+  与 smoke 的唯一区别是 harness.* 的 blocking=true——同一插件在不同 profile 下
+  阻断力度不同，正是"阻断权归 Profile、判定权归插件"的验证面。
+judge_concurrency: 2
+
+metrics:
+  - id: agent.task_completion
+    provider: deepeval
+    threshold: 0.70
+    blocking: false
+    fallback: native.output_checks
+
+  - id: agent.tool_correctness
+    provider: deepeval
+    threshold: 0.80
+    blocking: false
+    fallback: native.tool_sequence
+
+  - id: harness.retry
+    params:
+      max_retries: 0
+    blocking: true
+
+  - id: harness.loop
+    params:
+      max_repeats: 3
+    blocking: true
+
+  - id: harness.skill_load
+    blocking: true
+
+  - id: harness.mcp_permission
+    blocking: true
+
+  - id: harness.context_compaction
+    blocking: true

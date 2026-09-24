@@ -274,6 +274,12 @@ class Case(BaseModel):
     # output 作用于最终轮输出，tools/constraints 按 session 聚合（Spec §2.4）
     expected_final: Assertion | None = None
     evaluation_profile: str | None = None
+    # metric id → 参数覆盖（Spec §17.2 的 case 级入口）。Profile 决定"跑哪些 metric、
+    # 阈值多严"，Case 决定"这条用例的期望是什么"——harness 专项指标（该加载哪个
+    # skill、该在哪一段压缩）是**用例的属性**，塞进 Profile 会让所有用例被迫共用一个期望，
+    # 只能得到"上限类"的弱判定。键必须在 Profile 的 metrics 里存在，否则启动期 fail-fast
+    # （声明了却不生效与"永不失败的断言"同类）。
+    metric_params: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod

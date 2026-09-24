@@ -73,21 +73,9 @@ METRIC_REGISTRY: dict[str, MetricDef] = {
     ),
     "agent.plan_quality": MetricDef("agent.plan_quality", "deepeval"),
     "agent.plan_adherence": MetricDef("agent.plan_adherence", "deepeval"),
-    # --- harness：平台内确定性插件（PRD §43/§44），恒可用，不依赖 judge ---
-    "harness.retry": MetricDef(
-        "harness.retry", "harness", description="重试次数上限（PRD §44 RetryEvaluator）"
-    ),
-    "harness.loop": MetricDef(
-        "harness.loop", "harness", description="同工具连续重复调用上限（LoopEvaluator）"
-    ),
-    "harness.mcp_permission": MetricDef(
-        "harness.mcp_permission", "harness", description="MCP 授权集合（MCPPermissionEvaluator）"
-    ),
-    "harness.subagent_routing": MetricDef(
-        "harness.subagent_routing",
-        "harness",
-        description="子 Agent 路由集合（SubAgentRoutingEvaluator）",
-    ),
+    # --- harness：平台内确定性插件（PRD §43/§44）。这里的条目由 register_plugin()
+    # 在 evaluators 包导入时写入（description 取插件自述），不在此手写：
+    # 手写一份就是第二事实源，插件与注册表会在改名时悄悄分叉。
 }
 
 # DETERMINISTIC_PROVIDERS：不依赖外部 SDK 的 provider（no_judge 下仍然评测）。

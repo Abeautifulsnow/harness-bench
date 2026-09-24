@@ -1,0 +1,41 @@
+# 维度：Error Recovery（重试耗尽，负向）。
+# 3 次重试后仍然失败：harness.retry 判 FAIL（> max_retries: 1），
+# 且 run 状态非 success → native.status 也红。两条同时红是本用例的意图——
+# "重试很多次但没救回来"必须比"试一次就放弃"更显眼，否则重试会变成
+# 掩盖失败的噪音（报告里只看得到 exit code）。
+id: error.recovery.retry_exhausted
+version: 1
+name: 重试耗尽（负向）
+tags:
+  - error-recovery
+  - core
+  - regression
+  - negative
+difficulty: hard
+
+input:
+  type: single_turn
+  prompt: |
+    [retry-exhausted] 这条查询一直失败，你多试几次。
+
+environment:
+  fixture: sales_v2
+  database: sqlite
+
+execution:
+  timeout: 40
+  repeat: 1
+
+expected:
+  status: success
+  output:
+    contains:
+      - "QUERY COMPLETE"
+
+evaluation_profile: strict
+
+metric_params:
+  harness.retry:
+    max_retries: 1
+  harness.loop:
+    max_repeats: 3

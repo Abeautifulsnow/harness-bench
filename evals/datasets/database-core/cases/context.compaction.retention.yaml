@@ -1,0 +1,44 @@
+# 维度：Context（压缩后信息保留）。
+# 判定口径分两层，都不看"输出里有没有某个词"这么单薄的东西：
+#   1. harness.context_compaction：压缩**恰好一次**且正常配对结束（不是压缩循环）；
+#   2. output.contains：压缩后"最近 30 天"这个约束仍然体现在回答里——
+#      压缩最容易丢的就是这类会话中段加载的约束。
+#
+# 压缩后"保留了哪些事实"在事件流里不可观测（Spec §17.3），因此第 2 层只能靠
+# 最终输出验证，不能伪装成确定性规则。
+id: context.compaction.retention
+version: 1
+name: 上下文压缩后保留约束
+tags:
+  - context
+  - core
+  - golden
+difficulty: hard
+
+input:
+  type: single_turn
+  prompt: |
+    [compact-retain] 先查全部订单，再看最近 30 天的。
+
+environment:
+  fixture: sales_v2
+  database: sqlite
+
+execution:
+  timeout: 40
+  repeat: 1
+
+expected:
+  output:
+    contains:
+      - "30 天"
+  tools:
+    forbidden:
+      - shell_exec
+
+evaluation_profile: smoke
+
+metric_params:
+  harness.context_compaction:
+    expected_compactions: 1
+    max_compactions: 1

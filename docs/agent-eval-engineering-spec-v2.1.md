@@ -3,7 +3,8 @@
 > 文档版本：V2.3（Engineering Specification，增补型；P0 缺口回填与扩展面落地，
 > V2.2 增补 §11 评测词汇表增补 / §12 Security 挂载点 / §13 Web Platform 只读契约，
 > Changelog 见 §14；V2.3 增补 §15 必跑套件校验 / §16 安全用例集口径 /
-> §17 Evaluator Plugin SDK；V2.1 的复核修订见 §10.1）
+> §17 Evaluator Plugin SDK / §18 用例集覆盖与 case 级 metric 参数；
+> V2.1 的复核修订见 §10.1）
 > 上游文档：`agent-evaluation-regression-platform-engineering-prd-v2.md`（下称 PRD V2.0，保持有效，不因本文档作废）
 > 状态：Engineering Ready
 > 面向对象：Agent Platform / Harness / AI Infra 团队
@@ -1263,13 +1264,18 @@ V2.3 落地这条约束，并补齐 PRD §44 清单里的首批确定性项。
 
 ## 17.2 params 与 blocking 的归属
 
-- **判定阈值走 `MetricSpec.params`**（声明式配置）。没有它，插件只能硬编码阈值，
-  而"每个 case 的理想值不同"正是 harness 专项指标存在的理由。Runner 传
-  `{**plugin.default_params, **spec.params}`：插件给默认值，Profile 覆盖。
+- **判定阈值走 `MetricSpec.params`（Profile 级）与 `Case.metric_params`（Case 级）**。
+  没有它们，插件只能硬编码阈值，而"每个 case 的理想值不同"正是 harness 专项指标
+  存在的理由。合并顺序是 **插件 `default_params` < Profile `MetricSpec.params` <
+  Case `metric_params`**：插件给默认值，Profile 给平台级口径，Case 给这条用例的期望
+  （详见 §18.2）。Case 写了 Profile 未运行的 metric 时启动期 fail-fast。
 - **阻断权在 Profile，不在插件**。`EvaluationContext.result()` 的 `blocking`
   缺省 False，Runner 一律以 `spec.blocking` 覆写（与 judge metric 同构）。
   插件回答的是"这个观测说明了什么"，是否拦门禁是 Gate 策略；让插件按 verdict
   自行决定拦截，会让同一插件在不同 Profile 下无法调整阻断力度。
+- **"未声明"与"声明为空"必须可区分**（§17.4）：需要"未声明即 skipped"语义的
+  参数，缺省值一律 `None`，判定用 `is None`。写成 `[]` 会让
+  "`allowed: []` = 任何 MCP 调用都越权"退化成 skipped。
 - **插件崩溃 = EVALUATION_FAILURE**（PRD §46），不是 agent 的失败，不得静默
   变成 pass。
 
@@ -1277,25 +1283,31 @@ V2.3 落地这条约束，并补齐 PRD §44 清单里的首批确定性项。
 插件是过程内 Python 判定，不依赖外部 SDK，因此 `--no-judge` 不得把它们一起关掉。
 PRD §86 要求的是"judge 与 agent 并发分离"，不是"关掉确定性评测"。
 
-## 17.3 已实现四项与未实现十项
+## 17.3 已实现六项与未实现八项
 
 PRD §44 列出 14 项。**只实现能写清算式的**，其余明确记为未实现——恒 PASS 的
 占位比缺失更危险，它会让覆盖统计说谎（与 §11 的准入门槛同一条理由）。
 
 | Evaluator | Metric ID | 判定对象 | 观测来源 | 口径 |
 | --- | --- | --- | --- | --- |
-| RetryEvaluator | `harness.retry` | 重试次数 | `retry` 事件 | ≤ `params.max_retries`（缺省 0） |
-| LoopEvaluator | `harness.loop` | 同工具连续重复 | `tool` span 序列 | ≤ `params.max_repeats`（缺省 3） |
-| MCPPermissionEvaluator | `harness.mcp_permission` | MCP 是否越权 | `mcp` span 名 | ⊂ `params.allowed`（空则 skipped） |
-| SubAgentRoutingEvaluator | `harness.subagent_routing` | 子 Agent 路由 | `subagent` span | == `params.expected`（空则 skipped） |
+| RetryEvaluator | `harness.retry` | 重试次数 | `retry` 事件 | ≤ `max_retries`（缺省 0） |
+| LoopEvaluator | `harness.loop` | 同工具连续重复 | `tool` span 序列 | ≤ `max_repeats`（缺省 3） |
+| MCPPermissionEvaluator | `harness.mcp_permission` | MCP 是否越权 | `mcp` span 名 | ⊂ `allowed`（未声明则 skipped） |
+| SubAgentRoutingEvaluator | `harness.subagent_routing` | 子 Agent 路由 | `subagent` span | == `expected`（未声明则 skipped） |
+| SkillLoadEvaluator | `harness.skill_load` | 加载的 skill 集合与首个 | `skill.loaded` 事件 | == `expected_loaded`，首个 == `expected_first` |
+| ContextCompactionEvaluator | `harness.context_compaction` | 压缩次数 | `context.compaction.*` 配对事件 | == `expected_compactions` / ≤ `max_compactions` |
 
-未实现十项，按卡住的原因分三类：
+后两项合并在两个 PRD 名字上的处理：`SkillPriorityEvaluator` + `SkillLoadEvaluator`
+合成 `harness.skill_load`（同一组 `skill.*` 事件，拆开只会得到两条永远同时红的指标）；
+`ContextCompressionEvaluator` 落在 `harness.context_compaction`，"该不该压缩"用
+`expected_compactions` 表达，比"压缩次数上限"更能表达"不该压的时候别压"。
+
+未实现八项，按卡住的原因分三类：
 
 ```text
 缺"声明侧"（观测有了，case 里没有可判的期望）
-  SkillPriorityEvaluator / SkillLoadEvaluator
   MemoryRetrievalEvaluator / MemoryConflictEvaluator
-  ContextCompressionEvaluator / SubAgentRecoveryEvaluator
+  SubAgentRecoveryEvaluator
 缺"观测侧"（事件协议里没有该事实）
   CompressionRetentionEvaluator   # 压缩后"保留了什么"不可观测，只能测长度
   ForkEvaluator                   # EVENT_TYPES 里没有 fork，且 adapter 无分叉通道
@@ -1304,11 +1316,17 @@ PRD §44 列出 14 项。**只实现能写清算式的**，其余明确记为未
   MCPFallbackEvaluator            # "降级是否合理"需比较工具能力，属 judge 职责（PRD §110-3）
 ```
 
-判定"缺声明侧"的依据：这些指标需要的期望值（该加载哪个 skill、该召回哪段记忆、
-压缩后该保留哪些事实）在 case 词汇表里**没有对应字段**，且不应由插件发明——
-断言词汇表（§2）是平台唯一入口，插件往里塞私有字段会绕开
-`scan_unsupported_assertions` 的启动期校验。因此正确顺序是：先补词汇表与观测面，
-再补插件；反过来做就会得到"声明了却静默失效"或"没声明也能判 pass"。
+判定"缺声明侧"的依据：这些指标需要的期望值（该召回哪段记忆、该恢复成什么状态）
+在 case 词汇表里**没有对应字段**，且不应由插件发明——断言词汇表（§2）是平台唯一
+入口，插件往里塞私有字段会绕开 `scan_unsupported_assertions` 的启动期校验。
+因此正确顺序是：先补词汇表与观测面，再补插件；反过来做就会得到
+"声明了却静默失效"或"没声明也能判 pass"。
+
+**Skill / Context 两项为什么能落地而 Memory 不能**：它们的期望值可以写成
+"平台级字段"而非"新断言词汇"——`metric_params`（§17.2）是 metric 的配置位，
+不是断言词汇表的扩张，因此不需要 `native.py` 参与，也不进入 §2 的词汇表校验。
+Memory 的期望（"该召回第几段记忆"）无法表达成同一个 metric 的参数，它需要新的
+case 级字段与新的观测面，那是 `assertion-extensions` 的任务。
 
 ## 17.4 MCPPermission 与 security.forbidden_mcp 的分工
 
@@ -1320,7 +1338,14 @@ PRD §44 列出 14 项。**只实现能写清算式的**，其余明确记为未
   默认不阻塞。
 
 未声明 `params.allowed` 时判 `skipped`（blocking=False）而不是 pass：
-没有声明就没有依据，凭空全判 pass 是假信号。`SubAgentRoutingEvaluator` 同理。
+没有声明就没有依据，凭空全判 pass 是假信号。`SubAgentRoutingEvaluator` 与
+`SkillLoadEvaluator` 同理。
+
+**"未声明"与"声明为空"必须可区分**。`allowed: []`（任何 MCP 调用都算越权）、
+`expected_loaded: []`（不得加载任何 skill）都是**真断言**。若把两者的缺省值都写成
+`[]`，"没声明"与"声明为空"就合并了，前者会把后者降级成 skipped——那正是
+"该红的时候不红"。因此这些参数的缺省值是 `None`，判定用 `is None` 而不是 `not x`。
+（`SubAgentRoutingEvaluator` 同理：`expected: []` = 不得路由任何子 Agent。）
 
 ## 17.5 验收口径
 
@@ -1331,5 +1356,72 @@ PRD §44 列出 14 项。**只实现能写清算式的**，其余明确记为未
   没有这条断言，"可扩展"只是文档承诺。
 - **边界**：交替型工具调用（A,B,A,B）不算循环——读写交替是正常流程，
   误报比漏报更快让指标失去信誉（§11 准入原则）。
+- **未声明的判断**：声明侧缺失时判 `skipped`，不是 pass。同时在
+  `Case.metric_params` 里声明了 profile 未运行的 metric 时，启动期 fail-fast
+  （写了个不会生效的期望，与"永不失败的断言"同类）。
+
+---
+
+# 18. 用例集覆盖与 case 级 metric 参数（V2.3）
+
+## 18.1 PRD §103 的六维覆盖
+
+PRD §103 要求"至少 20~30 Cases，覆盖 Tool / Database / Skill / MCP / Context /
+Error Recovery"。此前的 6 条只能算 Tool + Database + Error Recovery 各有一条，
+Skill / MCP / Context **一条都没有**。
+
+缺口的真实后果不是"数量不足"：`task_success.max_regression_percent: 1` 在 6 个
+case 上的分辨力极低——一个 case 翻转就是 16.7% 的回归幅度，阈值形同虚设。
+
+补齐后的口径（`tests/test_case_coverage.py` 固定）：
+
+```text
+总量        31 条 case（PRD §103 的"至少 20~30"是下限口径；31 条让
+            task_success.max_regression_percent 的分辨力回到 ~3%/case 量级）
+维度        六维各有 ≥2 条，且每条维度 case 都带该维度的 tag
+判定        维度 case 必须声明可判定的期望（断言 或 metric_params），标签不算覆盖
+双向        负向 case 必须真的 FAIL——只有正向时"断言写错了"与"agent 合规"
+            在报告里长得一模一样
+```
+
+## 18.2 case 级 `metric_params`（Spec §17.2 的第三级）
+
+Profile 决定"跑哪些 metric、阈值多严"，Case 决定"这条用例的期望是什么"。
+harness 专项指标的期望（该加载哪个 skill、该压几次）是**用例的属性**：
+塞进 Profile 会让所有用例被迫共用一个期望，只能得到"上限类"的弱判定。
+
+```yaml
+metric_params:
+  harness.skill_load:
+    expected_first: sql_optimizer
+  harness.context_compaction:
+    expected_compactions: 1
+```
+
+合并顺序：**插件默认值 < Profile `params` < Case `metric_params`**。
+键必须在 Profile 的 `metrics` 里存在，否则启动期 fail-fast——写了个不会生效的
+期望，与"永不失败的断言"同类（§17.5 最后一条）。
+
+## 18.3 维度断言的真实性
+
+六维里有三维（Skill / MCP / Context）此前**写不出有意义的断言**，这就是本任务与
+`harness-evaluators` 互为先后的原因：先想清楚"拿什么断言"，再动手加 case。
+本轮三条的断言来源：
+
+| 维度 | 断言来源 | 不看什么 |
+| --- | --- | --- |
+| Skill | `harness.skill_load`：加载集合 + 首个加载者 | 不看"是否提到了 skill 名" |
+| MCP | `harness.mcp_permission`：授权集合（白名单） | 不看"是否描述了调用" |
+| Context | `harness.context_compaction`：配对的压缩次数 + `output.contains` 验证保留 | 不看"是否有压缩字样" |
+
+Context 维度的第 2 层（压缩后约束仍在回答里）只能靠最终输出验证：压缩后
+**保留了哪些事实**在事件流里不可观测（§17.3 的 CompressionRetention）。这一层
+如实标注为受限覆盖，不伪装成确定性规则。
+
+## 18.4 Fixture 边界
+
+新增 case 不得越过已实现的 fixture 能力（`filesystem` / `sqlite`）；
+`postgres` / `git` 在 `get_provider()` 里显式 raise planned，用了会以 infra error
+收场。本轮全部落在 `sales_v2` + `sqlite` 内。
 
 ---

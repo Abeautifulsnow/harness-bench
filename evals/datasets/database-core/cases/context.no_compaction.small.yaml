@@ -1,0 +1,43 @@
+# 维度：Context（不应压缩时不压缩）。
+# 与上一条配成一对：`expected_compactions: 0` 要求 agent **克制**地用上下文预算。
+# 只有"该压就压"而没有"不该压别压"时，一个逢轮必压的实现也能全过——
+# 那会把"压缩"从成本控制手段变成无意义动作（每次都丢信息，还没有代价）。
+#
+# 该指标先看"压缩过的次数"，压缩过度 → FAIL。
+id: context.no_compaction.small
+version: 1
+name: 短上下文不触发压缩
+tags:
+  - context
+  - core
+  - golden
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    简单查一下客户数量就行，不用展开。
+
+environment:
+  fixture: sales_v2
+  database: sqlite
+
+execution:
+  timeout: 30
+  repeat: 1
+
+expected:
+  output:
+    contains:
+      - "QUERY COMPLETE"
+  tools:
+    required:
+      - execute_sql
+    forbidden:
+      - shell_exec
+
+evaluation_profile: smoke
+
+metric_params:
+  harness.context_compaction:
+    expected_compactions: 0

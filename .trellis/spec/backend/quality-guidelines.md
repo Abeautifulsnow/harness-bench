@@ -7,7 +7,7 @@
 ## 检查命令（合并前必须全绿）
 
 ```bash
-uv run pytest        # 186 tests（含 e2e：FakeAgent 全链路 + 真实 TCP mock server + REST API）
+uv run pytest        # 207 tests（含 e2e：FakeAgent 全链路 + 真实 TCP mock server + REST API）
 uv run ruff check .  # 规则：E/F/I/UP/B/SIM；CLI 文件豁免 B008（Typer 惯用法）
 uv run ruff format --check .
 cd web && bun run typecheck && bun run build   # 前端改动时
@@ -98,6 +98,31 @@ judge 行为的用例标 `@pytest.mark.real_judge` 退出该夹具。装了 deep
 7. **必须双向测试**：命中 → FAIL、合规 → PASS。只测一侧会把"恒判 fail 的
    evaluator"当成正确实现。声明侧缺失时的正确判决是 `skipped`（blocking=False），
    不是 pass——没有依据的 pass 是假信号。
+8. **"未声明"与"声明为空"必须可区分**：需要 skipped 语义的参数缺省值一律 `None`，
+   判定用 `is None`。写成 `[]` 会让"`allowed: []` = 任何 MCP 调用都越权"这类
+   **真断言**退化成 skipped——该红的时候不红。
+9. **参数三级合并**：插件 `default_params` < Profile `MetricSpec.params` <
+   Case `metric_params`。Case 写了 Profile 未运行的 metric → 启动期 fail-fast；
+   写了个不生效的期望与"永不失败的断言"同类。
+10. **聚合指标不拆名**：同一观测面的两个 PRD 名字（SkillPriority + SkillLoad）
+    合成一条 metric。拆开只会得到两条永远同时红/同时绿的指标，让覆盖统计虚高。
+
+## 用例集覆盖约束（PRD §103，Spec §18）
+
+"用例数量够"与"维度真被覆盖"是两件事。守住三条：
+
+1. **标签不算覆盖，断言才算**。维度 case 必须声明可判定的期望（断言或
+   `metric_params`）；只打 `skill` 标签而没有 `harness.skill_load` 期望的 case
+   是假覆盖。`tests/test_case_coverage.py` 逐条检查这一点。
+2. **负向 case 必须真的红**。只有正向用例时，"断言写错了（正则拼错、字段名错）"
+   与"agent 合规"在报告里长得一模一样——两者都是全绿。每个维度至少一条负向。
+3. **golden 只收正向**。把负向 case 放进 golden 会让
+   `golden.required_pass_rate: 1.0` 永远 FAIL（Release Gate 不可用）。
+4. **fixture 边界**：新 case 只能落在已实现的 fixture 能力（`filesystem` /
+   `sqlite`）内；`postgres` / `git` 在 `get_provider()` 里显式 raise planned，
+   用了会以 infra error 收场，不是"暂时没数据"。
+5. **维度扩展的顺序**：先想清楚"拿什么断言"，再动手加 case。写不出真断言的维度
+   应标注为**受限覆盖**并记录缺口，不要造只会"输出里出现某个词"就算过的假覆盖。
 
 ## 断言有效性不变式（2026-09-23 review #I01–#I04 的教训）
 

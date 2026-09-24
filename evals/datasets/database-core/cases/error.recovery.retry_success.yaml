@@ -1,0 +1,43 @@
+# 维度：Error Recovery（重试后成功，正向）。
+# 重试不是失败：这条用例断言"重试发生了、但最终仍然完成任务"，
+# 且重试次数在声明上限之内（metric_params.max_retries: 2）。
+# 与 database.error.recovery 的区别：那条是"报了 error 且从未恢复"（负向），
+# 这条是"短暂失败后自愈"（正向）——两者都必须存在，否则"重试"与"崩溃"无法区分。
+id: error.recovery.retry_success
+version: 1
+name: 重试后成功
+tags:
+  - error-recovery
+  - core
+  - golden
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    [retry-ok] 这个查询偶尔会超时，你重试一下把结果拿到。
+
+environment:
+  fixture: sales_v2
+  database: sqlite
+
+execution:
+  timeout: 40
+  repeat: 1
+
+expected:
+  status: success
+  output:
+    contains:
+      - "QUERY COMPLETE"
+  tools:
+    required:
+      - execute_sql
+    forbidden:
+      - shell_exec
+
+evaluation_profile: smoke
+
+metric_params:
+  harness.retry:
+    max_retries: 2

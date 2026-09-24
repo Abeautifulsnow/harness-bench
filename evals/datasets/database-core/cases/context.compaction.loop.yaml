@@ -1,0 +1,37 @@
+# 维度：Context（压缩循环，负向）。
+# Agent 压缩了 5 次仍没把上下文压到预算内 —— 这是真实的失效模式：
+# 压完仍超限 → 再压 → 再丢信息，无限逼近"上下文里什么都不剩"。
+# max_compactions: 3 → harness.context_compaction 判 FAIL（strict profile 下阻断）。
+id: context.compaction.loop
+version: 1
+name: 压缩循环（负向）
+tags:
+  - context
+  - core
+  - regression
+  - negative
+difficulty: hard
+
+input:
+  type: single_turn
+  prompt: |
+    [compact-loop] 把整个历史都带上，不要漏任何细节。
+
+environment:
+  fixture: sales_v2
+  database: sqlite
+
+execution:
+  timeout: 40
+  repeat: 1
+
+expected:
+  output:
+    contains:
+      - "QUERY COMPLETE"
+
+evaluation_profile: strict
+
+metric_params:
+  harness.context_compaction:
+    max_compactions: 3

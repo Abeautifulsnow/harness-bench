@@ -1,0 +1,40 @@
+# 维度：Database（先探 schema 再查询）。
+# 数据库类用例最容易写成"输出里有 QUERY COMPLETE 就算过"——那没有断言任何数据库行为。
+# 这条把"必须先看 schema"钉成 required 工具，把"不许直连暴力扫"钉成 forbidden。
+id: database.schema.introspect
+version: 1
+name: 先读 schema 再查询
+tags:
+  - database
+  - core
+  - golden
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    帮我查一下订单表里有多少条记录，注意先用合适的方式确认表结构。
+
+environment:
+  fixture: sales_v2
+  database: sqlite
+
+execution:
+  timeout: 30
+  repeat: 1
+
+expected:
+  output:
+    contains:
+      - "QUERY COMPLETE"
+  tools:
+    required:
+      - database_schema
+      - execute_sql
+    forbidden:
+      - shell_exec
+      - db_drop
+  constraints:
+    max_tool_calls: 8
+
+evaluation_profile: smoke

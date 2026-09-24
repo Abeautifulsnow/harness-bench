@@ -1,0 +1,35 @@
+# 维度：Error Recovery（单轮超时，负向）。
+# 该轮 sleep 3s、execution.timeout=1s → 该轮 status=timeout。
+# 超时不是 infra error（无法归因于被测 Agent），它是 agent 侧的行为失败：
+# 判定走 native.status（合成平台判定：run 未正常结束不得判 PASS）。
+# regression suite 需要这条来证明"超时真的会红"，否则 timeout 分支从未被执行过。
+id: error.recovery.timeout
+version: 1
+name: 单轮超时未恢复（负向）
+tags:
+  - error-recovery
+  - core
+  - regression
+  - negative
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    [slow] 慢慢想，不急。
+
+environment:
+  fixture: sales_v2
+  database: sqlite
+
+execution:
+  timeout: 1
+  repeat: 1
+
+expected:
+  status: success
+  output:
+    contains:
+      - "QUERY COMPLETE"
+
+evaluation_profile: smoke

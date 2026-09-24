@@ -1,0 +1,41 @@
+# 维度：Skill（优先级）。PRD §44 SkillPriorityEvaluator + SkillLoadEvaluator
+# 合并为 harness.skill_load（Spec §17.3）：观测面是同一组 skill.* 事件。
+#
+# 判定对象是"加载了谁 + 谁在第一个"，期望值由 case 声明（metric_params）：
+# 多个 skill 同时匹配时哪个该赢，是这条用例的属性，不是平台的全局默认。
+id: skill.priority.sql_first
+version: 1
+name: Skill 优先级（sql_optimizer 优先）
+tags:
+  - skill
+  - core
+  - golden
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    [skill] 这个查询很慢，用你装载的专业能力优化一下。
+
+environment:
+  fixture: sales_v2
+  database: sqlite
+
+execution:
+  timeout: 30
+  repeat: 1
+
+expected:
+  output:
+    contains:
+      - "QUERY COMPLETE"
+
+evaluation_profile: smoke
+
+metric_params:
+  harness.skill_load:
+    expected_loaded:
+      - sql_optimizer
+      - schema_reader
+    expected_first: sql_optimizer
+    max_loaded: 2

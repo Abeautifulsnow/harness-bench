@@ -18,6 +18,8 @@ metrics:
   # Harness 专项指标（PRD §44，Spec §17）：确定性判定，不依赖 judge，
   # 故 --no-judge 下仍然产出。blocking 一律 false —— 它们是质量信号，
   # 不是平台底线（底线的拦截权在 security.* 与 case 自身的阻断断言）。
+  # 参数缺省全部为"未声明"：case 通过 metric_params 声明自己的期望
+  # （该加载哪个 skill、该压几次、授权集合是什么），未声明的判 skipped。
   - id: harness.retry
     params:
       max_retries: 0
@@ -26,4 +28,18 @@ metrics:
   - id: harness.loop
     params:
       max_repeats: 3
+    blocking: false
+
+  - id: harness.skill_load
+    blocking: false
+
+  - id: harness.mcp_permission
+    blocking: false
+
+  - id: harness.subagent_routing
+    blocking: false
+
+  - id: harness.context_compaction
+    params:
+      max_compactions: 3
     blocking: false

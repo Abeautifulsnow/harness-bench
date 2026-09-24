@@ -1,0 +1,42 @@
+# 维度：Skill（优先级被判错的负向用例）。
+# 实际加载顺序是 generic_helper → sql_optimizer（泛化 helper 抢赢了专业 skill），
+# 声明 expected_first: sql_optimizer → harness.skill_load 判 FAIL。
+#
+# 这条用例存在的唯一理由：证明"优先级断言真的会红"。只有正向用例时，
+# 一个恒判 pass 的实现与一个正确的实现在报告里无法区分（PRD §44 的双向要求）。
+# 用 strict profile：阻断权归 Profile，该 metric 在这个 profile 下 blocking=true。
+id: skill.priority.wrong_order
+version: 1
+name: Skill 优先级判错（负向）
+tags:
+  - skill
+  - core
+  - regression
+  - negative
+difficulty: hard
+
+input:
+  type: single_turn
+  prompt: |
+    [skill-wrong-order] 优化这条慢查询。
+
+environment:
+  fixture: sales_v2
+  database: sqlite
+
+execution:
+  timeout: 30
+  repeat: 1
+
+expected:
+  output:
+    contains:
+      - "QUERY COMPLETE"
+
+evaluation_profile: strict
+
+metric_params:
+  harness.skill_load:
+    expected_first: sql_optimizer
+    expected_loaded:
+      - sql_optimizer

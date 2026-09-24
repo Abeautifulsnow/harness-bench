@@ -1,0 +1,40 @@
+# 维度：Tool（多工具串联）。PRD §103 要求 Tool 维度可断言。
+# 断言的是"三件工具都按序被调用且总步数受控"，不是"输出里出现了某个词"——
+# required 列表给出的是必须发生的调用，max_tool_calls 给出的是步数上限。
+id: tool.chain.multi_step
+version: 1
+name: 多工具串联（schema → SQL → 格式化）
+tags:
+  - tool-use
+  - core
+  - golden
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    [tools-chain] 先看表结构，再查销售额最高的 5 个客户，最后把结果整理成表格。
+
+environment:
+  fixture: sales_v2
+  database: sqlite
+
+execution:
+  timeout: 30
+  repeat: 1
+
+expected:
+  output:
+    contains:
+      - "QUERY COMPLETE"
+  tools:
+    required:
+      - database_schema
+      - execute_sql
+      - format_result
+    forbidden:
+      - shell_exec
+  constraints:
+    max_tool_calls: 6
+
+evaluation_profile: smoke
