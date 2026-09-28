@@ -143,3 +143,139 @@ P0–P5 交付后复核 PRD/Spec 验收条款，识别 9 处未完成并建为�
 - 批次二（体量）：`harness-evaluators`（先 2~3 个）→ `evaluator-plugin-sdk` → `mvp-case-expansion`
 - 批次三（扩展面）：`semantic-trace-diff` / `case-artifacts` / `assertion-extensions`
 - 可选：`case-scheduler`
+
+
+## Session 4: 批次一~三：8 个缺口任务全部落地（门禁/体量/扩展面）
+
+**Date**: 2026-09-28
+**Task**: 批次一~三：8 个缺口任务全部落地（门禁/体量/扩展面）
+**Branch**: `main`
+
+### Summary
+
+修掉三处门禁失真（Release Gate 必跑套件未校验 / 安全用例为 0 掩盖 MCP 透传缺陷 / native.status 恒 pass 稀释分母）；落定三处语义（观测不足的第三类结局 skipped、git diff 裁决不做改文件快照、归一化规则表封闭且每条配对反例）；case 级产物按 PRD §90 落地（cleanup 前采集、能力表不造占位、索引只挂宿主、越界查名一律 404）。369 tests 全绿。
+
+### Main Changes
+
+### Main Changes
+
+批次一~三全部落地：8 个缺口任务、6 次功能提交 + 2 次记账提交。每一项都按 ROADMAP
+的批次顺序推进，且都是"先想清楚拿什么判定，再动手"。
+
+| 批次 | 任务 | commit |
+| --- | --- | --- |
+| 一（门禁） | `release-gate-suites` | `ea162a3` |
+| 一（门禁） | `security-cases` | `38f3ad8` |
+| 二（体量） | `harness-evaluators` + `evaluator-plugin-sdk` | `9baed6a` |
+| 二（体量） | `mvp-case-expansion` | `2604520` |
+| 三（扩展面） | `assertion-extensions` | `c612c74` |
+| 三（扩展面） | `semantic-trace-diff` | `c1c5707` |
+| 三（扩展面） | `case-artifacts` | `2714f76` |
+
+`case-scheduler`（P3）按 ROADMAP 的裁决不做：纯重构，功能已在，风险是动全绿的
+执行核心。
+
+**三条"门禁失真"性质的缺陷被修掉**（它们不会报错，只会让 Gate 在该拦时放行）：
+
+1. `release.yaml` 写了 `suites: [golden, regression, security, core]` 而
+   `evaluate_gate()` 从不读它 → 只跑 smoke 的 run 也能拿 Release PASS。现在按
+   PRD §108 强制校验必跑套件覆盖。
+2. 安全评测引擎完整但零条 case 用它 → `security.max_failures: 0` 平凡通过。
+   补齐用例时**实测**出 `evaluate_security` 的 `mcp_names` 恒为 None 的透传缺陷，
+   `security.forbidden_mcp` 永不触发——这是"断言存在但观测面断了"的典型，单元
+   测试全绿也照样漏。
+3. `native.status` 对任何含扩展键的断言都产出 → 每个有扩展断言的 case 多一条
+   永远 pass 的指标、稀释 Gate 分母。改为按 `_needs_status_group` 条件产出。
+
+**三处语义决定，都写进了契约文档与规范**：
+
+- **观测不足有第三类结局**（`assertion-extensions`，Spec §19.1）：旧实现里
+  "看不到"只能塞进 PASS 或 FAIL 两类错答案。新增 `ObservationUnavailable`
+  承载 `skipped`（blocking=False），与"声明形状非法"的 `UnsupportedAssertionError`
+  （判 `error`）严格分开：前者要用例作者改 fixture/协议，后者要改用例。
+  `max_cost` / `exit_code` 遵守 `null ≠ 0`（PRD §59）。
+- **`git diff` 裁决不做**（`semantic-trace-diff`，Spec §20.4）：实测 fixture
+  workdir 位于平台仓库工作树内部，`git diff` 报的是平台自己的 17 个源码文件、
+  而 agent 新建的文件不可见——最该看到的一类恰好漏掉。改用 `file_state` 快照
+  比对，理由与实测证据写死，避免下次重做这个判断。
+- **归一化规则表是封闭的**（Spec §20.1）：每条规则配一个**不该被归一化掉**的
+  对照用例。漏判比误报危险——误报让人多点一次确认，漏判让真实回归静默通过。
+
+**`case-artifacts` 的四条主线**（PRD §90，口径在 Spec §21 新章节）：采集时机在
+cleanup 之前的 `finally`（cleanup 会删 workspace 与库文件）；能力表
+`UNAVAILABLE_KINDS` 如实列出采不到的五类并各给原因（含 `logs`——进程日志走
+stdout 从未落盘，是结构缺口不是漏做），采不到的绝不造空文件占位；索引只有一份
+（`CaseRunResult.artifacts`，`id` 就是 `case_run_id`，不建第二份映射；`case_id`/
+`iteration` 由宿主给出，冗余一份会让索引与文件位置各说各话）；采集失败一律记账
+不改判定（provider `snapshot()` 是对外扩展点，不该有能力把一次跑完的执行改判成
+ERROR）。
+
+### 实现中发现的问题（已记入 ROADMAP「执行中的发现」）
+
+1. **run-level metric diff 没有噪声下限**：`latency_ms` 是 wall-clock，调度抖动
+   就让均值从 0 变 0.4，于是打出一行 `regressed`。仅影响呈现层（Gate 不消费
+   run-level diff，case 级走有阈值的性能判定，这个不对称像遗漏）。当下处置是
+   不拿更弱的断言盖住问题，显式列为例外并写明原因。
+2. **baseline 解析不看跑了哪些 suite**：`--suite smoke`（3 条）会跟最近一次 PASS
+   的 `--suite golden`（24 条）比平均工具调用数。只在按 suite 分批跑时出现。
+3. **case 级产物的能力缺口**（本轮新增）：`logs`/`screenshots` 的缺口与 PRD 的
+   "未来"项（§88 remote 环境、日志落盘策略）绑定，不是忘了实现。
+
+### 一处结构性坑（值得单独记）
+
+case 产物的"原文"端点最初写成 `.../artifacts/{name}/raw`。当产物名为
+`files/raw`（agent 在工作区根写出一个叫 `raw` 的文件）时，`/artifacts/files/raw`
+会被路由解读成"`files` 的原文"，于是**下载得到、预览 404 说产物不存在**——
+半通状态只在浏览器里才会被发现。改为平级前缀 `.../artifact-raw/{name}`，歧义在
+结构上就不存在，并加了直接覆盖这个产物名的用例。
+
+### Verification
+
+- [OK] `uv run pytest -q` → **369 passed**（本轮 305 → 369）
+- [OK] `uv run ruff check .` → All checks passed
+- [OK] `uv run ruff format --check .` → 121 files already formatted
+- [OK] `cd web && npm run typecheck && npm run build` → 通过
+- [OK] 真实端到端：`benchmark run --tag smoke --no-judge` 跑通 →
+  `artifacts/<case>/iter1/artifacts/database.sql`（678B）+ 索引登记
+  `raw.trace.jsonl`；`report.json` 5KB 未嵌入产物内容
+- [OK] 反例实测红：`../../../../etc/passwd` 等 5 种写法 → 404；
+  索引 `path` 越界（`../outside.txt`，目标文件真实存在）→ 404
+
+### Status
+
+[OK] **Completed**（批次一~三全部完成，仅 `case-scheduler` 按裁决不做）
+
+### Next Steps
+
+- 可选：`case-scheduler`（P3，纯重构，可一直不做）
+- ROADMAP「执行中的发现」三条待立项：run-level diff 噪声下限、baseline 的
+  suite 覆盖约束、case 产物 logs/screenshots 能力缺口
+- 每次提交都收到 Mimosa 提示"git commit 前没有得到完整扫描结论
+  （project_model/python_ast_unavailable）"——**不要据此宣称项目安全**，
+  需要时重跑完整审计
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ea162a3` | (see git log) |
+| `38f3ad8` | (see git log) |
+| `9baed6a` | (see git log) |
+| `2604520` | (see git log) |
+| `c612c74` | (see git log) |
+| `c1c5707` | (see git log) |
+| `2714f76` | (see git log) |
+| `fa5f79b` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
