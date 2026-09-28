@@ -357,7 +357,12 @@ function RegressionDetail({ runId }: { runId: string }) {
 }
 
 function TraceDiffSection({ data }: { data: RegressionAnalysis }) {
-  const changed = data.trace_diffs.filter((diff) => diff.changed);
+  // `changed` 为假但带 semantic_equal / diff_notes 的 case 也要展示：前者是
+  // "文字不同但语义相同"（Spec §20.2），后者是"这次结论有低置信部分"。
+  // 只按 changed 过滤会让这两类信息消失，用户看到空表会以为没比对。
+  const changed = data.trace_diffs.filter(
+    (diff) => diff.changed || diff.semantic_equal.length > 0 || diff.diff_notes.length > 0,
+  );
   if (changed.length === 0) {
     return (
       <Section title="Trace Diff（PRD §56）">
@@ -370,7 +375,7 @@ function TraceDiffSection({ data }: { data: RegressionAnalysis }) {
   }
   return (
     <Section
-      title="Trace Diff（PRD §56 十项对比 + §57 参数结构化 diff）"
+      title="Trace Diff（PRD §56 十项对比 + §57 参数结构化 / 语义 diff）"
       description={`${changed.length} 个 case 的执行路径发生变化。`}
     >
       <div className="space-y-3">
@@ -444,6 +449,7 @@ function TraceDiffSection({ data }: { data: RegressionAnalysis }) {
                         <TableHead>Baseline</TableHead>
                         <TableHead>Candidate</TableHead>
                         <TableHead>Change</TableHead>
+                        <TableHead>判定层级</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -462,10 +468,64 @@ function TraceDiffSection({ data }: { data: RegressionAnalysis }) {
                               {arg.change}
                             </Badge>
                           </TableCell>
+                          {/* 判定层级（Spec §20.2）：semantic / ast 表示归一化或 AST 介入过，
+                              structural 表示逐字比对。用户据此判断结论的可信度。 */}
+                          <TableCell className="font-mono text-[10px] text-muted-foreground">
+                            {arg.comparison}
+                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
                   </Table>
+                </div>
+              )}
+
+              {diff.semantic_equal.length > 0 && (
+                <div className="space-y-1">
+                  <div className="text-[11px] tracking-wide text-muted-foreground uppercase">
+                    语义相同（不算差异）
+                  </div>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Tool</TableHead>
+                        <TableHead>Path</TableHead>
+                        <TableHead>Baseline</TableHead>
+                        <TableHead>Candidate</TableHead>
+                        <TableHead>层级</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {diff.semantic_equal.slice(0, 20).map((item, index) => (
+                        <TableRow key={`${item.tool}-${item.path}-${index}`}>
+                          <TableCell className="font-mono text-xs">{item.tool}</TableCell>
+                          <TableCell className="font-mono text-xs">{item.path}</TableCell>
+                          <TableCell className="max-w-[16rem] truncate font-mono text-xs text-muted-foreground">
+                            {JSON.stringify(item.baseline)}
+                          </TableCell>
+                          <TableCell className="max-w-[16rem] truncate font-mono text-xs text-muted-foreground">
+                            {JSON.stringify(item.candidate)}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="neutral">{item.comparison}</Badge>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+
+              {diff.diff_notes.length > 0 && (
+                <div className="space-y-1 rounded-md border border-[var(--warn)]/40 bg-[var(--warn)]/5 p-2">
+                  <div className="text-[11px] tracking-wide text-muted-foreground uppercase">
+                    降级说明
+                  </div>
+                  {diff.diff_notes.map((note) => (
+                    <div key={note} className="text-xs text-muted-foreground">
+                      {note}
+                    </div>
+                  ))}
                 </div>
               )}
             </div>

@@ -315,6 +315,20 @@ export interface ArgumentDiff {
   baseline: unknown;
   candidate: unknown;
   change: "added" | "removed" | "changed";
+  // 结论是按哪一层判出来的（Spec §20.2）：structural = 逐字，semantic = 归一化，ast = SQL AST。
+  comparison: "structural" | "semantic" | "ast";
+}
+
+// 判为语义相同的参数路径（Spec §20.2）：文字不同、语义相同，因此不进 argument_diffs。
+// 单独列出是为了让"参数差异为空"能与"这次没比"区分开。
+export interface SemanticEqual {
+  tool: string;
+  path: string;
+  baseline: unknown;
+  candidate: unknown;
+  comparison: "semantic" | "ast";
+  detail: string | null;
+  degraded_kind: string | null;
 }
 
 export interface TraceDiff {
@@ -325,6 +339,9 @@ export interface TraceDiff {
   added_tools: string[];
   removed_tools: string[];
   argument_diffs: ArgumentDiff[];
+  semantic_equal: SemanticEqual[];
+  // 归一化降级的去重摘要（Spec §20.2）：空数组 = 本次 diff 的结论没有低置信部分。
+  diff_notes: string[];
   model_calls: [number, number];
   subagent_calls: [number, number];
   errors: [number, number];

@@ -8,6 +8,25 @@ Spec（V2.2）的验收条款，不是"感觉还差点"。
 
 ---
 
+## 进度（2026-09-28 更新）
+
+| 批次 | 任务 | 状态 | commit |
+| --- | --- | --- | --- |
+| 一（门禁） | `release-gate-suites` | ✅ | `ea162a3` |
+| 一（门禁） | `security-cases` | ✅ | `38f3ad8` |
+| 二（体量） | `harness-evaluators` + `evaluator-plugin-sdk` | ✅ | `9baed6a` |
+| 二（体量） | `mvp-case-expansion` | ✅ | `2604520` |
+| 三（扩展面） | `assertion-extensions` | ✅ | `c612c74` |
+| 三（扩展面） | `semantic-trace-diff` | ✅ | 本轮 |
+| 三（扩展面） | `case-artifacts` | ⏳ 待做（依赖 `semantic-trace-diff` 的 git diff 裁决） | — |
+| 可选 | `case-scheduler` | 不做（纯重构，见下） | — |
+
+`semantic-trace-diff` 的第三项交付（`git diff`）的裁决与依据写在
+**Spec §20.4**：**不实现**，改用已落地的 `file_state` 文件快照比对。
+`case-artifacts` 复用同一份快照产出文件级产物，因此不引 git 依赖。
+
+---
+
 ## 优先级视图
 
 | 任务 | 优先级 | 性质 | 阻塞了什么 |

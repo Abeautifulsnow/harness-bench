@@ -88,6 +88,10 @@ class CaseRunResult(BaseModel):
     case_id: str
     case_version: int
     case_tags: list[str] = Field(default_factory=list)  # denormalized for suite-level slicing
+    # case.environment.database 的反范式化副本（Spec §20.3）：semantic / AST diff
+    # 要按方言解析 SQL，而 compare 阶段只有 CaseRunResult、拿不到 Case。事实源仍是
+    # case YAML——这里只是把"跟哪次执行一起发生"的那份声明带上。
+    environment_database: str | None = None
     iteration: int  # 1-based
     status: CaseStatus = CaseStatus.FAIL
     failure_semantics: FailureSemantics | None = None

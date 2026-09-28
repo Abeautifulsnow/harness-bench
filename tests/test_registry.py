@@ -203,7 +203,8 @@ class TestVocabularyBoundary:
             ("pytest", "§88"),  # 执行型 → 指向沙箱
             ("build", "§88"),
             ("lint", "§88"),
-            ("git_diff", "Spec §19.1"),  # 依赖其他观测面 → 指向处置表
+            # 已裁决不做 → 指向裁决与替代手段（Spec §20.4：workdir 会继承外层仓库）
+            ("git_diff", "Spec §20.4"),
         ],
     )
     def test_deferred_keys_still_fail_fast(self, key: str, needle: str) -> None:
@@ -220,8 +221,29 @@ class TestVocabularyBoundary:
         assert len(found) == 1, found
         assert needle in found[0], found[0]
         # 三分类必须彼此可区分：执行型不能说成"依赖别的任务"
-        other = "Spec §19.1" if needle == "§88" else "§88"
+        other = "Spec §20.4" if needle == "§88" else "§88"
         assert other not in found[0] or needle == other
+
+    def test_git_diff_rejection_points_at_an_alternative(self) -> None:
+        """`git_diff` 是三类里唯一的"裁决不做"：报错必须给出替代手段。
+
+        Spec §20.4：fixture workdir 被 copytree 到平台仓库工作树内部，那里
+        git diff 报的是**平台源码**的改动，agent 新建的文件反而不可见。
+        替代手段是 `file_state` 快照比对。只说"尚未实现"会让下一个人
+        重新做一遍这个判断。
+        """
+        case = Case.model_validate(
+            {
+                "id": "d",
+                "version": 1,
+                "name": "d",
+                "input": {"type": "single_turn", "prompt": "q"},
+                "expected": {"git_diff": {"x": {}}},
+            }
+        )
+        found = scan_unsupported_assertions([case])
+        assert len(found) == 1, found
+        assert "file_state" in found[0], found[0]
 
     def test_implemented_keys_are_no_longer_reported(self) -> None:
         """本轮实现的键必须从"尚未实现"里消失，否则验收口径没达成。"""

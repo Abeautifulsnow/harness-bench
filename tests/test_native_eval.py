@@ -103,6 +103,20 @@ def test_unimplemented_extension_is_error_verdict() -> None:
     assert "§88" in unsupported_declarations(pytest_key, "expected")[0]
 
 
+def test_git_diff_is_rejected_with_a_reason_and_an_alternative() -> None:
+    """`git_diff` 的裁决是"不做"，报错必须给出替代手段而不是笼统的"尚未实现"。
+
+    Spec §20.4：fixture workdir 会被 copytree 到平台仓库工作树内部，在那里跑
+    git diff 报的是**平台源码**的改动；替代手段是 `file_state` 快照比对。
+    笼统的"尚未实现"会让下一个人重新做一遍这个判断。
+    """
+    a = Assertion.model_validate({"git_diff": {"paths": ["src/"]}})
+    problems = unsupported_declarations(a, "expected")
+    assert len(problems) == 1
+    assert "file_state" in problems[0], problems
+    assert "§20.4" in problems[0], problems
+
+
 def test_removed_permission_key_is_rejected() -> None:
     """`permission` 已从词汇表移除（Spec §19.7：与 security 挂载点重复）。"""
     a = Assertion.model_validate({"permission": {"allow": ["read"]}})
@@ -347,3 +361,93 @@ class TestEmptyExtensionBlocks:
         """空块只是不判，不是配置错误：`case validate` 不该为它报警。"""
         a = Assertion.model_validate({"sql_result": {}})
         assert unsupported_declarations(a, "expected") == []
+
+
+class TestSemanticArgumentChecks:
+    """`tool_arguments` 的 semantic 开关（Spec §20.3，PRD §57）。
+
+    默认关闭：`exact` 保持字面语义，因为"大小写不同必须判红"在某些用例里
+    正是要断言的事。打开后走 ``regression/semantic.py`` 的归一化规则。
+    """
+
+    def _assertion(self, **matcher: object) -> Assertion:
+        return Assertion.model_validate({"tool_arguments": {"execute_sql": {"sql": dict(matcher)}}})
+
+    def _sql_scope(self, sql: str, database: str | None = "sqlite") -> EvalScope:
+        return scope(
+            tool_calls=[ToolCallRecord(name="execute_sql", arguments={"sql": sql})],
+            database=database,
+        )
+
+    def _verdict(self, a: Assertion, s: EvalScope) -> str:
+        return {r.metric: r for r in evaluate_assertions(a, s, "cr1")}[
+            "native.argument_checks"
+        ].verdict
+
+    def test_exact_is_literal_by_default(self) -> None:
+        a = self._assertion(exact="SELECT * FROM t")
+        assert self._verdict(a, self._sql_scope("SELECT * FROM t")) == "pass"
+        assert self._verdict(a, self._sql_scope("select * from t")) == "fail"
+
+    def test_semantic_catches_case_and_whitespace(self) -> None:
+        a = self._assertion(exact="SELECT * FROM t", semantic=True)
+        assert self._verdict(a, self._sql_scope("select * from t;")) == "pass"
+
+    def test_semantic_does_not_excuse_real_differences(self) -> None:
+        """归一化不能过度：DELETE 与 SELECT 必须判红。"""
+        a = self._assertion(exact="SELECT * FROM t", semantic=True)
+        assert self._verdict(a, self._sql_scope("DELETE FROM t")) == "fail"
+
+    def test_dialect_comes_from_the_scope(self) -> None:
+        """方言取自 case 声明；未声明时按 sqlite 并**不**谎称已确认。"""
+        a = self._assertion(exact="SELECT count( * ) FROM t", semantic=True)
+        assert self._verdict(a, self._sql_scope("SELECT COUNT(*) FROM t")) == "pass"
+        # 未声明 database：仍能判（默认 sqlite），但 reason 会在不匹配时带上降级说明
+        miss = self._assertion(exact="SELECT COUNT(id) FROM t", semantic=True)
+        undeclared = self._sql_scope("SELECT COUNT(*)", database=None)
+        result = {r.metric: r for r in evaluate_assertions(miss, undeclared, "cr1")}[
+            "native.argument_checks"
+        ]
+        assert result.verdict == "fail"
+
+    def test_unknown_matcher_key_is_rejected(self) -> None:
+        """词表是封闭的：写错的键必须报错，且报错要点名是哪个键。
+
+        `Assertion` 本身不校验扩展形状（它只是自由 mapping），所以拒绝发生在
+        评测层——这正是"声明写错了"必须比"配置错误"更响亮的原因（Spec §19.3）。
+        """
+        a = Assertion.model_validate(
+            {"tool_arguments": {"execute_sql": {"sql": {"semanticx": True}}}}
+        )
+        s = scope(tool_calls=[ToolCallRecord(name="execute_sql", arguments={"sql": "x"})])
+        result = {r.metric: r for r in evaluate_assertions(a, s, "cr1")}["native.argument_checks"]
+        assert result.verdict == "error"
+        assert "semanticx" in result.reason
+
+    def test_semantic_applies_to_paths_too(self) -> None:
+        a = Assertion.model_validate(
+            {"tool_arguments": {"read_file": {"path": {"exact": "./a/b.csv", "semantic": True}}}}
+        )
+        s = scope(tool_calls=[ToolCallRecord(name="read_file", arguments={"path": "a/b.csv"})])
+        assert self._verdict(a, s) == "pass"
+
+    def test_semantic_applies_to_numbers_too(self) -> None:
+        a = Assertion.model_validate(
+            {"tool_arguments": {"execute_sql": {"limit": {"exact": 5, "semantic": True}}}}
+        )
+        s = scope(tool_calls=[ToolCallRecord(name="execute_sql", arguments={"limit": 5.0})])
+        assert self._verdict(a, s) == "pass"
+
+    def test_semantic_on_non_string_values_is_harmless(self) -> None:
+        """结构化值走既有相等性：semantic 开关不该把 dict 比对变成别的语义。"""
+        a = Assertion.model_validate(
+            {"tool_arguments": {"execute_sql": {"payload": {"exact": {"a": 1}, "semantic": True}}}}
+        )
+        hit = scope(
+            tool_calls=[ToolCallRecord(name="execute_sql", arguments={"payload": {"a": 1}})]
+        )
+        assert self._verdict(a, hit) == "pass"
+        miss = scope(
+            tool_calls=[ToolCallRecord(name="execute_sql", arguments={"payload": {"a": 2}})]
+        )
+        assert self._verdict(a, miss) == "fail"

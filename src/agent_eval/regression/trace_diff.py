@@ -1,17 +1,25 @@
-"""Trace Diff（PRD §56 十项 + §57 结构化参数 diff）。
+"""Trace Diff（PRD §56 十项 + §57 结构化/语义参数 diff）。
 
 比较对象是同 case 两侧 iteration 的 Raw Trace：工具序列按顺序对齐（LCS），
-参数做递归结构化 diff，其余为标量对。
+参数做递归结构化 diff（值级比对走 ``regression/semantic.py``），其余为标量对。
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from agent_eval.models.regression import ArgumentDiff, TraceDiff, TraceDiffOp
+from agent_eval.models.regression import (
+    ArgumentDiff,
+    SemanticEqual,
+    TraceDiff,
+    TraceDiffOp,
+)
 from agent_eval.models.results import CaseRunResult
+from agent_eval.regression.semantic import compare_values
+from agent_eval.regression.sql_diff import DEGRADATION_SUMMARIES, dialect_for
 
 _MAX_ARG_DIFFS = 200  # 防病态 trace 把 diff 产物撑爆
+_MAX_SEMANTIC_EQUAL = 50  # 语义相同项只用于"证明没丢数据"，不必列全
 
 
 def _lcs_ops(baseline: list[str], candidate: list[str]) -> list[TraceDiffOp]:
@@ -56,9 +64,26 @@ def _flatten(value: Any, prefix: str = "") -> dict[str, Any]:
     return flat
 
 
-def _argument_diffs(baseline: CaseRunResult, candidate: CaseRunResult) -> list[ArgumentDiff]:
-    """按工具出现次序配对同名调用，比对参数路径（只报差异路径）。"""
+def _argument_diffs(
+    baseline: CaseRunResult, candidate: CaseRunResult, dialect: str | None
+) -> tuple[list[ArgumentDiff], list[SemanticEqual], list[str]]:
+    """按工具出现次序配对同名调用，比对参数路径。
+
+    三条返回分别是：**该报的差异**、**判为语义相同的路径**（可见但不算差异）、
+    **降级的去重摘要**。第三项存在的理由：semantic 层的结论依赖 sqlglot 与方言
+    声明，缺任何一样都会让"判不同"变得更保守。这件事必须出现在报告里，
+    不能让它静默发生——用户需要知道"这次的空 diff 有多可信"。
+    """
     diffs: list[ArgumentDiff] = []
+    semantic: list[SemanticEqual] = []
+    notes: list[str] = []
+    seen_kinds: set[str] = set()
+
+    def note(kind: str | None) -> None:
+        if kind and kind not in seen_kinds:
+            seen_kinds.add(kind)
+            notes.append(DEGRADATION_SUMMARIES.get(kind, kind))
+
     by_tool_base: dict[str, list[dict]] = {}
     for call in baseline.tool_calls:
         by_tool_base.setdefault(call.name, []).append(call.arguments)
@@ -76,16 +101,40 @@ def _argument_diffs(baseline: CaseRunResult, candidate: CaseRunResult) -> list[A
             if path not in base_flat:
                 diffs.append(
                     ArgumentDiff(
-                        tool=call.name, path=path, candidate=cand_flat[path], change="added"
+                        tool=call.name,
+                        path=path,
+                        candidate=cand_flat[path],
+                        change="added",
+                        comparison="structural",
                     )
                 )
             elif path not in cand_flat:
                 diffs.append(
                     ArgumentDiff(
-                        tool=call.name, path=path, baseline=base_flat[path], change="removed"
+                        tool=call.name,
+                        path=path,
+                        baseline=base_flat[path],
+                        change="removed",
+                        comparison="structural",
                     )
                 )
-            elif base_flat[path] != cand_flat[path]:
+            else:
+                verdict = compare_values(base_flat[path], cand_flat[path], sql_dialect=dialect)
+                note(verdict.degraded_kind)
+                if verdict.same:
+                    if verdict.kind != "structural" and len(semantic) < _MAX_SEMANTIC_EQUAL:
+                        semantic.append(
+                            SemanticEqual(
+                                tool=call.name,
+                                path=path,
+                                baseline=base_flat[path],
+                                candidate=cand_flat[path],
+                                comparison=verdict.kind,
+                                detail=verdict.detail,
+                                degraded_kind=verdict.degraded_kind,
+                            )
+                        )
+                    continue
                 diffs.append(
                     ArgumentDiff(
                         tool=call.name,
@@ -93,11 +142,12 @@ def _argument_diffs(baseline: CaseRunResult, candidate: CaseRunResult) -> list[A
                         baseline=base_flat[path],
                         candidate=cand_flat[path],
                         change="changed",
+                        comparison=verdict.kind,
                     )
                 )
             if len(diffs) >= _MAX_ARG_DIFFS:
-                return diffs
-    return diffs
+                return diffs, semantic, notes
+    return diffs, semantic, notes
 
 
 def diff_case_runs(
@@ -127,7 +177,9 @@ def diff_case_runs(
             if "retry" in (s.attributes.get("events") or [])
         )
 
-    arg_diffs = _argument_diffs(baseline, candidate)
+    arg_diffs, semantic_equal, diff_notes = _argument_diffs(
+        baseline, candidate, dialect_for(candidate.environment_database)
+    )
     diff = TraceDiff(
         case_id=candidate.case_id,
         baseline_iteration=baseline.iteration,
@@ -136,6 +188,8 @@ def diff_case_runs(
         added_tools=[op.value for op in ops if op.kind == "added"],
         removed_tools=[op.value for op in ops if op.kind == "removed"],
         argument_diffs=arg_diffs,
+        semantic_equal=semantic_equal,
+        diff_notes=diff_notes,
         model_calls=(count(base_spans, "llm"), count(cand_spans, "llm")),
         subagent_calls=(count(base_spans, "subagent"), count(cand_spans, "subagent")),
         errors=(errors(base_spans), errors(cand_spans)),

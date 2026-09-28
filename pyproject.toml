@@ -21,6 +21,9 @@ judge = ["deepeval>=1.0"]
 # P5 Web Platform: read-only REST API (PRD §84). The CLI works without this extra;
 # `agent-eval serve` exits 3 with an actionable message when it is absent.
 api = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
+# SQL AST diff (PRD §57). Optional: without it, semantic diff degrades to text
+# normalization and says so in TraceDiff.diff_notes — never silently to "不同".
+sql = ["sqlglot>=25.0"]
 
 [project.scripts]
 agent-eval = "agent_eval.cli.app:main"
@@ -30,6 +33,9 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
+    # 测试要覆盖 AST 层；"没装 sqlglot"的降级路径由 monkeypatch 覆盖，
+    # 不靠"本机恰好没装"来测（那种测法在装了的机器上会静默消失）
+    "sqlglot>=25.0",
 ]
 
 [[tool.uv.index]]

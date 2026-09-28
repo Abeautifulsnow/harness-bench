@@ -4,7 +4,7 @@
 > V2.2 增补 §11 评测词汇表增补 / §12 Security 挂载点 / §13 Web Platform 只读契约，
 > Changelog 见 §14；V2.3 增补 §15 必跑套件校验 / §16 安全用例集口径 /
 > §17 Evaluator Plugin SDK / §18 用例集覆盖与 case 级 metric 参数 /
-> §19 断言扩展的落地与处置；
+> §19 断言扩展的落地与处置 / §20 语义级 Trace Diff；
 > V2.1 的复核修订见 §10.1）
 > 上游文档：`agent-evaluation-regression-platform-engineering-prd-v2.md`（下称 PRD V2.0，保持有效，不因本文档作废）
 > 状态：Engineering Ready
@@ -1445,7 +1445,7 @@ Context 维度的第 2 层（压缩后约束仍在回答里）只能靠最终输
 | `database_state` | fixture 库的 cleanup 前快照 | **本轮实现**（§19.2） |
 | `file_state` | fixture workdir 的 cleanup 前快照 | **本轮实现**（§19.3） |
 | `sql_result` | `tool.result` 的 `result` 载荷 | **本轮实现**（§19.5） |
-| `git_diff` | 需要 fixture 是 git 仓库 | **仍不实现**（§19.1.1） |
+| `git_diff` | 需要 fixture 是 git 仓库 | **裁决不实现**（§20.4：workdir 会继承外层平台仓库，改用 `file_state` 快照比对） |
 | `pytest` / `build` / `lint` | 需要在 fixture 里**执行**命令 | **仍不实现**（§19.6） |
 | `permission` | 与 `security` 挂载点重复 | **已从词汇表移除**（§19.7） |
 
@@ -1640,5 +1640,131 @@ evaluators/native  unsupported_declarations()    对外的提示文案
 `[cmd-ok]` / `[cmd-fail]` 提供——**行为脚本与真实链路同源**（§16.3）：
 不是"输出里提一句 SQL"，而是真的产生带 `result` 载荷的 `tool.result` 与带
 `exit_code` 的 `command.finished`。
+
+---
+
+# 20. 语义级 Trace Diff（V2.3）
+
+PRD §57 把工具参数的比对分成两级（structural / semantic），并建议"SQL 使用
+SQLGlot 增加 AST Diff、文件修改支持 git diff"。§19 只做了"声明怎么求值"，
+本章做"两侧 iteration 的 trace 怎么比"。两者共享同一条底线：**归一化是让差异
+变少的手段，而漏判（真实回归静默通过）比误报（多点一次确认）危险得多**，
+所以每条规则的默认态度是宁可保留差异。
+
+## 20.1 归一化规则表
+
+只有"两个写法在语义上确实指向同一件事"时才归一化。规则表是**封闭**的：
+每个规则都必须同时给出反例用例，反例就是"不该被归一化掉"的对照。
+
+| 规则 | 判相同 | 反例（必须仍判不同） | 层级 |
+| --- | --- | --- | --- |
+| SQL 关键字大小写 | `SELECT 1` vs `select 1` | `'ACME'` vs `'acme'`（字面量） | semantic |
+| SQL 空白 | `SELECT  1` vs `SELECT 1` | —（空白本身无语义） | semantic |
+| SQL 尾随分号 | `SELECT 1;` vs `SELECT 1` | — | semantic |
+| SQL 标识符引号 | `FROM "t"` vs `FROM t` | `'a'` vs `"a"`（字面量非标识符） | ast |
+| SQL 标点周围空白 | `id = 1` vs `id=1` | `id=1` vs `id like '%1%'` | ast |
+| 数字串 | `"1"` vs `"1.0"` | `"1"` vs `"one"` | semantic |
+| int/float | `1` vs `1.0` | `1` vs `"1"`（跨类型） | semantic |
+| 路径 | `./a/b` vs `a/b` vs `a/b/` | `a/b` vs `a/c`；`a/../b` vs `b` | semantic |
+| bool 与数字 | —（一律判不同） | `true` vs `1` | structural |
+
+三条**刻意不做**——它们都是"看起来像等价、实际不是"的写法：
+
+1. **字符串字面量不折叠大小写**。无脑 `.lower()` 会把 `'ACME'` 与 `'acme'` 判成
+   同一个值——那是数据不是关键字。`normalize_sql()` 逐字符扫描，只在引号外折叠。
+2. **不折叠 `..`**。`a/../b` 与 `b` 的等价性依赖 cwd 语义，而工具参数里的路径
+   是给 agent 自己用的：折叠会掩盖"它到底请求了哪个文件"。
+3. **跨类型数字判不同**。PRD §57 把 `1` / `1.0` / `"1"` 列为一组，本 Spec
+   **有意收窄**为"同类型才归一化"：int/str 的边界是工具参数里真实存在的一类
+   回归（下游会把它们当不同的值），判相同会漏掉它。这是本章唯一一处偏离 PRD
+   字面的地方，方向同样是"宁可保留差异"。
+
+`1 == True` 在 Python 里成立、在 JSON 里不成立，所以 bool 与任何非 bool 一律判不同
+（`compare_values()` 的第一条分支）。不拦住它，`true` → `1` 的参数变化会静默消失。
+
+## 20.2 diff 类型标注与可见性
+
+`ArgumentDiff` 带 `comparison`（`structural` / `semantic` / `ast`），记的是
+**这个结论按哪一层判出来的**。同一份结论里带层级，报告侧就不必为"这是语义级
+相同"改第二处渲染。
+
+但**语义级相同不进 `argument_diffs`**——那正是本任务要消掉的误报。它单独进
+`TraceDiff.semantic_equal`，因为"参数差异为空"必须能与"数据丢了"区分开：
+用户看到空表时的正确结论是"没有回归"，不是"这次没比"。
+
+降级同样必须可见，且要**按分类去重**：
+
+```text
+低置信层级的三种成因（sql_diff.KIND_*）
+  sqlglot_missing     SQLGlot 未安装 → AST 层不可用（uv sync --extra sql）
+  sql_parse_failed    非法 SQL → 只能按文本归一化判（结论偏保守）
+  dialect_defaulted   case 未声明 environment.database → 按 sqlite 解析
+```
+
+逐处的具体报错留在 `SemanticEqual.degraded_kind` / `SqlComparison.degraded`
+（供人复核），去重后的摘要进 `TraceDiff.diff_notes`（供报告展示）。
+几十个参数各带一行同样的说明是噪声，但每一处的具体报错不能丢。
+
+文本层判相同**不附带降级**：`normalize_sql()` 只折叠关键字大小写与空白、保留
+字面量原样，所以"归一化后相等"是一个**完整**结论，不需要 AST 参与，也就谈不上
+降级。（这一条是被测试逼出来的：parse 失败要能单独验证，就不能让文本层的
+短路先把它吃掉。）
+
+## 20.3 方言来源与 `tool_arguments.semantic`
+
+SQLGlot 需要 `dialect`，方言**不能硬编码**：它来自 case 的
+`environment.database`（PRD §89 的 provider 词汇），经
+`CaseRunResult.environment_database` 反范式化进两侧结果——比对时不一定持有
+case 定义，两侧结果却都要能自证方言。`dialect_for()` 是唯一的映射点，
+新增 provider 漏改会以"parse 失败 → 降级"显形，不会静默判错。
+
+未声明方言时按 `sqlite` 解析，**并如实标注**（`dialect_defaulted`）：
+静默默认会让"这条结论有多可信"这个事实消失。
+
+`tool_arguments` 的 `semantic` 是**显式开关**（默认关闭）：
+
+```yaml
+tool_arguments:
+  execute_sql:
+    sql: {exact: "SELECT * FROM t", semantic: true}
+```
+
+默认关闭是刻意的——`exact` 的字面语义不变，因为"把大小写差异判成不同"在某些
+用例里正是要断言的事（如断言 agent 生成了规范化的大小写）。打开后字符串值走
+§20.1 的规则表，**非字符串值不受影响**（`semantic` 不该把 dict 比对变成别的语义）。
+
+## 20.4 git diff 的裁决：不做，改用文件快照
+
+PRD §57 的第三条（"文件修改支持 git diff"）需要一个前置事实：**fixture workdir
+是不是 git 仓库**。实测结论——**不是，且不能靠 git 补救**：
+
+```text
+fixtures/sales_v2/            只有 seed.sql，没有 .git
+.agent-eval/runs/<run>/artifacts/<case>/iter<N>/workspace/
+                              ← fixture 被 copytree 到这里，位于**平台仓库工作树内部**
+```
+
+`git diff` 在那里不会失败，而是会**报出平台仓库自己的改动**：它继承的是外层
+`.git`，比较对象是 `agent_eval` 的源码树，跟 agent 改了什么毫无关系。而 agent
+新建的文件在 `git diff`（不带 `--no-index`）里根本不可见——最该被看到的一类
+文件修改恰好漏掉。
+
+给 workdir 初始化一个独立 git 仓库是可行的替代，但代价明确：workdir 里会凭空
+多出 `.git/`，agent 看到的目录结构与 fixture 声明不一致（且它自己 `git` 命令的
+输出会跟着变）；平台还要为此多一个运行时依赖（git 二进制）与一份"要不要
+`git add` 初态"的额外决定。
+
+因此本轮的裁决是**不实现 `git_diff`**，改用已经落地的**文件快照前后比对**：
+
+| 需求 | 现成手段 | 出处 |
+| --- | --- | --- |
+| 文件还在不在 / 内容对不对 | `file_state` 断言 | §19.3 |
+| 失败现场的文件内容 | `EnvironmentSnapshot.file_text()` | §19.3 |
+| 文件级产物与索引 | 由 `case-artifacts` 复用同一份快照产出，不引 git | PRD §90 |
+
+`file_state` 的语义（"workdir 的终态是什么"）比 git diff 更贴合断言需求：
+断言要的是**事实**（文件存在、包含某串），不是"相对某个初态的补丁"。
+`git_diff` 保留在 `EXTENSION_KEYS` 里，但提示文案从笼统的"依赖其他任务"
+改为指向本节的裁决，下一步动作明确（改用 `file_state`）。
 
 ---

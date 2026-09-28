@@ -83,13 +83,39 @@ class TraceDiffOp(BaseModel):
 
 
 class ArgumentDiff(BaseModel):
-    """Structural diff of one tool call's arguments (PRD §56/§57 structural diff)."""
+    """One tool call argument's diff (PRD §56/§57).
+
+    ``change`` 只记"哪个路径变了"；``comparison`` / ``detail`` / ``degraded`` 记
+    "这个结论是按哪一层判出来的"（Spec §20.2）。同一份结论里带层级，是为了让
+    报告侧不需要为了"这是语义级相同"改第二处渲染——但**语义级相同不进
+    ``argument_diffs``**：那正是本任务要消掉的误报，它只出现在 ``semantic_equal``
+    里，避免用户看到空 diff 以为丢数据。
+    """
 
     tool: str
     path: str
     baseline: Any = None
     candidate: Any = None
     change: Literal["added", "removed", "changed"] = "changed"
+    comparison: Literal["structural", "semantic", "ast"] = "structural"
+
+
+class SemanticEqual(BaseModel):
+    """判为语义相同的参数路径（Spec §20.2，PRD §57 semantic diff 的可见面）。
+
+    这些路径**文字不同、语义相同**，因此不进 ``argument_diffs``（不产生噪声），
+    但要单独列出来：报告的"参数差异为空"必须能与"数据丢了"区分开。
+    """
+
+    tool: str
+    path: str
+    baseline: Any = None
+    candidate: Any = None
+    comparison: Literal["semantic", "ast"] = "semantic"
+    detail: str | None = None
+    # 降级分类（sqlglot 缺失 / SQL parse 失败 / 方言未声明）；非空表示这次"相同"
+    # 只在低置信层级成立。报告按分类去重（见 TraceDiff.diff_notes）。
+    degraded_kind: str | None = None
 
 
 class TraceDiff(BaseModel):
@@ -102,6 +128,11 @@ class TraceDiff(BaseModel):
     added_tools: list[str] = Field(default_factory=list)
     removed_tools: list[str] = Field(default_factory=list)
     argument_diffs: list[ArgumentDiff] = Field(default_factory=list)
+    # 语义相同的参数路径（PRD §57 semantic diff）：不进 argument_diffs，但必须可见
+    semantic_equal: list[SemanticEqual] = Field(default_factory=list)
+    # 归一化降级的**去重摘要**（按 kind 去重，Spec §20.2）：让"这次 diff 的结论
+    # 有多可信"变成报告里的一个显式事实。逐处的详细报错留在 SemanticEqual.degraded_kind。
+    diff_notes: list[str] = Field(default_factory=list)
     model_calls: tuple[int, int] = (0, 0)
     subagent_calls: tuple[int, int] = (0, 0)
     errors: tuple[int, int] = (0, 0)

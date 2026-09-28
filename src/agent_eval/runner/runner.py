@@ -524,10 +524,12 @@ class Runner:
             # Spec §19：环境快照必须在 provider.cleanup 之前采集（finally 会清理
             # 库文件与工作目录）。它服务 database_state / file_state 两类断言——
             # 那两条判的是"环境变成了什么样"，不是 agent 说了什么。
+            # Spec §20.3：database 一并带上，它是 SQL 语义比对的方言来源。
             scope = _session_scope(
                 run_status,
                 turn_results,
                 environment=snapshot_from_handle(handle) if handle is not None else None,
+                database=case.environment.database,
             )
             self._evaluate_session(case, scope, turn_results, result)
             if run_status != "success":
@@ -874,6 +876,8 @@ class Runner:
                 command_calls=command_calls,
                 latency_ms=turn.latency_ms,
                 tokens=turn.tokens,
+                # turn 级也带方言：`tool_arguments` 的 semantic 比对在 turn 级同样可用
+                database=case.environment.database,
             )
             turn.metric_results = evaluate_assertions(
                 turn_spec.expect,
@@ -1003,6 +1007,10 @@ def _new_case_run(case: Case, iteration: int, run_id: str) -> CaseRunResult:
         case_version=case.version,
         case_tags=list(case.tags),
         iteration=iteration,
+        # 反范式化的方言声明（Spec §20.3）：semantic / AST diff 需要它，但两侧
+        # run 的 compare 阶段只有 CaseRunResult、拿不到 Case。与 case_tags 同理，
+        # 事实源仍是 case YAML。
+        environment_database=case.environment.database,
     )
 
 
@@ -1011,6 +1019,7 @@ def _session_scope(
     turn_results: list[TurnResult],
     *,
     environment: EnvironmentSnapshot | None = None,
+    database: str | None = None,
 ) -> EvalScope:
     """session 聚合口径（Spec §2.4）：output=最终轮，其余按 session 总量。"""
     costs = [turn.cost for turn in turn_results if turn.cost is not None]
@@ -1026,6 +1035,7 @@ def _session_scope(
         # （不是 0.0）——max_cost 断言靠这个区分"没有定价"与"成本为零"。
         cost=round(sum(costs), 10) if costs else None,
         environment=environment,
+        database=database,
     )
 
 

@@ -14,11 +14,14 @@ from typing import Any
 
 from jsonschema import ValidationError
 from jsonschema import validate as jsonschema_validate
+from pydantic import ValidationError as PydanticValidationError
 
 from agent_eval.errors import UnsupportedAssertionError
 from agent_eval.fixtures.snapshot import EnvironmentSnapshot, escapes_relative, valid_table_name
 from agent_eval.ids import new_id
 from agent_eval.models.case import (
+    DEFERRED_EXTENSION_KEYS,
+    DEFERRED_REASONS,
     EXTENSION_KEYS,
     SANDBOX_DEPENDENT_KEYS,
     Assertion,
@@ -31,6 +34,7 @@ from agent_eval.models.case import (
     argument_path,
 )
 from agent_eval.models.results import MetricResultModel, ToolCallRecord
+from agent_eval.regression.sql_diff import dialect_for
 
 # Case 级扩展断言中本层已实现的部分。
 # 未列出的词汇（无论是否在 Spec 词汇表内）一律 fail-fast，而不是静默接受后失效：
@@ -44,8 +48,11 @@ IMPLEMENTED_EXTENSIONS = {
     "tool_arguments",
     "step_efficiency",
 }
-# Spec §2.2 词汇表内、但本层不实现的扩展：执行型（依赖 PRD §88 沙箱）与
-# 依赖别的任务观测面的键（Spec §19.1 的处置表）。
+# Spec §2.2 词汇表内、但本层不实现的扩展。它被两个更具体的子集进一步细分
+# （执行型 → SANDBOX_DEPENDENT_KEYS；已裁决不做 → DEFERRED_EXTENSION_KEYS，
+# Spec §20.4），剩下来的理论上是空集——所以它的报错文案是"尚未实现"，
+# 服务于"往词汇表里加了键却还没决定怎么处置"这一刻：那种键必须报错，
+# 而不是被判成"不在词汇表内"（后者会误导人去改 Spec §2.2）。
 KNOWN_EXTENSIONS = EXTENSION_KEYS - IMPLEMENTED_EXTENSIONS
 
 
@@ -85,6 +92,9 @@ class EvalScope:
     # 时可判；缺定价的 run 判 skipped（而不是"0 <= max_cost → pass"）。
     cost: float | None = None
     environment: EnvironmentSnapshot | None = None
+    # case.environment.database：SQL 语义比对的方言来源（Spec §20.3）。
+    # 不硬编码 sqlite——换 fixture provider 时它必须跟着变。
+    database: str | None = None
 
 
 def _result(
@@ -448,13 +458,44 @@ def parse_tool_arguments(assertion: Assertion) -> dict[str, dict[str, ToolArgume
     return parsed
 
 
+def tool_arguments_problem(assertion: Assertion) -> str:
+    """非法形状的**具体**原因，供启动期与运行期共用（Spec §19.1 的可执行报错）。
+
+    ``ToolArgumentMatcher`` 是 ``extra="forbid"`` 的封闭词表，最常见的失败是拼错的
+    匹配器键（``semanticx``）。只说"形状非法"会让用户对着正确的路径反复排查，
+    必须把 pydantic 拒绝的那个键名带出来。
+    """
+    raw = assertion.extensions.get("tool_arguments")
+    if not isinstance(raw, dict):
+        return "应为 {tool: {arg_path: matcher}}"
+    for tool, paths in raw.items():
+        if not isinstance(paths, dict):
+            return f"tool '{tool}' 的参数表应为 {{arg_path: matcher}}"
+        for path, matcher in paths.items():
+            if not isinstance(matcher, dict):
+                return f"tool '{tool}' 参数 '{path}' 的匹配器应为对象"
+            try:
+                ToolArgumentMatcher.model_validate(matcher)
+            except PydanticValidationError as exc:
+                first = exc.errors()[0]
+                field = ".".join(str(part) for part in first.get("loc", ())) or "matcher"
+                return f"tool '{tool}' 参数 '{path}' 的 '{field}': {first.get('msg')}"
+    return "应为 {tool: {arg_path: matcher}}"
+
+
 def _check_tool_arguments(assertion: Assertion, scope: EvalScope) -> list[str]:
-    """逐 required tool 比对已声明参数子集（PRD §56/§57 的确定性版本）。"""
+    """逐 required tool 比对已声明参数子集（PRD §56/§57 的确定性版本）。
+
+    ``sql_dialect`` 来自 case 的 ``environment.database``（Spec §20.3）：声明了
+    ``semantic: true`` 的参数值要按方言解析 SQL，方言不能硬编码——fixture 换
+    provider 时那是唯一需要跟着变的事实。
+    """
     parsed = parse_tool_arguments(assertion)
     if parsed is None:
         raise UnsupportedAssertionError(
-            "tool_arguments must be a mapping {tool: {arg_path: matcher}} (Spec V2.2 §11.2)"
+            f"tool_arguments 形状非法：{tool_arguments_problem(assertion)}（Spec V2.2 §11.2）"
         )
+    dialect = dialect_for(scope.database)
     calls_by_tool: dict[str, list[ToolCallRecord]] = {}
     for call in scope.tool_calls:
         calls_by_tool.setdefault(call.name, []).append(call)
@@ -472,7 +513,7 @@ def _check_tool_arguments(assertion: Assertion, scope: EvalScope) -> list[str]:
                 if not present:
                     first_reason = first_reason or f"path '{path}' missing"
                     continue
-                reason = matcher.check(value)
+                reason = matcher.check(value, sql_dialect=dialect)
                 if reason is None:
                     matched = True
                     break
@@ -540,7 +581,7 @@ def unsupported_declarations(assertion: Assertion, mount: str) -> list[str]:
 
     报错要可执行：不说"尚未实现"，而是说清**下一步动作**——
       1. 执行型键（pytest / build / lint）→ 依赖 PRD §88 沙箱，是设计选择不是漏做；
-      2. 依赖别的观测面的键（git_diff）→ 指出依赖哪个任务；
+      2. 已裁决不做的键（git_diff）→ 指出替代手段（`file_state` 快照比对，Spec §20.4）；
       3. 形状非法（tool_arguments / step_efficiency / database_state / file_state /
          sql_result / exit_code）→ 给出正确形状，不静默接受后失效。
     """
@@ -552,12 +593,14 @@ def unsupported_declarations(assertion: Assertion, mount: str) -> list[str]:
             problems.append(
                 f"{mount}.{key}: 执行型断言，依赖 PRD §88 沙箱（V1 无隔离，不实现）——Spec §19.6"
             )
+        elif key in DEFERRED_EXTENSION_KEYS:
+            problems.append(f"{mount}.{key}: {DEFERRED_REASONS[key]}")
         elif key in KNOWN_EXTENSIONS:
             problems.append(f"{mount}.{key}: 尚未实现（观测面依赖其他任务，Spec §19.1）")
         else:
             problems.append(f"{mount}.{key}: 不在断言词汇表内（Spec §2.2）")
     if parse_tool_arguments(assertion) is None and "tool_arguments" in assertion.extensions:
-        problems.append(f"{mount}.tool_arguments: 形状非法，应为 {{tool: {{arg_path: matcher}}}}")
+        problems.append(f"{mount}.tool_arguments: 形状非法，{tool_arguments_problem(assertion)}")
     if parse_step_efficiency(assertion) is None and "step_efficiency" in assertion.extensions:
         problems.append(
             f"{mount}.step_efficiency: 形状非法，应为 "

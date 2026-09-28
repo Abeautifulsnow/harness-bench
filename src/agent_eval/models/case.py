@@ -41,8 +41,19 @@ EXTENSION_KEYS = frozenset(
 # 保留在词汇表里是因为 PRD §34 列了它们；但 `case validate` 必须报"依赖沙箱"，
 # 而不是笼统的"尚未实现"——前者的下一步动作是明确的。
 SANDBOX_DEPENDENT_KEYS = frozenset({"pytest", "build", "lint"})
-# 依赖别的任务的观测面（Spec §19.1 的处置表）
-DEFERRED_EXTENSION_KEYS = frozenset({"git_diff"})
+# 词汇表内、但已**裁决不做**的键（Spec §20.4）：键 → "为什么不做 + 替代手段"。
+# 与上面的执行型分开：那些是"等沙箱"，这些是"有替代手段，不打算做"。
+# 理由与键同一处声明——分开放的话，加键的人会漏掉理由，于是报错退化成空字符串的
+# 笼统"尚未实现"，那正是这个子集存在的理由（让下一步动作明确）。
+# 报错文案从这里取，集合也从这里取：**唯一来源**，不存在两边漂移的可能。
+DEFERRED_REASONS: dict[str, str] = {
+    "git_diff": (
+        "不实现——fixture workdir 会被 copytree 到平台仓库工作树内部，"
+        "那里跑 git diff 报的是平台源码的改动（agent 新建的文件反而不可见）；"
+        "改用 file_state 做文件快照比对（Spec §20.4）"
+    ),
+}
+DEFERRED_EXTENSION_KEYS = frozenset(DEFERRED_REASONS)
 
 
 class OutputAssertion(BaseModel):
@@ -90,6 +101,10 @@ class ToolArgumentMatcher(BaseModel):
 
     参数路径用点号表示嵌套（``payload.sql``），列表下标用 ``[i]``（``rows[0].id``）。
     三种匹配器互斥；都不给即"该路径必须存在"。
+
+    ``semantic: true`` 是**显式开关**（Spec §20.3，PRD §57）：打开后字符串值按
+    归一化规则比对（SQL 大小写/空白/标识符引号、数字串、路径写法）。默认关闭——
+    `exact` 的字面语义不变，因为"把大小写差异判成不同"在某些用例里正是要断言的事。
     """
 
     model_config = {"extra": "forbid"}
@@ -97,13 +112,25 @@ class ToolArgumentMatcher(BaseModel):
     exact: Any = None
     contains: str | None = None
     regex: str | None = None
+    semantic: bool = False
 
-    def check(self, value: Any) -> str | None:
+    def check(self, value: Any, *, sql_dialect: str | None = None) -> str | None:
         """返回不匹配原因；``None`` 表示通过。"""
         if self.exact is not None:
-            if value != self.exact:
-                return f"expected {self.exact!r}, got {value!r}"
-            return None
+            if value == self.exact:
+                return None
+            if self.semantic:
+                from agent_eval.regression.semantic import compare_values
+
+                verdict = compare_values(self.exact, value, sql_dialect=sql_dialect)
+                if verdict.same:
+                    return None
+                if verdict.degraded:
+                    return (
+                        f"expected {self.exact!r} (semantic), got {value!r}"
+                        f"；语义比对已降级：{verdict.degraded}"
+                    )
+            return f"expected {self.exact!r}, got {value!r}"
         if self.contains is not None:
             if not isinstance(value, str) or self.contains not in value:
                 return f"expected to contain {self.contains!r}, got {value!r}"

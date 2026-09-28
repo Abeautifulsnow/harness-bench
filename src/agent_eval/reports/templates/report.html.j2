@@ -114,6 +114,74 @@
   </table>
   </div>
 </div>
+
+{# Trace Diff（PRD §56 十项 + §57 参数结构化/语义 diff，Spec §20.2）。
+   语义相同项与降级摘要必须出现在这里：只展示 argument_diffs 会让"没有回归"
+   与"这次没比"看起来一样。筛选口径与前端一致（changed 或带语义相同/降级）。 #}
+{% set shown_trace_diffs = [] %}
+{% for item in comparison.trace_diffs or [] %}
+  {% if item.changed or item.semantic_equal or item.diff_notes %}
+    {% set _ = shown_trace_diffs.append(item) %}
+  {% endif %}
+{% endfor %}
+{% if shown_trace_diffs %}
+<h2>Trace Diff（PRD §56 / §57）</h2>
+{% for diff in shown_trace_diffs %}
+<div class="card">
+  <p><code>{{ diff.case_id }}</code> · iteration {{ diff.baseline_iteration }} → {{ diff.candidate_iteration }}
+    {% for tool in diff.added_tools %}<span class="badge" style="background:#027a48">+{{ tool }}</span> {% endfor %}
+    {% for tool in diff.removed_tools %}<span class="badge" style="background:#b54708">-{{ tool }}</span> {% endfor %}
+    {% if diff.final_answer_changed %}<span class="badge" style="background:#b42318">最终答案变化</span>{% endif %}
+  </p>
+  <p class="muted">model calls {{ diff.model_calls[0] }} → {{ diff.model_calls[1] }}
+    · tokens {{ diff.tokens[0] }} → {{ diff.tokens[1] }}
+    · latency {{ diff.latency_ms[0] }} → {{ diff.latency_ms[1] }} ms
+    · errors {{ diff.errors[0] }} → {{ diff.errors[1] }}
+    · retries {{ diff.retries[0] }} → {{ diff.retries[1] }}</p>
+  {% if diff.argument_diffs %}
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Tool</th><th>Path</th><th>Baseline</th><th>Candidate</th><th>Change</th><th>判定层级</th></tr></thead>
+    <tbody>
+    {% for arg in diff.argument_diffs[:50] %}
+      <tr>
+        <td><code>{{ arg.tool }}</code></td>
+        <td><code>{{ arg.path }}</code></td>
+        <td class="muted"><code>{{ arg.baseline | tojson_pretty }}</code></td>
+        <td><code>{{ arg.candidate | tojson_pretty }}</code></td>
+        <td>{{ arg.change }}</td>
+        <td class="muted">{{ arg.comparison }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+  {% if diff.semantic_equal %}
+  <p class="muted" style="margin-top:12px">语义相同（文字不同、语义相同，因此不算差异，Spec §20.2）：</p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Tool</th><th>Path</th><th>Baseline</th><th>Candidate</th><th>层级</th></tr></thead>
+    <tbody>
+    {% for item in diff.semantic_equal[:50] %}
+      <tr>
+        <td><code>{{ item.tool }}</code></td>
+        <td><code>{{ item.path }}</code></td>
+        <td class="muted"><code>{{ item.baseline | tojson_pretty }}</code></td>
+        <td class="muted"><code>{{ item.candidate | tojson_pretty }}</code></td>
+        <td class="muted">{{ item.comparison }}{% if item.detail %} · {{ item.detail }}{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+  {% for note in diff.diff_notes %}
+  <div class="warn" style="margin-top:12px">降级：{{ note }}</div>
+  {% endfor %}
+</div>
+{% endfor %}
+{% endif %}
 {% endif %}
 
 <h2>Cases</h2>

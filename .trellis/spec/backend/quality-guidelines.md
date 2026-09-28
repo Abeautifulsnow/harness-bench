@@ -7,7 +7,7 @@
 ## 检查命令（合并前必须全绿）
 
 ```bash
-uv run pytest        # 235 tests（含 e2e：FakeAgent 全链路 + 真实 TCP mock server + REST API）
+uv run pytest        # 305 tests（含 e2e：FakeAgent 全链路 + 真实 TCP mock server + REST API）
 uv run ruff check .  # 规则：E/F/I/UP/B/SIM；CLI 文件豁免 B008（Typer 惯用法）
 uv run ruff format --check .
 cd web && bun run typecheck && bun run build   # 前端改动时
@@ -130,13 +130,42 @@ judge 行为的用例标 `@pytest.mark.real_judge` 退出该夹具。装了 deep
 5. **三者一致**：`EXTENSION_KEYS`（词汇表）== `IMPLEMENTED_EXTENSIONS`
    ∪ `SANDBOX_DEPENDENT_KEYS` ∪ `DEFERRED_EXTENSION_KEYS`，且
    `unsupported_declarations()` 对每个子集给出各自的下一步动作。漂移会让
-   `case validate` 的输出与实际能力脱节。
+   `case validate` 的输出与实际能力脱节。三个子集的分工固定：执行型 = 依赖
+   PRD §88 沙箱；`DEFERRED_EXTENSION_KEYS` = **已裁决不做**的键（`git_diff`，
+   Spec §20.4）。"不做"同样必须给出替代手段：笼统的"尚未实现"会让下一个人
+   重新做一遍这个判断，所以 `git_diff` 的提示指向 `file_state`。
+   形状非法的扩展键要报出**哪个键**非法（`tool_arguments_problem()` 把 pydantic
+   拒绝的字段名带出来）——`extra="forbid"` 的词表里最常见的失败是拼错的匹配器键。
 6. **别让陪跑组污染分母**。`native.status` 只在声明了 `status` 或出现未实现键时产出；
    让它在每个有扩展断言的 case 上都产出，会得到一条永远 pass 的指标——
    与"恒 PASS 的占位"同类（§17 第 6 条）。同理，已实现的扩展各有自己的 metric id，
    **空块（`sql_result: {}`）与未声明同口径、不产出 metric**；形状非法则必须产出
    `error`（与"没声明"是两件事）。`exit_code: {}` 是例外：缺省语义"全部被观测命令
    以 0 结束"是真断言。
+
+## 语义 diff 约束（PRD §57，Spec §20）
+
+归一化是"让差异变少"的手段，而**漏判比误报危险**（误报让人多点一次确认，漏判让
+真实回归静默通过）。守住五条：
+
+1. **每条规则成对测试**：判相同的用例 + **不该被归一化掉的对照用例**。只有前半
+   会得到一个"把什么都判成相同"的实现。规则表在 Spec §20.1，它是**封闭**的，
+   加规则要连反例一起加。
+2. **两种差异要分开存**：该报的进 `argument_diffs`，语义相同的进
+   `TraceDiff.semantic_equal`。同一路径只能出现在一边（两处都报会让报告自相矛盾），
+   而"参数差异为空"必须能与"数据丢了"区分开——所以 `semantic_equal` 非空或带
+   `diff_notes` 的 case 即使 `changed=False` 也要在报告与 Web 上展示。
+3. **降级必须可见且去重**：sqlglot 缺失 / SQL 解析失败 / 方言未声明三种成因，
+   逐处详情留 `degraded`，**按分类去重的摘要**进 `TraceDiff.diff_notes`
+   （几十个参数各带一行同样说明是噪声）。绝不在"没能力判断"时静默判相同或不同。
+   推论：文本层判相同**不附带降级**——它只折叠关键字大小写与空白，是完整结论。
+4. **方言来自 case 声明**：`Case.environment.database` → `dialect_for()` →
+   `EvalScope.database` / `CaseRunResult.environment_database`（反范式化副本，
+   因为比对时不一定持有 case 定义）。未声明时按 sqlite 解析**并标注**
+   `dialect_defaulted`，不在任何地方硬编码方言。
+5. **`semantic: true` 是显式开关，默认关闭**，且只影响字符串值：`exact` 的字面
+   语义不变（"把大小写差异判成不同"在某些用例里正是要断言的事），非字符串值仍走
+   原有相等性。文件类 diff 用 `file_state` 快照比对，不引 git（Spec §20.4）。
 
 ## 用例集覆盖约束（PRD §103，Spec §18）
 

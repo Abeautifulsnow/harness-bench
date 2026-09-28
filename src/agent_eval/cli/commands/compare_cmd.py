@@ -169,13 +169,24 @@ def _print(comparison) -> None:
 
 def _print_trace_diffs(comparison) -> None:
     for diff in comparison.trace_diffs:
-        if not diff.changed:
+        if not diff.changed and not diff.semantic_equal and not diff.diff_notes:
             continue
         console.print(f"[bold]trace diff[/bold] {diff.case_id}")
         for op in diff.tool_sequence:
             marker = {"equal": " ", "added": "+", "removed": "-"}[op.kind]
             console.print(f"  {marker} {op.value}")
         for arg in diff.argument_diffs[:10]:
-            console.print(f"  ~ {arg.tool}.{arg.path}: {arg.baseline!r} → {arg.candidate!r}")
+            console.print(
+                f"  ~ {arg.tool}.{arg.path} [{arg.comparison}]: "
+                f"{arg.baseline!r} → {arg.candidate!r}"
+            )
         if diff.final_answer_changed:
             console.print("  ~ final answer changed")
+        # 语义级相同**不是差异**，但必须可见（Spec §20.2）：空 diff 与"没比"要能分开。
+        for item in diff.semantic_equal[:10]:
+            console.print(
+                f"  [dim]= {item.tool}.{item.path} 语义相同 [{item.comparison}]"
+                f"{' · ' + item.detail if item.detail else ''}[/dim]"
+            )
+        for note in diff.diff_notes:
+            console.print(f"  [yellow]! 降级[/yellow] {note}")
