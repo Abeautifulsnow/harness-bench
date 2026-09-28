@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from agent_eval.models.events import TraceEvent
 from agent_eval.models.spans import SpanTree, TraceSpan
 
@@ -104,6 +106,11 @@ class TraceBuilder:
         return None
 
     def _open_span(self, event: TraceEvent, span_type: str, close_type: str) -> None:
+        attributes: dict[str, Any] = {"expect_close": close_type}
+        # 工具参数单独留档：`input` 的兜底是整份 event.data（含 name），把它当
+        # "实际发送的参数"会让 judge 按伪造参数判 ArgumentCorrectness。
+        if "arguments" in event.data:
+            attributes["arguments"] = event.data.get("arguments")
         span = TraceSpan(
             id=event.event_id,
             trace_id=event.trace_id,
@@ -112,7 +119,7 @@ class TraceBuilder:
             name=str(event.data.get("name", event.type.split(".")[0])),
             started_at=event.timestamp,
             input=event.data.get("arguments", event.data),
-            attributes={"expect_close": close_type},
+            attributes=attributes,
         )
         self._spans.append(span)
         self._open[event.event_id] = event

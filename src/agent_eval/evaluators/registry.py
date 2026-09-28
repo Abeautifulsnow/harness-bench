@@ -120,7 +120,9 @@ def available_providers_for(spec: MetricSpec) -> bool:
     """该 metric 是否恒可用（无需能力探测）：native 与已注册的 harness 插件。"""
     provider = provider_for(spec)
     if provider == "native":
-        return True
+        # 注册表里没有的 native.* id 是拼写错误，不是"有一条 native 规则在评测"：
+        # 判它"可用"会让 runner 的分派既不入 judge 也不入 harness，静默丢掉。
+        return registry_entry(spec.id) is not None
     if provider == "harness":
         return spec.id in PLUGINS
     return False
@@ -141,6 +143,11 @@ def provider_for(spec: MetricSpec) -> str:
     # 静默当成"有一条 native 规则在评测"——profile 里写错 metric id 就成了空转。
     if spec.id.startswith("harness."):
         return "harness"
+    # PRD §42 的 custom.* 是留给用户 GEval 的命名空间，平台尚未实现（V2 未落地）。
+    # 单列一个 provider 名，好让 §7.4 的 fail-fast 给出"GEval 未实现"的明确原因，
+    # 而不是落进 native 分支后被 runner 静默丢弃。
+    if spec.id.startswith("custom."):
+        return "custom"
     return "native"
 
 
@@ -169,6 +176,18 @@ def resolve_metric(
                 f"metric '{spec.id}' unavailable and fallback '{fallback}' also unavailable"
             )
         return fallback, spec.id
+    if provider == "custom":
+        raise MetricUnavailableError(
+            f"metric '{spec.id}' is in the reserved 'custom.*' namespace (PRD §42 Custom GEval)，"
+            "该能力尚未实现：profile 里写 custom.* 不会被求值。"
+            "请改用 agent.* / harness.* / native.* 的已注册 metric（Spec §7.4 fail-fast）"
+        )
+    if provider == "native" and registry_entry(spec.id) is None:
+        raise MetricUnavailableError(
+            f"metric '{spec.id}' is not a registered platform metric (Spec §7.1)；"
+            f"已注册：{', '.join(sorted(METRIC_REGISTRY))}。"
+            "拼错的 metric id 不会被求值，静默跳过等于让 profile 空转（Spec §7.4 fail-fast）"
+        )
     raise MetricUnavailableError(
         f"metric '{spec.id}' requires provider capability that is unavailable "
         f"and no fallback is declared (Spec §7.4 fail-fast)"

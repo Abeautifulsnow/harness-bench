@@ -13,6 +13,7 @@ from typing import Any
 import yaml
 
 from agent_eval.errors import InvalidCallError
+from agent_eval.failures.taxonomy import classify, parent_of
 from agent_eval.models.regression import (
     BaselineMode,
     GateReport,
@@ -262,6 +263,9 @@ def _absolute_rules(aggregate: RunAggregate, rules: GateRules) -> list[GateRuleR
         )
     )
 
+    if rules.hard_failure_categories:
+        results.append(_hard_category_rule(aggregate, rules))
+
     if rules.strict:
         failing = sorted({c.case_id for c in aggregate.cases if c.blocking_failures})
         results.append(
@@ -275,6 +279,44 @@ def _absolute_rules(aggregate: RunAggregate, rules: GateRules) -> list[GateRuleR
             )
         )
     return results
+
+
+def _hard_category_rule(aggregate: RunAggregate, rules: GateRules) -> GateRuleResult:
+    """``hard_failure_categories``：Gate YAML 声明的"这些类别的失败一律阻断"。
+
+    声明值可以是 PRD §47 的二级分类（``tool.argument``）、一级分类（``SECURITY``）
+    或 metric id（``native.output_checks``）——判定走 taxonomy 的 ``classify()``，
+    与 failures 表用的是同一套词汇表，不另立一套口径。
+
+    此前该字段被 YAML 解析、被 REST 回显，但**求值器从不读取**：写在 Gate 配置里
+    完全没有效果，属于"配置看着生效实际空转"。这里补上唯一的消费点。
+    """
+    declared = {item.strip() for item in rules.hard_failure_categories if item and item.strip()}
+    hits: dict[str, list[str]] = {}
+    for case in aggregate.cases:
+        matched: set[str] = set()
+        for failure in case.blocking_failures:
+            metric = str(failure.get("metric", ""))
+            category, _ = classify(metric, str(failure.get("reason", "")), list(case.tags))
+            candidates = {metric, category, parent_of(category)}
+            matched |= candidates & declared
+        if matched:
+            hits[case.case_id] = sorted(matched)
+    affected = sorted(hits)
+    detail = (
+        "PRD §47/§69 硬失败类别命中："
+        + "; ".join(f"{case_id}({', '.join(cats)})" for case_id, cats in sorted(hits.items()))
+        if affected
+        else "未命中声明的硬失败类别：" + ", ".join(sorted(declared))
+    )
+    return _rule(
+        "hard_failure_categories",
+        "fail" if affected else "pass",
+        observed=float(len(affected)),
+        threshold=0.0,
+        affected=affected,
+        detail=detail,
+    )
 
 
 def evaluate_gate(
@@ -354,8 +396,15 @@ def _junit_counts(aggregate: RunAggregate) -> dict[str, int]:
 
 
 def exit_code_for(gate: GateReport, aggregate: RunAggregate) -> int:
-    """Spec §6.1: 0 PASS | 1 FAIL | 2 无法可靠评估 | 3 无效调用（由调用方给出）。"""
+    """Spec §6.1: 0 PASS | 1 FAIL | 2 无法可靠评估 | 3 无效调用（由调用方给出）。
+
+    ``suites.coverage`` 失败归 exit 2 而不是 1：Spec §6.1 把"基础设施错误导致
+    mandatory suite 未完整执行"明确列在 exit 2 之下。归成 1 会让 CI 把它当成
+    "PR 引入了回归"（§6.4 的归因约定），而真实原因是这次 run 根本没跑那些套件。
+    """
     if any(case.has_error for case in aggregate.cases):
+        return 2
+    if any(r.verdict == "fail" and r.rule == "suites.coverage" for r in gate.rules):
         return 2
     if gate.verdict == "fail":
         return 1

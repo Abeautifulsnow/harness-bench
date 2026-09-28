@@ -52,6 +52,9 @@ def benchmark_run(
     tag: list[str] = typer.Option([], "--tag"),
     timeout: float | None = typer.Option(None, "--timeout"),
     model: str | None = typer.Option(None, "--model", help="agent model label (PRD §30)"),
+    agent_version: str | None = typer.Option(
+        None, "--agent-version", help="agent / Harness 版本（PRD §30、§109.3 可复现信息）"
+    ),
     judge_model: str | None = typer.Option(None, "--judge-model"),
     experiment_id: str | None = typer.Option(None, "--experiment-id"),
     variant_id: str | None = typer.Option(None, "--variant-id"),
@@ -78,6 +81,7 @@ def benchmark_run(
         save_artifacts=not no_save_artifacts,
         timeout=timeout,
         agent_model=model,
+        agent_version=agent_version,
         judge_model=judge_model,
         experiment_id=experiment_id,
         variant_id=variant_id,

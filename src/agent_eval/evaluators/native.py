@@ -506,21 +506,49 @@ def _check_tool_arguments(assertion: Assertion, scope: EvalScope) -> list[str]:
             problems.append(f"tool_arguments declared for '{tool}' but it was never called")
             continue
         for path, matcher in paths.items():
-            matched = False
-            first_reason = ""
-            for call in calls:
+            # Spec §11.2：**每个 occurrence 都要通过**，全部通过才 pass。
+            # 早退（任一调用匹配即 pass）会让"同一工具调两次、其中一次参数错"
+            # 判成通过——参数正确性的漏判方向，正是断言要拦的那一侧。
+            for index, call in enumerate(calls, start=1):
                 present, value = argument_path(call.arguments, path)
                 if not present:
-                    first_reason = first_reason or f"path '{path}' missing"
+                    problems.append(
+                        f"tool '{tool}' argument {path} (call #{index}): path '{path}' missing"
+                    )
                     continue
                 reason = matcher.check(value, sql_dialect=dialect)
-                if reason is None:
-                    matched = True
-                    break
-                first_reason = first_reason or reason
-            if not matched:
-                problems.append(f"tool '{tool}' argument {path}: {first_reason}")
+                if reason is not None:
+                    problems.append(f"tool '{tool}' argument {path} (call #{index}): {reason}")
     return problems
+
+
+def argument_checks_ratio(assertion: Assertion, scope: EvalScope) -> float:
+    """``native.argument_checks`` 的连续分：通过的检查数 / 检查总数（Spec §11.2）。
+
+    检查粒度是 ``(tool, path, 该工具的每次调用)``：与 ``_check_tool_arguments``
+    的 all-occurrence 判定同源——同一次调用错一个参数就扣一份，分数能反映
+    "错了几处"，而不只是"有没有错"。
+    """
+    parsed = parse_tool_arguments(assertion)
+    if parsed is None:
+        return 0.0
+    dialect = dialect_for(scope.database)
+    calls_by_tool: dict[str, list[ToolCallRecord]] = {}
+    for call in scope.tool_calls:
+        calls_by_tool.setdefault(call.name, []).append(call)
+    total = 0
+    passed = 0
+    for tool, paths in parsed.items():
+        calls = calls_by_tool.get(tool) or [None]  # 未调用：整体记一次未通过
+        for path, matcher in paths.items():
+            for call in calls:
+                total += 1
+                if call is None:
+                    continue
+                present, value = argument_path(call.arguments, path)
+                if present and matcher.check(value, sql_dialect=dialect) is None:
+                    passed += 1
+    return round(passed / total, 6) if total else 0.0
 
 
 def parse_step_efficiency(assertion: Assertion) -> StepEfficiencyAssertion | None:
@@ -762,7 +790,14 @@ def evaluate_assertions(
 
 
 def _group_score(metric_id: str, assertion: Assertion, scope: EvalScope, passed: bool) -> float:
-    """组得分：step_ratio 上报连续分（供 agent.step_efficiency 降级与趋势使用），其余 0/1。"""
+    """组得分。
+
+    ``native.step_ratio`` 上报连续分（Spec §11.1，供降级与趋势使用）；
+    ``native.argument_checks`` 上报"通过的检查数 / 检查总数"（Spec §11.2 明列）。
+    其余组是"全过 / 没过"的二值语义，0/1。
+    """
     if metric_id == "native.step_ratio":
         return step_ratio(assertion, scope)
+    if metric_id == "native.argument_checks":
+        return argument_checks_ratio(assertion, scope)
     return 1.0 if passed else 0.0

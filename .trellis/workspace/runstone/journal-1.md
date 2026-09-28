@@ -350,3 +350,104 @@ case 产物的"原文"端点最初写成 `.../artifacts/{name}/raw`。当产物�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: 全量契约审计与修复：judge 链路 / 门禁保真 / 静默丢弃
+
+**Date**: 2026-09-28
+**Task**: PRD 与 Spec 的实现一致性审计 + 三批次修复
+**Branch**: `main`
+
+### Summary
+
+对 PRD（V2.0.1）与 Spec（V2.2/V2.3）做了实现 vs 契约的全量核对（覆盖此前
+从未审计的 PRD 前五章、§113，以及 Spec 契约层）。结论：**12 项不一致，全部在
+405 pytest 全绿、ruff 干净、前端 typecheck 通过的状态下成立**。用户授权按
+judge 链路 → 门禁保真 → 静默丢弃 的顺序修复。
+
+### 为什么全绿掩盖了它们（最值得记的一点）
+
+1. `tests/conftest.py` 的 autouse fixture `deepeval_absent` 把 `probe` 猴补成
+   `{}` —— `agent.*` 在**整套测试里都不参与判定**，judge 路径从未被执行。
+2. 唯一覆盖 judge 的用例用假 `deepeval` 模块，`LLMTestCase = lambda **kw: {...}`
+   把 SDK 的类型约束抹平，错形状也"构造成功"。
+3. 其余多数是"配置字段被解析但无消费点"或"分支条件不可达"，测试按**实现的行为**
+   写断言，而不是按**契约的要求**。
+
+### 批次一：judge 链路（PRD §34/§35/§91，Spec §2.5/§7.3）
+
+- 多轮用了 `ConversationTestCase`，SDK 实为 `ConversationalTestCase` →
+  多轮 judge metric 全部 `AttributeError`（实测 `case_runs/*.iter1.json`）。
+- `tools_called` 传 dict，SDK 要求 `list[ToolCall]`。改为统一只构造 `LLMTestCase`
+  （六个 `agent.*` metric 只接受这一种），多轮用 `context` 承接前序轮次。
+- 工具入参改取 span 的 `attributes["arguments"]`（由 builder 落盘），不取
+  `span.input`——后者 fallback 到整个 event.data，会把工具名塞进 arguments。
+- `probe()` 从"查类名存在"升级为**真构造一次** `LLMTestCase`+`ToolCall`：
+  只查属性存在正是上面两条硬伤能通过能力探测的原因。
+- `judge_model` 此前只进配置、从不传 SDK。现 `evaluate(model=)` + Runner 按需透传。
+
+### 批次二：门禁保真
+
+- `tool_arguments` 只判第一次调用 → 全出现次数 + `call #N` + 连续 score +
+  非字符串 JSON 序列化 + 按 §12.3 脱敏（reason 会进 PR 评论）。
+- `forbidden_paths` 用子串包含 → 带边界的路径前缀匹配（`/var/etc/passwd`
+  不再命中 `/etc/passwd`）。
+- main-latest 候选集不看分支 → 按 §4.2 过滤 main/master 及 origin/*；
+  未知分支按不匹配处理，宁可 NO_BASELINE。
+- 必跑套件未覆盖归 exit 1 → 归 2（§6.1 明列，§6.4 的归因约定让归类差距有后果）。
+- junit `skipped` 分支恒不可达 → `evaluated_metrics` / `is_unjudged` 接通。
+- `SuiteRow.cases` 取 `len(case_ids)`，tag-only 套件恒显示 0 → 走与执行链同源的
+  `select_suite_cases()`（已抽为唯一实现）。
+
+### 批次三：静默丢弃
+
+- `custom.*`（PRD §42 合法命名空间）与拼错 `native.*` 被判"可用"，
+  随后什么都不跑也不报错 → 指名道姓的 `MetricUnavailableError` → exit 3。
+- `hard_failure_categories` 被解析、被回显，求值器从不读取 → 新增求值规则，
+  走 taxonomy 同一词汇表。
+- `agent_version` 无任何赋值路径（永远 None）→ `RunConfig` 字段 + CLI 选项。
+
+### 验证
+
+- `uv run pytest -q` → **405 passed**（+28 回归锁：`test_gate_fidelity.py` 19、
+  `test_baseline_policy.py` 5、`test_registry.py` +4）
+- `ruff check` / `format` → 全绿
+- web `bun run typecheck` → 绿
+- 真实链路复验：`benchmark run database-core --suite smoke --agent fake://` 的
+  两个 case 现在只报 `OpenAI API key is not configured`（认证问题），
+  不再是 SDK 不兼容——类名与 ToolCall 两条硬伤确认修掉。
+
+### 文档回填
+
+- Spec 新增 **§22 Errata V2.3 → V2.3.1**（12 项 + §22.11 记录"为什么能长期全绿"
+  与对应护栏）；§2.5 / §4.2 / §6.1 / §6.3 / §7.4 / §11.2 / §12.1 各加就地修正注。
+- ROADMAP 新增「全量审计与修复（2026-09-28）」小节。
+
+### 未做（明确排除，非遗漏）
+
+`case-scheduler`、PRD §19 Challenge Set、§40 Nightly Profile、呈现层缺口
+（ROADMAP「发现的 4」：报告不携带 case 级产物指针）。
+
+### 安全扫描
+
+Mimosa deep 扫描 `scan-2026-09-28T07-40-40.862Z-fce672ff8910`：0 findings，
+但 `runStatus=inconclusive`（threatModel / findingDiscovery 两阶段
+`partial`，165 文件全部解析成功）。**不宣称项目安全**。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| (pending) | fix: 全量契约审计修复（judge 链路 / 门禁保真 / 静默丢弃） |
+
+### Testing
+
+- [OK] 405 passed / ruff 干净 / 前端 typecheck 绿
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 呈现层缺口（报告携带 case 级产物指针）如需补齐，应由独立增量做（Spec §21.1）

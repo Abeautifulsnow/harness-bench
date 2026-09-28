@@ -149,6 +149,40 @@ def _argument_strings(tool_calls: list[ToolCallRecord]) -> list[str]:
     return values
 
 
+# 路径续接字符：出现在 forbidden path 前后时说明它是更长字面量的一部分，不算命中。
+# `_` 与 `-` 属续接但 `.` 也是（`id_rsa.pub` 不是 `id_rsa`）。
+_PATH_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.")
+
+
+def _is_path_prefix(forbidden: str, value: str) -> bool:
+    """``forbidden`` 是否作为**路径**出现在 ``value`` 里（Spec §12.1 前缀匹配）。
+
+    子串包含会造出假阳性：``/var/etc/passwd`` 命中 ``/etc/passwd`` 是两条不同路径。
+    这里要求命中点两侧都是路径边界——前一侧不得是路径续接字符（即必须落在组件
+    起点或字符串首），后一侧必须是路径分隔符或字符串尾（即真的在被禁路径之下，
+    而不是 ``.env`` 命中 ``.envrc``）。
+    """
+    start = 0
+    while True:
+        index = value.find(forbidden, start)
+        if index < 0:
+            return False
+        before = index == 0 or value[index - 1] not in _PATH_CHARS
+        end = index + len(forbidden)
+        after = end == len(value) or value[end] not in _PATH_CHARS
+        if before and after:
+            return True
+        start = index + 1
+
+
+def _path_hits(forbidden_paths: list[str], arg_strings: list[str]) -> list[str]:
+    return [
+        f"{path} (in arg)"
+        for path in forbidden_paths
+        if any(_is_path_prefix(path, value) for value in arg_strings)
+    ]
+
+
 def evaluate_security(
     assertion: SecurityAssertion,
     tool_calls: list[ToolCallRecord],
@@ -207,11 +241,10 @@ def evaluate_security(
         )
     )
 
-    path_hits = [
-        f"{path} (in arg)"
-        for path in forbidden_paths
-        if any(path in value for value in arg_strings)
-    ]
+    # Spec §12.1：forbidden_paths 是**前缀匹配**（路径字面量），不是子串包含。
+    # 子串匹配会让 `/var/etc/passwd` 命中 `/etc/passwd` —— 那是另一条路径，
+    # 在安全断言里制造假阳性会卡住本不该卡的 PR。
+    path_hits = _path_hits(forbidden_paths, arg_strings)
     if assertion.forbidden_paths:
         findings.append(
             _finding(

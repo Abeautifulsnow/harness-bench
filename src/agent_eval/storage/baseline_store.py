@@ -15,6 +15,15 @@ from agent_eval.models.regression import Baseline, BaselineMode
 from agent_eval.models.run import RunStatus
 from agent_eval.storage.run_store import RunStore
 
+# main-latest 候选集的分支判据（Spec §4.2）：main / master 的本地与远程写法。
+_MAIN_BRANCHES = frozenset({"main", "master", "origin/main", "origin/master", "refs/heads/main"})
+
+
+def _is_main_branch(branch: str | None) -> bool:
+    if not branch:
+        return False
+    return branch.strip() in _MAIN_BRANCHES
+
 
 class BaselineStore:
     def __init__(self, state_root: Path, runs_root: Path) -> None:
@@ -138,11 +147,20 @@ class BaselineStore:
     def _resolve_main_latest(
         self, benchmark_id: str, dataset_version: str | None
     ) -> Baseline | None:
+        """Spec §4.2：候选集是 **main 分支上的** runs，不是"任意分支最近一次"。
+
+        少了分支过滤，feature 分支上恰好 Gate PASS 的 run 会被选成 PR Gate 的
+        baseline —— Spec 原文警告的"最近一次可能本身已带 Regression"就是这个宽松
+        变体。``git_branch`` 未知（None/空）按不匹配处理：宁可退化成 NO_BASELINE，
+        也不拿来源不明的 run 当基准。
+        """
         candidates = []
         for meta in self.store.list_runs():
             if meta.benchmark_id != benchmark_id:
                 continue
             if meta.status != RunStatus.completed:
+                continue
+            if not _is_main_branch(meta.git_branch):
                 continue
             if dataset_version is not None and meta.dataset_version != dataset_version:
                 continue

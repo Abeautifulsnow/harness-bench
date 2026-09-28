@@ -33,6 +33,41 @@ Spec（V2.2）的验收条款，不是"感觉还差点"。
 
 ---
 
+## 全量审计与修复（2026-09-28）
+
+对 PRD（V2.0.1）与 Spec（V2.2/V2.3）做了一轮**实现 vs 契约**的全量核对，
+不新增功能、只修不一致。三项批次（judge 链路 / 门禁保真 / 静默丢弃）全部落地，
+契约回填写在 **Spec §22**（Errata V2.3 → V2.3.1）。
+
+修前状态：405 pytest 全绿、ruff 干净、前端 typecheck 通过，但下列缺陷在**真实
+运行**中成立——即"绿灯掩盖的问题"，是本轮最值得记的一点。
+
+| 批次 | 缺陷 | 契约 | 处置 |
+| --- | --- | --- | --- |
+| 一 | 多轮用 `ConversationTestCase`（SDK 实为 `ConversationalTestCase`）→ 多轮 judge 全 ERROR | §2.5 §7.3 | 统一只构造 `LLMTestCase`，多轮走 `context` |
+| 一 | `tools_called` 传 dict，SDK 要求 `ToolCall` 对象 | §2.5 | 构造 `ToolCall`；入参取 `attributes["arguments"]` |
+| 一 | `probe()` 只查类名存在，探测不出上面两条 | §7.3 | 升级为真构造一次 `LLMTestCase`+`ToolCall` |
+| 一 | `judge_model` 解析进配置但从不传 SDK | PRD §91 | `evaluate(model=)` + Runner 按需透传 |
+| 二 | `tool_arguments` 只判第一次调用 | §11.2 | 全出现次数 + `call #N` + 连续 score + JSON 序列化 + 脱敏 |
+| 二 | `forbidden_paths` 用子串包含（`/var/etc/passwd` 命中 `/etc/passwd`） | §12.1 | 带边界的路径前缀匹配 |
+| 二 | main-latest 候选集不看分支 | §4.2 | 加 main 分支过滤，未知分支按不匹配处理 |
+| 二 | 必跑套件未覆盖归 exit 1（应归 2） | §6.1 | `suites.coverage` fail → exit 2 |
+| 二 | junit `skipped` 分支不可达（恒 0） | §6.3 §19.1.1 | `evaluated_metrics` / `is_unjudged` 接通 |
+| 三 | `custom.*` 与拼错 `native.*` 静默丢弃（什么都不跑且不报错） | §7.4 PRD §42 | 指名道姓的 `MetricUnavailableError` → exit 3 |
+| 三 | `hard_failure_categories` 被解析但从不求值 | PRD §47/§48 | 新增求值规则，走 taxonomy 同一词汇表 |
+| 三 | `agent_version` 无任何赋值路径（永远 `None`） | PRD §91 | `RunConfig` 字段 + `--agent-version` |
+| — | 套件 case 数取 `len(case_ids)`，tag-only 套件恒显示 0 | PRD §103 | 走与执行链同源的 `select_suite_cases()` |
+
+**为什么能长期全绿**（详见 Spec §22.11）：`conftest.py` 的 autouse fixture
+`deepeval_absent` 把 `probe` 猴补成 `{}`，judge 路径在整套测试里都不执行；
+唯一覆盖 judge 的用例用假模块，`LLMTestCase = lambda **kw: {...}` 把类型约束
+抹平。补的护栏是**真 SDK 构造**（`importorskip("deepeval")`、无 mock）。
+
+明确**不在**本轮范围（见下方"PRD 自己标注为未来/后续的"与"执行中的发现"）：
+`case-scheduler`、§19 Challenge Set、§40 Nightly Profile、呈现层缺口（发现 4）。
+
+---
+
 ## 优先级视图
 
 | 任务 | 优先级 | 性质 | 阻塞了什么 |

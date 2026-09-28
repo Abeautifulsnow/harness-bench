@@ -52,10 +52,19 @@ class CaseAggregate:
     blocking_failures: list[dict[str, Any]] = field(default_factory=list)
     error_semantics: list[str] = field(default_factory=list)
     failure_category: str | None = None
+    # Spec §19.1.1：`skipped` 是独立结局。全部 metric 都 skipped 的 case 是
+    # "什么都没判成"，不是"判过了"——junit 必须能把它渲染成 skipped（§6.3），
+    # 否则观测不足的 case 会以 passed 的形态出现在 CI 报告里。
+    evaluated_metrics: int = 0
 
     @property
     def has_error(self) -> bool:
         return bool(self.error_semantics)
+
+    @property
+    def is_unjudged(self) -> bool:
+        """没有一条 metric 真正参与判定（全部 skipped 或根本没产出）。"""
+        return self.evaluated_metrics == 0
 
     def as_dict(self) -> dict[str, Any]:
         """Read-model shape shared by report.json and the REST API (PRD §75 Cases tab)."""
@@ -83,6 +92,7 @@ class CaseAggregate:
             "pass_at_k": dict(self.pass_at_k),
             "metric_means": dict(self.metric_means),
             "blocking_failures": list(self.blocking_failures),
+            "evaluated_metrics": self.evaluated_metrics,
         }
 
 
@@ -192,6 +202,7 @@ def _case_aggregate(
             }
         ),
         failure_category=next((r.failure_category for r in iterations if r.failure_category), None),
+        evaluated_metrics=sum(1 for m in all_metrics if m.verdict != "skipped"),
     )
 
 
@@ -256,12 +267,19 @@ def build_aggregate(
 
 
 def case_status_for_junit(case: CaseAggregate) -> str:
-    """Spec §6.3: failure = blocking FAIL; error = INFRA/EVALUATION; skipped = all ERROR."""
+    """Spec §6.3: failure = blocking FAIL; error = INFRA/EVALUATION; skipped = skipped.
+
+    判定顺序即优先级：ERROR 轮（INFRA/EVALUATION）先落地，然后是 blocking FAIL；
+    ``skipped`` 只留给"没有任何一条 metric 真正参与判定"的 case（Spec §19.1.1
+    的 skipped 独立结局）。此前该分支挂在 ``valid_iterations == 0`` 上，而那个
+    条件必然伴随 ``error_semantics``，于是 skipped 恒为 0，CI 报告里也就看不出
+    "这条 case 其实什么都没判"。
+    """
     if case.error_semantics:
         return "error"
     if case.blocking_failures:
         return "failure"
-    if case.valid_iterations == 0:
+    if case.is_unjudged or case.valid_iterations == 0:
         return "skipped"
     return "passed"
 

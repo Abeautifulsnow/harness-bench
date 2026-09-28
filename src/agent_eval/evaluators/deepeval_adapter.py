@@ -17,6 +17,44 @@ from agent_eval.models.case import Case
 from agent_eval.models.spans import SpanTree
 
 
+def _expected_output_text(case: Case) -> str | None:
+    """PRD §37 的 ``expected_output ← case.expected.output``。
+
+    平台的 ``OutputAssertion`` 没有单一"期望输出文本"字段，它按断言形态表达：
+    ``exact`` 是字面期望；只有 ``contains`` 时把命中词表作为期望语义的近似。
+    两者都没有（例如只断言工具与约束）时返回 None —— 不拿 ``case.context``
+    顶替，那是 judge 的背景说明，当成标准答案会让评分口径整体错位。
+    """
+    expected = case.expected.output
+    if expected.exact is not None:
+        return expected.exact
+    if expected.contains:
+        return "\n".join(expected.contains)
+    return None
+
+
+def _tool_calls_from_tree(tree: SpanTree) -> list[dict[str, Any]]:
+    """Span Tree 的 tool span → ToolCall 构造参数（PRD §37 ``tools_called ← trace tool calls``）。
+
+    必须保留参数：DeepEval 的 ``ToolCorrectnessMetric`` / ``ArgumentCorrectnessMetric``
+    判的就是"调了什么、带什么参数"，只给名字会让参数类指标无从判定。
+
+    参数取 ``attributes["arguments"]``（协议显式声明的 tool.call 参数），不取
+    ``span.input``：后者在事件未带 ``arguments`` 时兜底为整份 ``event.data``，
+    含 ``name`` 等协议字段，当成"实际发送的参数"等于让 judge 按伪造参数评分。
+    """
+    calls: list[dict[str, Any]] = []
+    for span in tree.find("tool"):
+        arguments = span.attributes.get("arguments")
+        calls.append(
+            {
+                "name": span.name,
+                "input_parameters": arguments if isinstance(arguments, dict) else None,
+            }
+        )
+    return calls
+
+
 class DeepEvalCapabilityAdapter:
     def __init__(self) -> None:
         self._module: Any | None = None
@@ -39,21 +77,57 @@ class DeepEvalCapabilityAdapter:
             return None
 
     def probe(self) -> dict[str, bool]:
+        """启动期能力探测（Spec §7.3）。
+
+        探测两件事，缺一不可：
+          1. 六个 metric 类在 ``deepeval.metrics`` 里存在；
+          2. **Test Case 能用本 Adapter 的实际形状构造出来**（``LLMTestCase`` +
+             ``ToolCall``）。
+
+        只做第 1 项是不够的：SDK 大版本里 ``ToolCall`` 字段与 test case 类名都变过，
+        "类存在但构造签名对不上"会让启动期探测全绿、运行期每个 case 都判死。
+        这里用与 ``_build_test_case()`` 同源的最小样本做一次真实构造，把这类
+        不兼容提前到启动期，交给 §7.4 的 fallback 链降级而不是让 run 变 exit 2。
+
+        故意的例外：judge 模型凭据缺失（如未设 ``OPENAI_API_KEY``）不在探测范围。
+        那是 run 级配置问题而非 SDK 不兼容，按 §6.1 走 exit 2（评估不可靠）比
+        静默降级成 native 更能反映实情。
+        """
         if self._probed is not None:
             return dict(self._probed)
         module = self._load()
-        result: dict[str, bool] = {}
         if module is None:
-            result = {metric_id: False for metric_id in DEEPEVAL_AGENT_METRICS}
-        else:
-            for metric_id, class_name in DEEPEVAL_AGENT_METRICS.items():
-                try:
-                    metrics_mod = importlib.import_module("deepeval.metrics")
-                    result[metric_id] = hasattr(metrics_mod, class_name)
-                except ImportError:
-                    result[metric_id] = False
-        self._probed = result
-        return dict(result)
+            self._probed = {metric_id: False for metric_id in DEEPEVAL_AGENT_METRICS}
+            return dict(self._probed)
+        try:
+            metrics_mod = importlib.import_module("deepeval.metrics")
+            test_case_mod = importlib.import_module("deepeval.test_case")
+        except ImportError:
+            self._probed = {metric_id: False for metric_id in DEEPEVAL_AGENT_METRICS}
+            return dict(self._probed)
+
+        shape_ok = self._smoke_build_test_case(test_case_mod)
+        self._probed = {
+            metric_id: shape_ok and hasattr(metrics_mod, class_name)
+            for metric_id, class_name in DEEPEVAL_AGENT_METRICS.items()
+        }
+        return dict(self._probed)
+
+    @staticmethod
+    def _smoke_build_test_case(test_case_mod: Any) -> bool:
+        """用最小样本真实构造一次 test case；任何 SDK 形状不兼容都在这里暴露。"""
+        try:
+            tool_call = test_case_mod.ToolCall(name="probe", input_parameters={"k": "v"})
+            test_case_mod.LLMTestCase(
+                input="probe",
+                actual_output="probe",
+                tools_called=[tool_call],
+                expected_tools=[test_case_mod.ToolCall(name="probe")],
+                completion_time=0.0,
+            )
+        except Exception:
+            return False
+        return True
 
     # ---------- Span Tree → DeepEval trace 转换（Adapter 的核心交付物） ----------
 
@@ -64,30 +138,70 @@ class DeepEvalCapabilityAdapter:
         *,
         final_output: str | None,
         latency_ms: int,
-        tokens: int,
+        cost: float | None = None,
+        turn_outputs: list[str | None] | None = None,
     ) -> dict[str, Any]:
-        """平台观测 → DeepEval Test Case / Conversation Test Case 字段结构（PRD §37）。"""
+        """平台观测 → DeepEval Test Case 字段结构（PRD §37）。
+
+        ``type`` 恒为 ``"llm"``：六个 ``agent.*`` metric 的 ``measure()`` 只接受
+        ``LLMTestCase``（已对 SDK 4.2.5 逐个核对），不提供 ``ConversationalTestCase``
+        入口。多轮 case 因此按"终局切片 + 前序轮次入 context"表达，而不是交给 SDK
+        一个它不消费的对话对象：
+
+          - ``input``            ← 最后一轮的 user 消息（终局评测对象）
+          - ``actual_output``    ← run 的最终输出
+          - ``context``          ← ``case.context`` + 前序轮次的 user/assistant 文本
+
+        ``turn_outputs`` 是各轮的 assistant 输出（来自 ``CaseRunResult.turn_results``）；
+        缺省时前序轮次只有 user 侧，属于观测不足而非编造。
+        """
         turns_in = case.input.messages()
+        is_multi = case.input.type == "multi_turn"
+        context_items = list(case.context or [])
+
+        if is_multi and len(turns_in) > 1:
+            # 前序轮次折叠进 context：SDK 不消费 turns，但它们仍是 judge 判"是否准确
+            # 解释/是否偏离意图"的必要背景，丢掉等于让多轮 case 退化成单轮首问。
+            outputs = list(turn_outputs or [])
+            for index, user_message in enumerate(turns_in[:-1]):
+                context_items.append(f"user: {user_message}")
+                assistant = outputs[index] if index < len(outputs) else None
+                if assistant:
+                    context_items.append(f"assistant: {assistant}")
+
         return {
-            "type": "conversation" if case.input.type == "multi_turn" else "llm",
-            "input": turns_in[0] if turns_in else None,
-            "turns": [{"role": "user", "content": m} for m in turns_in],
+            "type": "llm",
+            "case_type": case.input.type,
+            "input": turns_in[-1] if is_multi else (turns_in[0] if turns_in else None),
             "actual_output": final_output,
-            "expected_output": case.context,
-            "context": case.context,
+            "expected_output": _expected_output_text(case),
+            "context": context_items or None,
             "retrieval_context": [s.output for s in tree.find("retriever") if s.output is not None],
-            "tools_called": tree.tool_sequence(),
-            "expected_tools": case.expected.tools.required,
+            "tools_called": _tool_calls_from_tree(tree),
+            "expected_tools": [{"name": name} for name in case.expected.tools.required],
             "completion_time": latency_ms / 1000.0,
-            "token_cost": tokens,
+            # PRD §37 token_cost ← calculated cost。无定价时保持 None（PRD §59：
+            # 未知成本绝不写 0.0，否则趋势图会出现"成本降到零"的假象）。
+            "token_cost": cost,
+            "input_token_count": tree.usage_totals()["input_tokens"],
+            "output_token_count": tree.usage_totals()["output_tokens"],
         }
 
     # ---------- metric execution ----------
 
     async def evaluate(
-        self, metric_id: str, threshold: float | None, trace: dict[str, Any]
+        self,
+        metric_id: str,
+        threshold: float | None,
+        trace: dict[str, Any],
+        *,
+        model: str | None = None,
     ) -> tuple[float | None, str]:
-        """执行一个 metric；返回 (score, reason)。SDK 侧一切异常 → EvaluationInfraError。"""
+        """执行一个 metric；返回 (score, reason)。SDK 侧一切异常 → EvaluationInfraError。
+
+        ``model`` 是 PRD §91 的 Judge Model：必须落到 ``metric_cls(model=...)``
+        才算"Judge 与 Agent 模型分离"。SDK 接受模型名字符串或 ``DeepEvalBaseLLM``。
+        """
         from agent_eval.errors import EvaluationInfraError
 
         module = self._load()
@@ -98,7 +212,7 @@ class DeepEvalCapabilityAdapter:
             metrics_mod = importlib.import_module("deepeval.metrics")
             metric_cls = getattr(metrics_mod, class_name)
             test_case = self._build_test_case(trace)
-            metric = metric_cls(threshold=threshold)
+            metric = metric_cls(threshold=threshold, **({"model": model} if model else {}))
             score = float(metric.measure(test_case))
         except EvaluationInfraError:
             raise
@@ -112,24 +226,45 @@ class DeepEvalCapabilityAdapter:
         return score, reason
 
     def _build_test_case(self, trace: dict[str, Any]) -> Any:
-        """构造 DeepEval Test Case / Conversation Test Case（SDK 类型只在层内出现）。"""
+        """构造 ``LLMTestCase``（SDK 类型只在层内出现）。
+
+        与 ``probe()._smoke_build_test_case()`` 同源：探测通过 = 这里能构造出来。
+        ``tools_called`` / ``expected_tools`` 必须转成 ``ToolCall`` 对象，直接传字符串
+        列表会被 SDK 的校验拒绝（``'tools_called' must be None or a list of `ToolCall`）``。
+        """
         from agent_eval.errors import EvaluationInfraError
 
         try:
             test_case_mod = importlib.import_module("deepeval.test_case")
-            if trace.get("type") == "conversation":
-                conversation = test_case_mod.ConversationTestCase(turns=trace["turns"])
-                return conversation
             return test_case_mod.LLMTestCase(
                 input=trace.get("input") or "",
                 actual_output=trace.get("actual_output") or "",
-                expected_output=(trace.get("expected_output") or [None])[0]
-                if isinstance(trace.get("expected_output"), list)
-                else trace.get("expected_output"),
+                expected_output=trace.get("expected_output"),
                 context=trace.get("context"),
                 retrieval_context=trace.get("retrieval_context") or None,
-                tools_called=trace.get("tools_called") or None,
-                expected_tools=trace.get("expected_tools") or None,
+                tools_called=self._as_tool_calls(test_case_mod, trace.get("tools_called")),
+                expected_tools=self._as_tool_calls(test_case_mod, trace.get("expected_tools")),
+                completion_time=trace.get("completion_time"),
+                token_cost=trace.get("token_cost"),
+                input_token_count=trace.get("input_token_count"),
+                output_token_count=trace.get("output_token_count"),
             )
         except Exception as exc:
             raise EvaluationInfraError(f"deepeval test case construction failed: {exc}") from exc
+
+    @staticmethod
+    def _as_tool_calls(test_case_mod: Any, values: Any) -> list[Any] | None:
+        """``{"name": ..., "input_parameters": ...}`` → SDK ``ToolCall`` 列表。"""
+        if not values:
+            return None
+        calls: list[Any] = []
+        for value in values:
+            if isinstance(value, dict):
+                calls.append(
+                    test_case_mod.ToolCall(
+                        name=value["name"], input_parameters=value.get("input_parameters")
+                    )
+                )
+            else:  # 名字字符串（如 case.expected.tools.required 的退化形态）
+                calls.append(test_case_mod.ToolCall(name=str(value)))
+        return calls or None

@@ -11,6 +11,7 @@ native evaluator only.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Literal
 
@@ -18,6 +19,37 @@ from pydantic import BaseModel, Field, model_validator
 
 _SPLIT_PATH = re.compile(r"\.")
 _INDEX_PATH = re.compile(r"^([A-Za-z_][\w\-]*)?\[(\d+)\]$")
+
+
+def _serialize(value: Any) -> str | None:
+    """非字符串值 → JSON 文本（Spec §11.2：contains / regex 对非字符串先序列化）。"""
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        return None
+
+
+# 疑似密钥的字面量：Spec §11.2 要求 reason 里回显的实际值脱敏（复用 §12.3 口径）
+_SECRETISH = re.compile(
+    r"(?i)((?:secret|token|password|passwd|api[_-]?key|access[_-]?key)[\"'\s:=]+)"
+    r"([A-Za-z0-9_\-/+.]{8,})"
+)
+
+
+def _mask(value: Any) -> Any:
+    """reason 中回显的值：疑似密钥只留前 4 字符（Spec §12.3 口径）。
+
+    报告会被附到 PR 与工单上，把断言参数里的凭据原文写进 reason 等于把泄漏面
+    再扩大一次——而 ``tool_arguments`` 恰恰常在断言里比对凭据类参数。
+    """
+    if isinstance(value, str):
+        return _SECRETISH.sub(lambda m: f"{m.group(1)}{m.group(2)[:4]}***", value)
+    if isinstance(value, dict):
+        return {key: _mask(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_mask(item) for item in value]
+    return value
+
 
 EXTENSION_KEYS = frozenset(
     {
@@ -127,19 +159,22 @@ class ToolArgumentMatcher(BaseModel):
                     return None
                 if verdict.degraded:
                     return (
-                        f"expected {self.exact!r} (semantic), got {value!r}"
+                        f"expected {_mask(str(self.exact))!r} (semantic), got {_mask(value)!r}"
                         f"；语义比对已降级：{verdict.degraded}"
                     )
-            return f"expected {self.exact!r}, got {value!r}"
+            return f"expected {_mask(self.exact)!r}, got {_mask(value)!r}"
         if self.contains is not None:
-            if not isinstance(value, str) or self.contains not in value:
-                return f"expected to contain {self.contains!r}, got {value!r}"
+            # Spec §11.2：非字符串先做 JSON 序列化再匹配（`{"id": 1}` 的 contains "id"）
+            text = value if isinstance(value, str) else _serialize(value)
+            if text is None or self.contains not in text:
+                return f"expected to contain {self.contains!r}, got {text!r}"
             return None
         if self.regex is not None:
             import re
 
-            if not isinstance(value, str) or re.search(self.regex, value) is None:
-                return f"expected to match {self.regex!r}, got {value!r}"
+            text = value if isinstance(value, str) else _serialize(value)
+            if text is None or re.search(self.regex, text) is None:
+                return f"expected to match {self.regex!r}, got {text!r}"
             return None
         return None
 

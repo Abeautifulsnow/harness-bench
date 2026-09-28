@@ -20,6 +20,7 @@ from agent_eval.loading.loader import (
     load_dataset,
     load_suites,
     resolve_cases,
+    select_suite_cases,
 )
 from agent_eval.models.benchmark import BenchmarkDef, DatasetInfo, SuiteDef
 from agent_eval.models.case import Case
@@ -251,6 +252,13 @@ def list_suite_rows(workspace: WorkspaceDep) -> list[SuiteRow]:
     root = workspace.evals_root
     try:
         suites: dict[str, SuiteDef] = load_suites(root)
+        # 计数必须用真实选择结果：套件通常只声明 tags（case_ids 为空），
+        # 按 len(case_ids) 计会让每个套件都显示 0 个 case，与实际跑了几条矛盾。
+        all_cases: list[Case] = []
+        for ref in _dataset_refs(root):
+            _, cases = load_dataset(root, ref)
+            all_cases.extend(cases)
+        counts = {name: len(select_suite_cases(suite, all_cases)) for name, suite in suites.items()}
     except AgentEvalError as exc:
         raise HTTPException(status_code=400, detail=exc.message) from exc
     out = [
@@ -258,7 +266,7 @@ def list_suite_rows(workspace: WorkspaceDep) -> list[SuiteRow]:
             name=suite.name,
             tags=list(suite.tags),
             case_ids=list(suite.case_ids),
-            cases=len(suite.case_ids),
+            cases=counts[suite.name],
         )
         for suite in suites.values()
     ]

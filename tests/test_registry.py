@@ -9,6 +9,7 @@ import pytest
 
 from agent_eval.evaluators.deepeval_adapter import DeepEvalCapabilityAdapter
 from agent_eval.evaluators.registry import (
+    DEEPEVAL_AGENT_METRICS,
     METRIC_REGISTRY,
     MetricUnavailableError,
     resolve_metric,
@@ -88,14 +89,65 @@ def test_deepeval_convert_shape() -> None:
         )
     )
     trace = DeepEvalCapabilityAdapter().convert(
-        case, b.build(), final_output="out", latency_ms=100, tokens=42
+        case, b.build(), final_output="out", latency_ms=100, cost=0.25
     )
     assert trace["input"] == "q"
     assert trace["actual_output"] == "out"
-    assert trace["tools_called"] == ["t1"]
-    assert trace["expected_tools"] == ["t1"]
-    assert trace["token_cost"] == 42
+    # PRD §37：tools_called ← trace tool calls，必须带参数（ArgumentCorrectness 靠它判）
+    assert trace["tools_called"] == [{"name": "t1", "input_parameters": None}]
+    assert trace["expected_tools"] == [{"name": "t1"}]
+    # PRD §37：token_cost ← calculated cost，不是 token 数量
+    assert trace["token_cost"] == 0.25
     assert trace["type"] == "llm"
+
+
+def test_deepeval_convert_multi_turn_folds_prior_turns_into_context() -> None:
+    """多轮 case 按"终局切片 + 前序轮次入 context"表达（不是退化成首问）。"""
+    case = Case.model_validate(
+        {
+            "id": "m",
+            "version": 1,
+            "name": "m",
+            "context": ["背景"],
+            "input": {
+                "type": "multi_turn",
+                "turns": [{"user": "第一问"}, {"user": "第二问"}],
+            },
+        }
+    )
+    from agent_eval.trace.builder import TraceBuilder
+
+    trace = DeepEvalCapabilityAdapter().convert(
+        case,
+        TraceBuilder().build(),
+        final_output="终答",
+        latency_ms=100,
+        turn_outputs=["第一答"],
+    )
+    assert trace["type"] == "llm"  # SDK 六个 agent.* metric 只接 LLMTestCase
+    assert trace["input"] == "第二问"  # 终局评测对象 = 最后一轮
+    assert trace["actual_output"] == "终答"
+    assert trace["context"] == ["背景", "user: 第一问", "assistant: 第一答"]
+
+
+def test_deepeval_convert_does_not_use_context_as_expected_output() -> None:
+    """回归：`expected_output` 曾是 ``case.context``（judge 背景），拿背景当标准答案。"""
+    case = Case.model_validate(
+        {
+            "id": "c",
+            "version": 1,
+            "name": "c",
+            "context": ["这是背景说明，不是标准答案"],
+            "input": {"type": "single_turn", "prompt": "q"},
+        }
+    )
+    from agent_eval.trace.builder import TraceBuilder
+
+    trace = DeepEvalCapabilityAdapter().convert(
+        case, TraceBuilder().build(), final_output="out", latency_ms=1
+    )
+    assert trace["expected_output"] is None
+    assert trace["context"] == ["这是背景说明，不是标准答案"]
 
 
 @pytest.mark.real_judge
@@ -103,7 +155,7 @@ def test_deepeval_evaluate_with_fake_module(monkeypatch) -> None:
     fake_metrics = types.ModuleType("deepeval.metrics")
 
     class TaskCompletionMetric:
-        def __init__(self, threshold=None):
+        def __init__(self, threshold=None, **kwargs):
             self.threshold = threshold
 
         def measure(self, test_case):
@@ -112,6 +164,7 @@ def test_deepeval_evaluate_with_fake_module(monkeypatch) -> None:
     fake_metrics.TaskCompletionMetric = TaskCompletionMetric
     fake_test_case = types.ModuleType("deepeval.test_case")
     fake_test_case.LLMTestCase = lambda **kw: {"fake": kw}
+    fake_test_case.ToolCall = lambda **kw: {"tool": kw}
     fake_pkg = types.ModuleType("deepeval")
     fake_pkg.metrics = fake_metrics
     fake_pkg.test_case = fake_test_case
@@ -129,6 +182,100 @@ def test_deepeval_evaluate_with_fake_module(monkeypatch) -> None:
     )
     assert score == 0.9
     assert "above" in reason
+
+
+@pytest.mark.real_judge
+def test_probe_rejects_incompatible_sdk_shape(monkeypatch) -> None:
+    """回归：probe 曾只看"类是否存在"，SDK 形状变了仍全绿 → 运行期每 case 判死。
+
+    这里模拟一个"六个 metric 类都在、但 test_case 构造形状对不上"的 SDK：
+    ``ToolCall`` 缺席时 probe 必须整体 False，交给 §7.4 的 fallback 链降级。
+    """
+    fake_metrics = types.ModuleType("deepeval.metrics")
+    for class_name in DEEPEVAL_AGENT_METRICS.values():
+        setattr(fake_metrics, class_name, type(class_name, (), {}))
+    fake_test_case = types.ModuleType("deepeval.test_case")
+    fake_test_case.LLMTestCase = lambda **kw: kw  # 没有 ToolCall
+    fake_pkg = types.ModuleType("deepeval")
+    fake_pkg.metrics = fake_metrics
+    fake_pkg.test_case = fake_test_case
+    monkeypatch.setitem(sys.modules, "deepeval", fake_pkg)
+    monkeypatch.setitem(sys.modules, "deepeval.metrics", fake_metrics)
+    monkeypatch.setitem(sys.modules, "deepeval.test_case", fake_test_case)
+
+    assert not any(DeepEvalCapabilityAdapter().probe().values())
+
+
+@pytest.mark.real_judge
+def test_build_test_case_against_real_sdk() -> None:
+    """对**真实** 已安装 SDK 的构造冒烟。
+
+    这是本轮修复的核心回归网：之前唯一走 evaluate 的用例用的是假 deepeval 模块
+    （``LLMTestCase = lambda **kw``），对真实签名约束完全免疫，于是
+    ``ConversationTestCase`` 类名错误与 ``tools_called`` 类型错误两个 bug
+    在整个测试套件里都不可见。此处不 mock：装了 SDK 就用真 SDK 构造。
+    """
+    pytest.importorskip("deepeval")
+    from agent_eval.models.events import TraceEvent
+    from agent_eval.trace.builder import TraceBuilder
+
+    adapter = DeepEvalCapabilityAdapter()
+    assert all(adapter.probe().values()), "probe 必须能构造出真实 test case"
+
+    case = Case.model_validate(
+        {
+            "id": "c",
+            "version": 1,
+            "name": "c",
+            "context": ["背景"],
+            "input": {"type": "single_turn", "prompt": "q"},
+            "expected": {"tools": {"required": ["execute_sql"]}},
+        }
+    )
+    builder = TraceBuilder()
+    builder.feed(
+        TraceEvent(
+            event_id="e1",
+            trace_id="t",
+            type="tool.call",
+            timestamp="2026-09-23T11:00:00+08:00",
+            data={"name": "execute_sql", "arguments": {"sql": "select 1"}},
+        )
+    )
+    trace = adapter.convert(case, builder.build(), final_output="out", latency_ms=100, cost=0.01)
+    test_case = adapter._build_test_case(trace)
+    assert test_case.tools_called[0].name == "execute_sql"
+    assert test_case.tools_called[0].input_parameters == {"sql": "select 1"}
+    assert test_case.token_cost == 0.01
+
+    # 多轮 case 同样必须构造得出来（曾经因类名错误在此抛 EvaluationInfraError）
+    multi = Case.model_validate(
+        {
+            "id": "m",
+            "version": 1,
+            "name": "m",
+            "input": {"type": "multi_turn", "turns": [{"user": "一"}, {"user": "二"}]},
+        }
+    )
+    multi_trace = adapter.convert(multi, TraceBuilder().build(), final_output="答", latency_ms=10)
+    adapter._build_test_case(multi_trace)
+
+
+def test_custom_namespace_fails_fast_instead_of_silent_drop() -> None:
+    """PRD §42 的 ``custom.*``（用户 GEval）未实现，必须 fail-fast 而不是静默丢弃。
+
+    回归背景：``provider_for('custom.x')`` 曾兜底成 ``native``，随后 runner 的分派
+    既不入 judge 也不入 harness —— profile 里写 custom.* 什么都不会发生，连 skipped
+    都不记。现在按 §7.4 在启动期报 MetricUnavailableError（exit 3）。
+    """
+    with pytest.raises(MetricUnavailableError, match="Custom GEval"):
+        resolve_metric(MetricSpec(id="custom.database_answer_quality"), {}, no_judge=False)
+
+
+def test_unknown_native_metric_fails_fast() -> None:
+    """注册表里没有的 native.* id 是拼写错误，不得被当成"有一条 native 规则在评测"。"""
+    with pytest.raises(MetricUnavailableError, match="not a registered platform metric"):
+        resolve_metric(MetricSpec(id="native.output_check"), {}, no_judge=False)
 
 
 def test_scan_unsupported_assertions() -> None:

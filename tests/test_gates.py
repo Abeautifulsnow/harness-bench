@@ -190,7 +190,9 @@ class TestReleaseGateSuites:
         assert rule is not None and rule.verdict == "fail"
         assert rule.affected_case_runs == ["golden", "regression", "security"]
         assert report.verdict == "fail"
-        assert exit_code_for(report, outcome.aggregate) == 1
+        # Spec §6.1：mandatory suite 未完整执行属"无法可靠评估" → exit 2，
+        # 不是 1。归成 1 会让 CI 把"这次没跑那些套件"误判为"PR 引入回归"。
+        assert exit_code_for(report, outcome.aggregate) == 2
 
     async def test_gate_required_suites_are_actually_executed(
         self, evals_tree, fixtures_root

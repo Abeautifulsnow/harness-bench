@@ -280,6 +280,13 @@ expected.final → 作用于最终轮 actual_output
 turn 级 expect → 仅由 Native Evaluator 消费，不传递给 DeepEval
 ```
 
+> **实现修正（2026-09-28，见 §22.1）**：上面的映射是**语义**层面的。实现层面有两处
+> 与 SDK 不符：多轮类名实际是 `ConversationalTestCase`（非 `ConversationTestCase`），
+> 且 `tools_called` / `expected_tools` 要求 `list[ToolCall]` 而非 dict。现在
+> **一律只构造 `LLMTestCase`**——PRD §35 的六个 `agent.*` metric 只接受这一种
+> test case；多轮用 `context` 承接前序轮次（`user: ...` / `assistant: ...`）。
+> case 类型由 `case_type` 字段承载，不借 test case 的类型字段。
+
 ---
 
 # 3. Stability 与 Flaky 判定算法
@@ -390,6 +397,12 @@ resolve_baseline(benchmark_id, dataset_version):
   4. 命中   → baseline resolved
      未命中 → NO_BASELINE
 ```
+
+> **实现修正（2026-09-28，见 §22.4）**：第 1 条的"main 分支上"一度未实现——只看
+> benchmark_id / dataset_version / Gate PASS / started_at，不看分支。后果是 PR Gate
+> 拿"PR 自己分支上恰好 PASS 的 run"当基线，回归判定失去意义。现按 §4.2 过滤
+> （`main` / `master` 及 `origin/*`、`refs/heads/main` 写法）；`git_branch` 未知
+> 按**不匹配**处理，宁可退化成 NO_BASELINE，也不拿来源不明的 run 当基准。
 
 ## 4.3 NO_BASELINE 降级语义
 
@@ -544,6 +557,11 @@ partial run 归类：run 状态为 `partial` 且由基础设施原因导致 → 
 
 生效时间：**exit code 约定 P0 即生效**（CLI 实现成本为零）；报告产物 P1。
 
+> **实现修正（2026-09-28，见 §22.5）**：§15 的"必跑套件未覆盖"规则判 fail 后曾走
+> 通用分支归到 exit 1，而本节已把它列在 exit 2 之下。§6.4 的归因约定让这个归类差
+> 距有实际后果：一次"根本没跑 golden/regression"的 run，在 CI 里表现为"这个 PR 引入
+> 了回归"（exit 1 不重试并归因于变更）。现单独把 `suites.coverage` 的 fail 归到 2。
+
 ## 6.2 报告产物
 
 ```text
@@ -585,6 +603,12 @@ testcase 数 = 实际执行 Case 数
 ```
 
 约束：junit 中 `failure + error` 计数必须可从 gate.json 反向核对，两文件由同一 Result Aggregator 在同一次写入中生成，禁止分别推导。
+
+> **实现修正（2026-09-28，见 §22.6）**：`skipped` 分支曾挂在 `valid_iterations == 0`
+> 上，而该条件必然伴随 `error_semantics`（被前一个分支截走），于是 skipped **恒为 0**。
+> 后果是"一条 metric 都没真正参与判定"的 case 以 `passed` 形态出现在 CI 报告里——
+> 正是 §19.1.1 要杜绝的"把没判成当成判过了"。现由 `CaseAggregate.is_unjudged`
+> （`evaluated_metrics == 0`）承载该分支。
 
 ## 6.4 GitLab 集成指引
 
@@ -700,6 +724,13 @@ Run 启动时解析 Profile：
 ```
 
 禁止行为：静默跳过不可用 metric 继续跑（会产生不可比对的 Run）。
+
+> **实现修正（2026-09-28，见 §22.7）**：本条的"静默"曾是**实际状态**。`provider_for()`
+> 把所有非 `agent.*` / `harness.*` 的 id 归为 `native`，而 native 的可用性判定恒为
+> `True`——profile 里写 PRD §42 的 `custom.*` 或拼错 `native.output_check`，会被判
+> "可用"，随后既不入 judge 也不入 harness：什么都不跑，也不报错，`exit 3` 永远不发。
+> 现 native 的可用性以注册表为准，`custom` 单列一个 provider 名，两者均给出指名道姓
+> 的 `MetricUnavailableError`。
 
 ## 7.5 核心转换层与 P0 Spike
 
@@ -954,6 +985,10 @@ metric_id  = native.argument_checks
 score      = 通过的检查数 / 检查总数（连续）
 ```
 
+> **实现修正（2026-09-28，见 §22.2）**：上述"对每个 occurrence 判定"最初只判了
+> 第一次匹配的调用；`contains` / `regex` 对非字符串值也未做 JSON 序列化；score
+> 只出 0/1。三处均已改正，reason 里的实际值按 §12.3 脱敏。
+
 要点：
 
 - 判据是**实际发送的 arguments**，不是模型对参数的自然语言描述。
@@ -1002,6 +1037,12 @@ expected:
 
 提权标记逐字匹配且**大小写不敏感**：真实 SQL 与命令里写的是 `GRANT ALL` / `SUDO`，
 只匹配小写字形会漏掉它们（与 `forbidden_sql` 的 IGNORECASE 口径一致）。
+
+> **实现修正（2026-09-28，见 §22.3）**：`forbidden_paths` 一度用子串包含实现，
+> 让 `/var/etc/passwd` 命中 `/etc/passwd`。现为带边界的**路径前缀匹配**——命中点
+> 两侧都不得是路径续接字符（`_` / `-` / `.` / 字母数字），因此 `/etc/passwd.d/x`
+> 不命中 `/etc/passwd`。安全断言里的假阳性会卡住本不该卡的 PR，而假阳性会让人
+> 逐渐不信任这条 Hard Gate。
 
 ### 12.1.1 观测来源的透传义务（V2.3 回填）
 
@@ -1910,5 +1951,164 @@ CaseRunResult.artifacts: list[ArtifactRecord]   ← 索引就挂在这里
 **不造空文件占位**（PRD §90 原文）：能力表里 ❌ 的类型不产生任何文件。判据是
 "这个观测面能不能采"，不是"这个字段准不准空"——`files.changes.txt` 的
 "（无变更）"是采集到的结论，不是占位。
+
+---
+
+# 22. Errata V2.3 → V2.3.1（2026-09-28 审计修复回填）
+
+本轮不动任何契约的**含义**，只修实现与契约不一致的地方。所有条目有一个共同
+特征：**既有的 405 条测试全部绿灯，而缺陷在真实运行中成立**。原因集中在两处
+（§22.11）：被测路径被整条关掉，或用假替身把 SDK 的形状约束抹平。
+
+## 22.1 Judge 链路：类名与类型两条硬伤（§2.5 / §7.3 / PRD §91）
+
+契约要求"multi-turn Case → DeepEval Conversation Test Case"（§2.5），实现里
+有两处与 SDK 不符，且**只在真实 SDK 下才暴露**：
+
+| 位置 | 实现写的 | SDK 实际要求 | 后果 |
+| --- | --- | --- | --- |
+| 多轮 | `test_case.ConversationTestCase` | `ConversationalTestCase` | `AttributeError`，多轮 case 的 judge metric 全部 ERROR |
+| 单轮/多轮 | `tools_called=[dict, ...]` | `list[ToolCall]` | `'tools_called' must be None or a list of 'ToolCall'` |
+
+修复后的口径（`evaluators/deepeval_adapter.py`）：
+
+```text
+1. 一律只构造 LLMTestCase —— PRD §35 的六个 agent.* metric 只接受这一种 test case；
+   多轮用 context 承接前序轮次（user: ... / assistant: ...），不用 ConversationalTestCase
+2. tools_called / expected_tools 一律构造 ToolCall 对象；工具入参取 span 的
+   attributes["arguments"]（由 trace/builder.py 落盘），不取 span.input
+   —— 后者会 fallback 到整个 event.data，把工具名一并塞进 arguments
+3. case 类型（single / multi）由 case_type 字段承载，不借 LLMTestCase 的类型字段
+4. convert() 接收评审过的 cost（此前收到的是 tokens 计数）与 turn_outputs，
+   由后者定"最终轮 output"（§2.5：expected.final 作用于最终轮 actual_output）
+```
+
+`probe()` 从"检查类名是否存在"升级为**真实构造一次**（§7.3 P0 Spike 第 2 条）：
+用最小参数真构造 `LLMTestCase` + `ToolCall`，构造失败即判该能力不可用。
+只查属性存在与否，正是上面两条硬伤能通过能力探测的原因。
+
+PRD §91 的 `judge_model` 此前只被解析进配置，**从未传给 SDK**：`--judge-model`
+对判定结果零影响。现在 `evaluate()` 支持 `model=`，`Runner` 按需透传
+（缺省不传，避免给第三方实现的签名强加参数）。
+
+## 22.2 `tool_arguments` 只判了第一次调用（§11.2）
+
+§11.2 的算法写的是"对**每个 occurrence** 取值判定"，实现只取了第一次匹配的
+调用——同一工具被调用三次，只有第一次的参数被检查，后两次写错也无所谓。
+
+修正为全出现次数判定，并在 reason 里标出 `call #N`（否则"期望/实际"无法定位到
+哪一次调用）。同时补上 §11.2 明写的两条实现细节：
+
+- `contains` / `regex` 对非字符串值先做 JSON 序列化再匹配（`{"id": 1}` 的
+  `contains: "id"` 此前恒 fail）
+- score 是连续分 = 通过的检查数 / 检查总数（此前只出 0/1，与 §11.2 的"连续"不符，
+  断言分辨率丢失）
+
+另按 §12.3 口径给 reason 里回显的实际值**脱敏**（疑似密钥只留前 4 字符）：
+`tool_arguments` 恰恰常在断言里比对凭据类参数，而 reason 会进 PR 评论与工单——
+把凭据原文写进 reason 等于把泄漏面再扩大一次。
+
+## 22.3 `forbidden_paths` 用子串包含（§12.1）
+
+§12.1 判的是**行为**、路径要按路径匹配；实现用的是 Python 的 `in`。于是
+`/var/etc/passwd` 命中 `/etc/passwd`、`.envrc` 命中 `.env` —— 在安全断言里制造
+假阳性会卡住本不该卡的 PR，而假阳性会让人逐渐不信任这条 Hard Gate。
+
+改为带边界的**前缀匹配**：命中点前侧不得是路径续接字符（必须落在组件起点或串首），
+后侧也不得是（必须真的位于其下，而不是更长字面量的一部分）。`.` 属续接字符，
+因此 `/etc/passwd.d/extra` 不命中 `/etc/passwd`。
+
+## 22.4 main-latest 不限定分支（§4.2）
+
+§4.2 第 1 条是"候选集 = **main 分支上的** runs"。实现只按
+`benchmark_id + dataset_version + Gate PASS + started_at 最新` 过滤，**不看分支**。
+后果：feature 分支上恰好 PASS 的 run 会成为 PR Gate 的基线，把"PR 与主干比"变成
+"PR 与自己的分支比"，回归判定失去意义——正是 §4.1 警告的宽松变体。
+
+修正为候选集先按 `_is_main_branch()` 过滤（`main` / `master` 及
+`origin/main` / `origin/master` / `refs/heads/main` 写法）。`git_branch` 未知
+（`None` / 空）按不匹配处理：宁可退化成 `NO_BASELINE`（§4.3），也不拿来源不明的
+run 当基准。
+
+## 22.5 必跑套件未覆盖归 exit 1（§6.1）
+
+§6.1 把"基础设施错误导致 mandatory suite **未完整执行**"明确列在 exit 2 之下；
+§6.4 又约定 exit 2 可自动重试、不归因于 PR，exit 1 不重试并归因于变更。
+未覆盖被判 fail 后走的是通用分支，拿到 exit 1 —— 于是一次"根本没跑
+golden/regression"的 run 在 CI 里表现为"这个 PR 引入了回归"。
+§15 的规则判定是对的，**归类错了**。
+
+`exit_code_for()` 现在把 `suites.coverage` 的 fail 单独归到 2。
+
+## 22.6 junit 的 `skipped` 分支不可达（§6.3）
+
+§6.3 要求 `skipped = skipped / UNDETERMINED`，§19.1.1 又把 `skipped` 定为独立
+结局。实现里该分支的条件是 `valid_iterations == 0`，而这个条件必然已伴随
+`error_semantics`（被前一个 `return "error"` 截走）——**skipped 恒为 0**。
+
+于是"一条 metric 都没真正参与判定"的 case 会以 `passed` 的形态出现在 CI 报告里，
+这正是 §19.1.1 要杜绝的"把没判成当成判过了"。修法：`CaseAggregate` 增加
+`evaluated_metrics`（verdict ≠ skipped 的 metric 数）与只读属性 `is_unjudged`，
+junit 状态判定改为 `is_unjudged or valid_iterations == 0`。
+
+## 22.7 `custom.*` 与拼错的 `native.*` 静默丢弃（§7.4 / PRD §42）
+
+§7.4 禁止"静默跳过不可用 metric 继续跑"。但 `provider_for()` 把所有非
+`agent.*` / `harness.*` 的 id 都归为 `native`，`available_providers_for()` 又对
+`native` 恒返回 `True` —— 于是 profile 里写 `custom.database_answer_quality`
+（PRD §42 的合法命名空间）或拼错 `native.output_check`，都会被判"可用"，随后既
+不入 judge 也不入 harness：**什么都不跑，也不报错**。
+
+修正：`provider_for()` 单列 `custom` 分支；`native` 的可用性改为"注册表里真的有
+这条 metric"。`resolve_metric()` 对两种情况给出指名道姓的 `MetricUnavailableError`
+（`custom.*` 的措辞直言"PRD §42 尚未实现"，避免与"写错了"混淆），由 §7.4 统一
+升为 exit 3。
+
+## 22.8 `hard_failure_categories` 被解析但从不求值（PRD §47/§48）
+
+`GateRules.hard_failure_categories` 被 YAML 解析、被 REST 回显，**求值器从不
+读取**——写在 Gate 配置里完全没有效果，属"配置看着生效、实际空转"。
+
+新增规则 `hard_failure_categories`，判定走 `failures/taxonomy` 的 `classify()` /
+`parent_of()`，即与 failures 表同一套词汇表，不另立口径。声明值可以是二级分类
+（`tool.argument`）、一级分类（`SECURITY`）或 metric id（`native.output_checks`），
+三者对同一个 failure 是同一集合里的候选。
+
+## 22.9 `agent_version` 没有赋值链（PRD §91）
+
+`RunMetadata.agent_version` 有字段、`_build_meta` 也读 `cfg.agent_version`，但
+`RunConfig` 没有该字段、CLI 也没有该选项——**没有任何路径能给它赋值**，永远为
+`None`。PRD §91 要求 Judge Model 变化视为 Eval 环境变化；agent 侧版本同理，是
+可比性的一部分。修正：`RunConfig` 增字段、`benchmark run` 增 `--agent-version`。
+
+## 22.10 套件 case 数走声明而不是选择结果
+
+`SuiteRow.cases` 此前取 `len(suite.case_ids)`，而套件定义以 tag 为主——
+tag-only 套件的 `case_ids` 恒为空，于是 Web 上**每个套件的 case 数都是 0**。
+修正：`catalog.list_suite_rows` 载入全部 case，用与执行链同源的
+`select_suite_cases()` 计算。该函数已从 `loading/loader.py` 抽出并成为"套件选了
+哪些 case"的唯一实现，避免选择口径有两份。
+
+## 22.11 为什么这些缺陷能长期全绿
+
+共同原因是**测试把被测路径关掉了**，分三类：
+
+1. `tests/conftest.py` 的 autouse fixture `deepeval_absent` 把 `probe` 猴补成
+   `{}`，`agent.*` 在整个测试套件里都不参与判定——§22.1 两条硬伤所在的代码路径
+   **从未在测试中执行过**。
+2. 唯一覆盖 judge 的用例用假 `deepeval` 模块，其 `LLMTestCase = lambda **kw: {...}`
+   接受任意签名——类型约束被替身抹平，错形状也"构造成功"。
+3. 其余（§22.2–§22.6）都是"配置字段被解析但无消费点"或"分支条件不可达"，
+   而测试按**实现的行为**而不是**契约的要求**写断言。
+
+对应补的护栏：
+
+| 护栏 | 位置 | 作用 |
+| --- | --- | --- |
+| `test_build_test_case_against_real_sdk` | `tests/test_registry.py` | `importorskip("deepeval")`、无 mock，真构造 `LLMTestCase` + `ToolCall` |
+| `test_probe_rejects_incompatible_sdk_shape` | `tests/test_registry.py` | 假模块缺 `ToolCall` 时 probe 必须为 False |
+| `test_custom_namespace_fails_fast_instead_of_silent_drop` | `tests/test_registry.py` | `custom.*` / 拼错 native 必须抛，不许静默 |
+| `tests/test_gate_fidelity.py` | 19 条 | 前缀匹配 / 全出现次数 / 连续 score / skipped 可达 / hard categories 有消费点 |
+| `tests/test_baseline_policy.py` | 5 条 | main-latest 的分支过滤（含"feature 分支不得成为候选"的反例） |
 
 ---

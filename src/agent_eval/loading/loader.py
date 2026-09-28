@@ -116,6 +116,25 @@ def load_profile(root: Path, name: str) -> MetricProfile:
         raise InvalidCallError(f"invalid profile '{name}': {exc}") from exc
 
 
+def select_suite_cases(suite: SuiteDef, cases: list[Case]) -> dict[str, Case]:
+    """一个 Suite 的选择结果：先按 tags 收，再补齐显式 case_ids（PRD §19/§21）。
+
+    这是"套件到底选了哪些 case"的**唯一**实现：``resolve_suites`` 与只读接口
+    （``GET /api/suites`` 的计数列）都走它，否则两处会各算一遍并且不一致。
+    """
+    by_id = {c.id: c for c in cases}
+    picked: dict[str, Case] = {}
+    for tag in suite.tags:
+        for case in cases:
+            if tag in case.tags:
+                picked[case.id] = case
+    for case_id in suite.case_ids:
+        if case_id not in by_id:
+            raise InvalidCallError(f"suite '{suite.name}' references unknown case '{case_id}'")
+        picked[case_id] = by_id[case_id]
+    return picked
+
+
 def resolve_suites(
     benchmark: BenchmarkDef,
     suites: dict[str, SuiteDef],
@@ -141,20 +160,10 @@ def resolve_suites(
                 f"'{benchmark.name}' (defined suites: {defined})"
             )
 
-    by_id = {c.id: c for c in cases}
     selected: dict[str, Case] = {}
     counts: dict[str, int] = {}
     for suite_name in names:
-        suite = suites[suite_name]
-        picked: dict[str, Case] = {}
-        for tag in suite.tags:
-            for case in cases:
-                if tag in case.tags:
-                    picked[case.id] = case
-        for case_id in suite.case_ids:
-            if case_id not in by_id:
-                raise InvalidCallError(f"suite '{suite_name}' references unknown case '{case_id}'")
-            picked[case_id] = by_id[case_id]
+        picked = select_suite_cases(suites[suite_name], cases)
         if tag_filter:
             picked = {cid: c for cid, c in picked.items() if any(t in c.tags for t in tag_filter)}
         counts[suite_name] = len(picked)

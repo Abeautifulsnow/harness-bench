@@ -118,6 +118,10 @@ class RunConfig:
     variant_id: str | None = None
     agent_model: str | None = None
     judge_model: str | None = None
+    # PRD §30/§109.3：agent version 是可复现信息的一项。Agent 接入协议（PRD §7.1）
+    # 的 /health 只约定 ``status``，平台无法自行探测，因此由调用方显式声明；
+    # 未声明时保持 None（记录"未知"比编一个值诚实）。
+    agent_version: str | None = None
 
     @property
     def state_root(self) -> Path:
@@ -156,6 +160,9 @@ class _CaseContext:
     judge_sem: asyncio.Semaphore
     capabilities: dict[str, bool]
     degradations: dict[str, str]
+    # PRD §91：Judge Model 与 Agent Model 分离。仅落账是不够的——必须真的传进
+    # SDK，否则 ``--judge-model`` 只是一个标签，judge 仍走 SDK 默认模型。
+    judge_model: str | None = None
 
 
 @dataclass
@@ -457,6 +464,7 @@ class Runner:
             ),
             capabilities=capabilities,
             degradations=degradations,
+            judge_model=self.cfg.judge_model,
         )
 
     # -------------------------------------------------------------- iteration
@@ -961,12 +969,21 @@ class Runner:
             tree,
             final_output=scope.final_output,
             latency_ms=scope.latency_ms,
-            tokens=scope.tokens,
+            cost=scope.cost,
+            # 多轮 case：前序轮次的 assistant 输出是 judge 判"是否偏离意图"的背景
+            turn_outputs=[turn.output for turn in result.turn_results],
         )
         for spec in resolved.judge_specs:
             try:
                 async with ctx.judge_sem:
-                    score, reason = await ctx.judge.evaluate(spec.id, spec.threshold, trace)
+                    # judge_model 未声明时不传该参数：SDK 走自身默认模型，
+                    # 与"显式指定模型"是两种不同的运行事实，不该混为一谈。
+                    score, reason = await ctx.judge.evaluate(
+                        spec.id,
+                        spec.threshold,
+                        trace,
+                        **({"model": ctx.judge_model} if ctx.judge_model else {}),
+                    )
             except Exception as exc:  # Judge 失败 ≠ Agent 失败（PRD §46）
                 return f"judge metric '{spec.id}' failed: {exc}"
             result.metric_results.append(
@@ -1008,6 +1025,7 @@ class Runner:
             git_branch=branch,
             git_dirty=dirty,
             agent_model=self.cfg.agent_model,
+            agent_version=self.cfg.agent_version,
             judge_model=self.cfg.judge_model,
             deepeval_version=DeepEvalCapabilityAdapter().version(),
             eval_platform_version=__version__,

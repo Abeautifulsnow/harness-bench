@@ -138,7 +138,17 @@ def build_junit(aggregate: RunAggregate, gate: GateReport) -> str:
             )
             node.text = _failure_text(case)
         elif kind == "skipped":
-            ET.SubElement(testcase, "skipped", {"message": "all iterations were ERROR"})
+            ET.SubElement(
+                testcase,
+                "skipped",
+                {
+                    "message": (
+                        "no metric produced a verdict (all skipped: observation unavailable)"
+                        if case.is_unjudged
+                        else "no valid iteration"
+                    )
+                },
+            )
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(suite, encoding="unicode")
 
 
