@@ -279,3 +279,74 @@ case 产物的"原文"端点最初写成 `.../artifacts/{name}/raw`。当产物�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: case-artifacts 评审修复：记账显式化、无界读与漏判消除
+
+**Date**: 2026-09-28
+**Task**: case-artifacts 评审修复：记账显式化、无界读与漏判消除
+**Branch**: `main`
+
+### Summary
+
+(Add summary)
+
+### Main Changes
+
+## 审查与修复：case-artifacts（review-workflow 全流程）
+
+对 2714f76（PRD §90 case 级产物）执行 review-workflow：基线 c1c5707..5a20cb7、
+22 文件、lint/secret 扫描、双层审查、全量回归。结论：无阻塞项，5 项缺陷 +
+1 项文档漂移，全部确认后由用户授权修复（f9d4748）。
+
+### 修复的问题（均有实测复现或直接代码证据）
+
+1. **#I01 漏判**：`_digest` 只摘前 1MiB，2MiB 文件在 offset 1.5MB 就地改 100 字节
+   被静默判"无变更"（实测复现）。改为全文件流式 sha256（`hashlib.file_digest`），
+   摘要不设上限——漏判比误报危险。
+2. **#I02 记账缺口**：sqlite 库被删 / dump 失败时 `snapshot()` 返回 `[]`，与
+   "无产物"不可区分，而能力表标 database ✅（实测复现）。新增
+   `SnapshotUnavailable` 信号，runner 按前缀区分 `snapshot unavailable:`
+   （指向 agent 对环境做了什么）与 `fixture snapshot failed:`（指向 provider）；
+   base 契约从"不抛异常"窄化为"不得让 run 失败"。
+3. **#C01 无界读**：预览端点先 `read_bytes()` 整文件再按 512KiB 截断——trace
+   产物不受 fixture 上限约束，整读等于上限名存实亡。改为只读 cap+1 字节，
+   `bytes` 用 `stat` 报真实大小，读失败回 404；用 monkeypatch 锁住"不整读"。
+4. **#C03 漏账**：内容省略记账原来挂在"最后一条内容产物"的 note 上，前 MAX 个
+   全部读失败时完全消失。改挂到必然存在的 `files.changes.txt` 上。
+5. **#C02 URL 双份构造**：前端预览用 name 自拼 URL，与 api-types 里"别自己拼"
+   的注释矛盾。改为直接用服务端 `CaseArtifactRow.url`（`api.get` 以 /api 为根，
+   服务端 URL origin-rooted，折算一次前缀）。
+6. **#I03 文档漂移**：Spec §21.1 声称"报告与 Web 直接引用"能力表，实际只有 Web
+   （真实 report.json 中 artifact 出现 0 次）。措辞收窄为 Web，缺口记入
+   ROADMAP「发现的 4」——是否给 report 加产物指针留给独立增量决策。
+
+### 验证
+
+- `uv run pytest -q` → 375 passed（+6 回归锁）
+- `ruff check` / `format --check` → 全绿（121 文件）
+- web `typecheck` + `build` → 绿
+- 提交 f9d4748；Mimosa 提示未获完整扫描结论，不宣称项目安全
+
+### 未做（记录在案）
+
+- `CaseArtifactsPanel` 145 行（⚠️ 建议拆 4 个子组件）——非阻塞，留给前端增量。
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f9d4748` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
