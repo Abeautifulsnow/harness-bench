@@ -84,10 +84,13 @@ export const api = {
   /** PRD §90 case 级产物：索引 + 采集记账 + 能力表（三者含义不同，别合并展示）。 */
   caseArtifacts: (runId: string, caseId: string) =>
     get<T.CaseArtifacts>(`/runs/${runId}/cases/${encodeURIComponent(caseId)}/artifacts`),
-  caseArtifact: (runId: string, caseId: string, name: string, iteration: number) =>
+  /** 预览直接用服务端拼好的 ``CaseArtifactRow.url``（origin-rooted，含 /api 前缀）：
+   *  产物名可能带 ``/``，逐段转义规则只有服务端一份，前端用 name 自拼迟早漂移
+   *  （``raw_url`` 同理，见 api-types 的注释）。 */
+  caseArtifact: (serverUrl: string) =>
     get<T.CaseArtifactContent>(
-      `/runs/${runId}/cases/${encodeURIComponent(caseId)}/artifacts/${name}`,
-      { iteration },
+      // 本客户端的 get 以 /api 为根，服务端给的是 origin 根路径：折算一下即可。
+      serverUrl.startsWith(BASE + "/") ? serverUrl.slice(BASE.length) : serverUrl,
     ),
   runStatus: (id: string) =>
     get<{ run_id: string; status: string; verdict: string | null; finished_at: string | null }>(

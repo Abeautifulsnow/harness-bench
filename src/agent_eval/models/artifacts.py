@@ -55,6 +55,16 @@ UNAVAILABLE_KINDS: dict[str, str] = {
 }
 
 
+class SnapshotUnavailable(Exception):
+    """provider 明确知道"这次该采的采不到"时的信号（Spec §21.2）。
+
+    它**不是错误**：runner 兜底把它记进 ``CaseRunResult.artifact_notes``，
+    执行结论不变。它与返回 ``[]`` 的区别在语义：``[]`` 是"本次没有可采集的
+    东西"，本异常是"该采的这次拿不到，原因如下"——把后者静默表现成前者，
+    正是"少了一件"看起来像"本来就没有"的那种漂移。
+    """
+
+
 @dataclass
 class SnapshotArtifact:
     """provider 快照产出的待落盘内容（fixtures → runner 的**唯一**交接形状）。

@@ -443,7 +443,8 @@ function CaseArtifactsPanel({ runId, caseId }: { runId: string; caseId: string }
   const [showUnavailable, setShowUnavailable] = React.useState(false);
   const content = useQuery({
     queryKey: ["case-artifact", runId, caseId, preview?.name, preview?.iteration],
-    queryFn: () => api.caseArtifact(runId, caseId, preview!.name, preview!.iteration),
+    // 预览地址用服务端拼好的 url：产物名可能带 /，转义规则只有服务端一份。
+    queryFn: () => api.caseArtifact(preview!.url),
     enabled: Boolean(preview),
     retry: false,
   });

@@ -54,6 +54,7 @@ from agent_eval.loading.loader import (
     load_suites,
     resolve_suites,
 )
+from agent_eval.models.artifacts import SnapshotUnavailable
 from agent_eval.models.benchmark import BenchmarkDef, DatasetInfo
 from agent_eval.models.case import Case
 from agent_eval.models.events import TraceEvent
@@ -696,12 +697,14 @@ class Runner:
         三条约束都体现在这一段里：
 
         1. **在 cleanup 之前调用**（调用点就在 finally 的第一行）；
-        2. **不抛异常**：快照失败是"这次少一件产物"，不是"这次执行失败"。
+        2. **不让 run 失败**：快照失败是"这次少一件产物"，不是"这次执行失败"。
            provider 的 snapshot 是对外扩展点（可能是第三方代码），把它写成
            "可能让一次跑完的执行变 ERROR"会让整个 run 的结论被一件附属品污染；
-        3. **如实记账**：provider 抛异常 / 返回畸形值 / 名字非法 / 写盘失败，
-           四种情况都进 ``artifact_notes``。静默跳过会让"少了一件"看起来像
-           "本来就没有"——而这两件事的排查方向完全相反。
+        3. **如实记账**：provider 抛异常 / 声明采不到（SnapshotUnavailable）/
+           返回畸形值 / 名字非法 / 写盘失败，五种情况都进 ``artifact_notes``。
+           静默跳过会让"少了一件"看起来像"本来就没有"——而这两件事的排查
+           方向完全相反。两种异常的前缀也不同：``snapshot unavailable:`` 指向
+           "agent 对环境做了什么"，``fixture snapshot failed:`` 指向 provider。
         """
         if not self.cfg.save_artifacts:
             return
@@ -715,6 +718,10 @@ class Runner:
                 result.artifact_notes.append(
                     f"fixture snapshot returned {type(raw).__name__}, expected list"
                 )
+        except SnapshotUnavailable as exc:
+            # "该采的这次拿不到"（库被删 / dump 失败）：与 provider 自己坏掉是
+            # 两回事，前缀区分开——前者要查 agent 对环境做了什么，后者查 provider。
+            result.artifact_notes.append(f"snapshot unavailable: {exc}")
         except Exception as exc:  # noqa: BLE001 — 见第 2 条
             result.artifact_notes.append(f"fixture snapshot failed: {exc!r}")
 

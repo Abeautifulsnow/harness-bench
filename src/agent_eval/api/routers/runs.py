@@ -475,7 +475,7 @@ def case_artifact_raw(
 @router.get(
     "/runs/{run_id}/cases/{case_id}/artifacts/{name:path}",
     response_model=CaseArtifactContent,
-    summary="PRD §90 case 级产物内容（文本预览；二进制走 /raw）",
+    summary="PRD §90 case 级产物内容（文本预览；二进制走 artifact-raw）",
 )
 def case_artifact_content(
     run_id: str,
@@ -494,12 +494,23 @@ def case_artifact_content(
                 "（请用 artifact-raw 端点下载原文件）"
             ),
         )
-    raw = path.read_bytes()
+    try:
+        # 只读上限 +1 字节：预览是"按需读"。trace 这类产物不受 fixture 的内容
+        # 上限约束，整文件 read_bytes() 会把它全部拉进内存；bytes 报真实大小，
+        # 让"截断了多少"可算。
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            raw = fh.read(MAX_PREVIEW_BYTES + 1)
+    except OSError:
+        # 索引判定与真实读取之间文件可能消失：仍按"取不到"回 404，不是 500。
+        raise HTTPException(
+            status_code=404, detail=f"artifact file missing on disk: {name}"
+        ) from None
     truncated = len(raw) > MAX_PREVIEW_BYTES
     return CaseArtifactContent(
         name=name,
         content_type=content_type,
-        bytes=len(raw),
+        bytes=size,
         truncated=truncated,
         text=raw[:MAX_PREVIEW_BYTES].decode("utf-8", errors="replace"),
     )

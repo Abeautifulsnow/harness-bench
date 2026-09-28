@@ -7,7 +7,7 @@
 ## 检查命令（合并前必须全绿）
 
 ```bash
-uv run pytest        # 369 tests（含 e2e：FakeAgent 全链路 + 真实 TCP mock server + REST API）
+uv run pytest        # 375 tests（含 e2e：FakeAgent 全链路 + 真实 TCP mock server + REST API）
 uv run ruff check .  # 规则：E/F/I/UP/B/SIM；CLI 文件豁免 B008（Typer 惯用法）
 uv run ruff format --check .
 cd web && bun run typecheck && bun run build   # 前端改动时
@@ -170,7 +170,7 @@ judge 行为的用例标 `@pytest.mark.real_judge` 退出该夹具。装了 deep
 ## Case 级产物约束（PRD §90，Spec §21）
 
 产物是"现场留存"，与判定无关：采不到不该让跑完的执行变 ERROR，采到了也不参与
-Gate。守住四条：
+Gate。守住五条：
 
 1. **采集时机固定在 cleanup 之前的 `finally` 里**。cleanup 删掉 workspace 与库文件
    （`SQLiteFixture` 连 `-wal`/`-shm` 一起删），之后就没有现场；放 `finally` 而不是
@@ -179,14 +179,22 @@ Gate。守住四条：
    `CaseRunResult.artifacts` 就是索引——不要建 `case_run_id → 产物` 的映射表
    （多一份映射多一个漂移点，漂移的表现是"文件在磁盘上、索引里查不到"）。
    `ArtifactRecord` 里不放 `case_id`/`iteration`：那是宿主给的。
-3. **采集失败一律记账，不改判定**。provider `snapshot()` 抛异常 / 返回畸形值 /
-   元素类型不对 / name 非法 / 写盘失败，五种情况都进 `CaseRunResult.artifact_notes`。
-   静默跳过会让"少了一件产物"看起来像"本来就没有"——两者的排查方向相反。
+3. **采集失败一律记账，不改判定，且要说出原因**。provider `snapshot()` 声明
+   采不到（抛 `SnapshotUnavailable`，如库被 agent 删掉 / dump 失败）/ 抛其他异常 /
+   返回畸形值 / 元素类型不对 / name 非法 / 写盘失败，都进
+   `CaseRunResult.artifact_notes`。静默返回 `[]` 会把"该采的拿不到"伪装成
+   "本来就没有"；两种异常的前缀也不同（`snapshot unavailable:` 指向 agent 对
+   环境做了什么，`fixture snapshot failed:` 指向 provider），排查方向相反。
 4. **采不到的观测面不造空文件占位**（PRD §90 原文），在能力表
    （`models/artifacts.py` 的 `UNAVAILABLE_KINDS`）里如实写明原因与替代手段，
    并让 API/Web 把它渲染出来。`files.changes.txt` 的"无变更"是采集到的结论，
    不属于占位。上限（文件个数 / 单文件字节 / 清单行数 / dump 字节）必须配
-   `truncated=True` + `note`，不许静默截断。
+   `truncated=True` + `note`，不许静默截断；省略个数挂在 `files.changes.txt`
+   的 `note` 上（它必然存在），不挂在"最后一条内容产物"上。
+5. **比对与预览都不做无界读**。变更清单的签名用**全文件**流式摘要
+   （只摘头部会把头之后的就地改写漏判成"无变更"——漏判比误报危险）；
+   预览端点只读上限 +1 字节，`bytes` 用 `stat` 报真实大小，先整文件
+   `read_bytes()` 再截断等于上限名存实亡。
 
 路径解析只有一条规则：**请求里的 `name` 必须与索引中某条记录全等**，再用该记录的
 `path` 去解析文件，解析后再判"在 run 目录内"。`ArtifactRecord.path` 出自磁盘上的

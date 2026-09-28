@@ -1780,12 +1780,14 @@ PRD §90 只说了"需要"，这里把口径定死，否则"产物"这个词会�
 
 采不到的观测面**如实列出**，不造空文件占位——一个 0 字节的 `screenshot.png`
 会让"已采集"的统计说谎。能力表以代码为事实源
-（`models/artifacts.py` 的 `UNAVAILABLE_KINDS`），报告与 Web 直接引用它，
-避免"文档说支持、代码里没有"的漂移。
+（`models/artifacts.py` 的 `UNAVAILABLE_KINDS`），Web 直接引用它。
+报告（report.json / report.html）目前**不携带** case 级产物索引与能力表——
+这是已记账的缺口（见 ROADMAP「执行中的发现」），不是已实现的承诺；
+在这句话改回"报告与 Web"之前，别把报告当成产物可见性的消费方。
 
 | 观测面 | 当前 | 采集手段 / 采不到的原因 |
 | --- | --- | --- |
-| `files` | ✅ | `FilesystemFixture`：prepare 记清单（大小 + sha256[:16]），snapshot 重扫比对 |
+| `files` | ✅ | `FilesystemFixture`：prepare 记清单（大小 + **全文件** sha256[:16]，流式不设上限），snapshot 重扫比对 |
 | `database` | ✅ | `SQLiteFixture`：`iterdump()` 导出 SQL 文本（不是 .db 二进制副本） |
 | `trace` | ✅ | 登记 trace 子系统已写的 Raw Trace 路径，不重写格式 |
 | `screenshots` | ❌ | 平台无浏览器 / 桌面 fixture（PRD §88 的 remote 环境也未落地） |
@@ -1802,9 +1804,12 @@ PRD §90 只说了"需要"，这里把口径定死，否则"产物"这个词会�
    与"采不到的观测面被空文件冒充"是两件事（后者才是 §21.4 禁止的占位）。
 3. **上限一律 `truncated` + `note`，不静默截断**。上限值
    （20 个文件 / 单文件 256KiB / 清单 500 行 / dump 512KiB）防的是病态情况
-   （agent 写几千个文件）撑爆报告与磁盘；被省略的个数写在最后一条记录的
-   `note` 里。"它有多大"本身是现场的一部分，直接跳过会让一次 100MB 的写入
-   看起来像没发生过。
+   （agent 写几千个文件）撑爆报告与磁盘；被省略的个数写在 `files.changes.txt`
+   的 `note` 里（它必然存在——内容产物可能一件都没留存，那时的省略最需要
+   被看见）。"它有多大"本身是现场的一部分，直接跳过会让一次 100MB 的写入
+   看起来像没发生过。清单签名用的是**全文件**摘要（流式，不设上限）：
+   只摘头部省下的那点时间，换来"头之后的中段改写被静默判成无变更"——
+   漏判比误报危险，与 §20 同源。
 
 ## 21.2 采集时机：cleanup 之前，且在 finally 里
 
@@ -1816,12 +1821,16 @@ PRD §90 只说了"需要"，这里把口径定死，否则"产物"这个词会�
 - **必须放在 finally 而不是成功路径**：infra error 的现场同样要可复原。
   PRD §90 的"失败现场仍可获取"指的正是这一类（跑挂了才知道要看现场）。
 
-采集**不改变执行的判定**：`snapshot()` 抛异常 / 返回畸形值 / 名字非法 /
-写盘失败，四种情况全部记进 `CaseRunResult.artifact_notes`，结果是"这次少一件
-产物"，不是"这次执行失败"。理由与 Spec §17 第 8 条同源——provider 的
-`snapshot()` 是对外扩展点，可能来自第三方代码，不该有能力把一次跑完的执行
-改判成 ERROR。`artifact_notes` 是**如实记账**：静默跳过会让"少了一件"看起来像
-"本来就没有"，而这两件事的排查方向完全相反。
+采集**不改变执行的判定**：`snapshot()` 声明采不到（`SnapshotUnavailable`）/
+抛异常 / 返回畸形值 / 名字非法 / 写盘失败，五种情况全部记进
+`CaseRunResult.artifact_notes`，结果是"这次少一件产物"，不是"这次执行失败"。
+理由与 Spec §17 第 8 条同源——provider 的 `snapshot()` 是对外扩展点，可能来自
+第三方代码，不该有能力把一次跑完的执行改判成 ERROR。`artifact_notes` 是**如实
+记账**：静默跳过会让"少了一件"看起来像"本来就没有"，而这两件事的排查方向完全
+相反。所以"采不到"必须显式说出原因，不能静默返回 `[]`：两种异常的前缀也不同
+——`snapshot unavailable:`（provider 明确知道该采的拿不到，如库被 agent 删掉 /
+dump 失败）指向"agent 对环境做了什么"，`fixture snapshot failed:`（provider
+自己坏了）指向平台；混成一条会让第一类被误读成平台故障。
 
 `RunConfig.save_artifacts`（CLI `--no-save-artifacts`）关闭时直接返回：产物是
 可选的现场留存，不是判定依据。
@@ -1887,6 +1896,10 @@ CaseRunResult.artifacts: list[ArtifactRecord]   ← 索引就挂在这里
   会抛异常或替换成乱码，两种都算失真。**判"能否当文本"只看扩展名**，判不出
   的一律按二进制（`Makefile` 这类无后缀文件也只给下载）——宁可不预览，
   也不猜。
+- 预览是**按需读**：只读上限 +1 字节（512KiB），超限给前 512KiB 并标
+  `truncated`，`bytes` 始终报真实大小。先整文件 `read_bytes()` 再截断会让
+  上限名存实亡——trace 这类产物不受 fixture 的内容上限约束，整读等于把
+  它全量拉进内存。
 - `iteration` 是查名的一部分（默认 1）：命中 iter1 的记录不会在 iter9 上被
   "顺手找到"。同一个 `name` 在每个 iteration 各有一条索引。
 

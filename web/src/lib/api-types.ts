@@ -227,6 +227,7 @@ export interface CaseArtifactRow {
   truncated: boolean;
   note: string | null;
   content_type: string;
+  /** 服务端拼好的预览地址（origin-rooted，含 /api 前缀）：取内容直接用它，别用 name 自拼。 */
   url: string;
   /** 服务端拼好的原文地址：前端不要自己往 `url` 上接 `/raw`（会吃掉 query）。 */
   raw_url: string;

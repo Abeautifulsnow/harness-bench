@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 from agent_eval import adapters
 from agent_eval.adapters.fake import FakeAgentAdapter, ScriptTurn
 from agent_eval.api.app import create_app
+from agent_eval.api.services import MAX_PREVIEW_BYTES
 from agent_eval.fixtures import filesystem_fixture as fs_mod
 from agent_eval.fixtures import sqlite_fixture as sqlite_mod
 from agent_eval.fixtures.base import FixtureHandle, FixtureProvider, get_provider
@@ -34,6 +35,7 @@ from agent_eval.models.artifacts import (
     ArtifactKind,
     ArtifactRecord,
     SnapshotArtifact,
+    SnapshotUnavailable,
 )
 from agent_eval.models.case import EnvironmentSpec
 from agent_eval.runner import artifacts as artifacts_mod
@@ -315,7 +317,33 @@ class TestFilesystemFixtureSnapshot:
         artifacts = await provider.snapshot(handle)
         contents = [a for a in artifacts if a.name.startswith("files/")]
         assert len(contents) == 3
-        assert "另有 2 个变更文件未留存内容" in (contents[-1].note or "")
+        # 省略记账挂在 changes 产物上（它必然存在）：内容产物可能一件都没留存，
+        # 那时的省略最需要被看见——挂在"最后一条内容产物"上会随读失败一起消失。
+        changes = next(a for a in artifacts if a.name.endswith("files.changes.txt"))
+        assert "另有 2 个变更文件未留存内容" in (changes.note or "")
+        assert all("未留存" not in (content.note or "") for content in contents)
+
+    async def test_content_omission_is_reported_even_when_nothing_is_kept(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """前 MAX 个候选全部读失败时，省略同样要记账（Spec §21.1 第 3 条）。"""
+        monkeypatch.setattr(fs_mod, "MAX_FILE_ARTIFACTS", 3)
+        provider, handle = await self._prepared(tmp_path)
+        for index in range(5):
+            (handle.workdir / f"f{index}.txt").write_bytes(b"x")
+
+        real_open = Path.open
+
+        def _unreadable(path: Path, mode: str = "r", *args, **kwargs):
+            if mode == "rb" and path.name.startswith("f"):
+                raise OSError("simulated read failure")
+            return real_open(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", _unreadable)
+        artifacts = await provider.snapshot(handle)
+        assert [a for a in artifacts if a.name.startswith("files/")] == []
+        changes = next(a for a in artifacts if a.name.endswith("files.changes.txt"))
+        assert "另有 2 个变更文件未留存内容" in (changes.note or "")
 
     async def test_binary_change_is_kept_as_bytes(self, tmp_path: Path) -> None:
         provider, handle = await self._prepared(tmp_path)
@@ -323,6 +351,30 @@ class TestFilesystemFixtureSnapshot:
         artifacts = await provider.snapshot(handle)
         kept = next(a for a in artifacts if a.name == "files/blob.bin")
         assert kept.content == b"\xff\xfe\x00\x01"
+
+    async def test_in_place_edit_beyond_the_head_is_detected(self, tmp_path: Path) -> None:
+        """>1MiB 文件的中后段就地改写必须判 modified（回归锁：摘要不设上限）。
+
+        曾经的实现只摘前 1MiB：大小不变、头部不变的中段改写被静默判成
+        "无变更"——一个自信的假结论。漏判比误报危险（语义 diff 约束同源）。
+        """
+        provider, handle = await self._prepared(tmp_path)
+        big = handle.workdir / "big.log"
+        big.write_bytes(b"A" * (2 * 1024 * 1024))
+        # 让 big.log 进入"初态"：对同一 workdir 重新 prepare（copytree 只覆盖
+        # fixture 自带文件，agent/测试写的内容留在原地，清单被重新记一次）。
+        handle = await provider.prepare(
+            EnvironmentSpec(fixture="workspace", database="filesystem"), tmp_path / "iter1"
+        )
+        with big.open("r+b") as fh:
+            fh.seek(1_500_000)
+            fh.write(b"Z" * 100)
+
+        artifacts = await provider.snapshot(handle)
+        changes = next(a for a in artifacts if a.name.endswith("files.changes.txt"))
+        assert "modified\t2097152\tbig.log" in changes.content.decode()
+        kept = next(a for a in artifacts if a.name == "files/big.log")
+        assert kept.truncated is True  # 内容仍按上限留存，"它有多大"不丢
 
 
 class TestSqliteFixtureSnapshot:
@@ -343,11 +395,22 @@ class TestSqliteFixtureSnapshot:
         assert artifacts[0].kind is ArtifactKind.database
         assert artifacts[0].truncated is False
 
-    async def test_missing_database_returns_nothing(self, tmp_path: Path) -> None:
-        """库被 agent 删掉时不抛异常：少一件产物，不是整轮 ERROR。"""
+    async def test_missing_database_is_a_snapshot_unavailable(self, tmp_path: Path) -> None:
+        """库被 agent 删掉 = "该采的采不到"：显式信号 + 原因，不与"无产物"混同。
+
+        能力表里 database 标 ✅；静默返回 [] 会把"agent 毁了库"伪装成"本来就没有"。
+        """
         provider, handle = await self._prepared(tmp_path)
         Path(handle.info["path"]).unlink()
-        assert await provider.snapshot(handle) == []
+        with pytest.raises(SnapshotUnavailable, match="database file is gone"):
+            await provider.snapshot(handle)
+
+    async def test_corrupt_database_is_a_snapshot_unavailable(self, tmp_path: Path) -> None:
+        """损坏的库 dump 失败：同样显式记账，执行结论由 runner 兜底、不受影响。"""
+        provider, handle = await self._prepared(tmp_path)
+        Path(handle.info["path"]).write_bytes(b"not a sqlite database at all" * 10)
+        with pytest.raises(SnapshotUnavailable, match="database dump failed"):
+            await provider.snapshot(handle)
 
     async def test_dump_is_truncated_at_a_statement_boundary(
         self, tmp_path: Path, monkeypatch
@@ -525,6 +588,39 @@ class TestRunnerCollectsArtifacts:
         # trace 登记独立于 fixture 快照：provider 坏了不代表没有 trace 可看。
         assert [item["kind"] for item in payload["artifacts"]] == ["trace"]
 
+    async def test_snapshot_unavailable_is_accounted_distinctly(
+        self, evals_tree, fixtures_root, monkeypatch
+    ) -> None:
+        """``SnapshotUnavailable`` 是"该采的采不到"：记账前缀与 provider 故障分开。
+
+        两类问题的排查方向不同——前者查 agent 对环境做了什么（库被删 / dump
+        失败），后者查 provider 自己。混成一条 "fixture snapshot failed" 会让
+        第一类被误读成平台故障。
+        """
+        evals_root, data_root = evals_tree
+
+        async def _gone(handle: FixtureHandle) -> list[SnapshotArtifact]:
+            raise SnapshotUnavailable("database file is gone: fixture.db")
+
+        def _unavailable_provider(spec, root):
+            provider = get_provider(spec, root)
+            provider.snapshot = _gone  # type: ignore[method-assign]
+            return provider
+
+        monkeypatch.setattr(runner_mod, "get_provider", _unavailable_provider)
+        outcome = await Runner(_cfg(evals_root, data_root, fixtures_root)).run()
+        assert outcome.exit_code == 0
+
+        payload = _run_case_json(data_root, "database.query.top_customers")[0]
+        assert payload["status"] == "PASS"
+        assert any(
+            note.startswith("snapshot unavailable:") and "database file is gone" in note
+            for note in payload["artifact_notes"]
+        )
+        assert not any(
+            note.startswith("fixture snapshot failed:") for note in payload["artifact_notes"]
+        )
+
     async def test_malformed_snapshot_return_is_a_note(
         self, evals_tree, fixtures_root, monkeypatch
     ):
@@ -664,6 +760,52 @@ class TestCaseArtifactApi:
         assert raw.status_code == 200
         assert "CREATE TABLE" in raw.text
         assert raw.headers["content-type"].startswith("application/sql")
+
+    @pytest.mark.parametrize(
+        ("extra", "expected_truncated"),
+        [(0, False), (1, True)],
+        ids=["exact-cap", "cap-plus-one"],
+    )
+    async def test_preview_is_bounded_and_reports_true_size(
+        self,
+        evals_tree,
+        fixtures_root,
+        client: TestClient,
+        monkeypatch,
+        extra: int,
+        expected_truncated: bool,
+    ) -> None:
+        """预览是"按需读"：只读 cap+1 字节，bytes 仍报真实大小。
+
+        曾经的实现先 ``read_bytes()`` 整文件再截断——trace 这类不受 fixture 内容
+        上限约束的产物会被全量拉进内存。monkeypatch 让整文件读直接炸，锁住这一点。
+        """
+        evals_root, data_root = evals_tree
+        run_id = await _smoke_run(evals_tree, fixtures_root)
+        body = b"x" * (MAX_PREVIEW_BYTES + extra)
+        _inject_artifact(
+            data_root,
+            run_id,
+            "database.query.top_customers",
+            ArtifactRecord(
+                name="big.txt",
+                kind=ArtifactKind.files,
+                path="artifacts/database.query.top_customers/iter1/artifacts/big.txt",
+                bytes=len(body),
+                collected_at=NOW,
+            ),
+            body,
+        )
+
+        def _no_whole_read(self: Path) -> bytes:
+            raise AssertionError("preview must read at most cap+1 bytes, not the whole file")
+
+        monkeypatch.setattr(Path, "read_bytes", _no_whole_read)
+        preview_url, _ = _urls(run_id, "database.query.top_customers", "big.txt")
+        payload = client.get(preview_url).json()
+        assert payload["bytes"] == MAX_PREVIEW_BYTES + extra
+        assert payload["truncated"] is expected_truncated
+        assert len(payload["text"]) == MAX_PREVIEW_BYTES
 
     async def test_a_file_named_raw_is_not_shadowed_by_the_raw_route(
         self, evals_tree, fixtures_root, client: TestClient

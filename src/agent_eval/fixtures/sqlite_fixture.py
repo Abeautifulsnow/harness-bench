@@ -7,7 +7,11 @@ from pathlib import Path
 
 from agent_eval.errors import InvalidCallError
 from agent_eval.fixtures.base import FixtureHandle, FixtureProvider, resolve_fixture_dir
-from agent_eval.models.artifacts import ArtifactKind, SnapshotArtifact
+from agent_eval.models.artifacts import (
+    ArtifactKind,
+    SnapshotArtifact,
+    SnapshotUnavailable,
+)
 from agent_eval.models.case import EnvironmentSpec
 
 # 库快照的文本上限。超过就截断在最后一整条语句，并如实标注 truncated——
@@ -49,19 +53,27 @@ class SQLiteFixture(FixtureProvider):
 
         用 ``iterdump()`` 而不是复制 .db 文件：dump 是可读文本，能直接在报告与
         REST 里看、能 grep，二进制副本在同样信息量下多占空间且看不见内容。
-        库被 agent 删了或损坏时返回空——快照失败不该把一次跑完的执行变成 error。
+        库被 agent 删了或 dump 失败时抛 ``SnapshotUnavailable``——那本身是要
+        留档的现场（能力表里 database 标 ✅，静默返回 [] 会把"agent 毁了库"
+        伪装成"本来就没有"）；runner 兜底记进 artifact_notes，不会把一次跑完
+        的执行改成 error。
         """
-        db_path = Path(handle.info.get("path") or "")
+        raw_path = handle.info.get("path") or ""
+        db_path = Path(raw_path)
+        if not raw_path:
+            raise SnapshotUnavailable("fixture handle carries no database path")
         if not db_path.is_file():
-            return []
+            # prepare 必然建库；到这里文件没了 = agent 把库删了。这是最该被
+            # 看见的现场之一，绝不能与"无产物"混同。
+            raise SnapshotUnavailable(f"database file is gone: {db_path}")
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             try:
                 dump = "\n".join(conn.iterdump())
             finally:
                 conn.close()
-        except sqlite3.Error:
-            return []
+        except sqlite3.Error as exc:
+            raise SnapshotUnavailable(f"database dump failed: {exc}") from exc
         raw = dump.encode("utf-8")
         if len(raw) <= MAX_DUMP_BYTES:
             return [

@@ -29,19 +29,25 @@ _MANIFEST_KEY = "manifest"
 _CHANGES_NAME = "files.changes.txt"
 _CONTENT_DIR = "files"
 
-# 初态清单的签名：字节数 + 内容摘要。用摘要而不是 mtime——mtime 在 copytree /
-# checkout / 容器挂载下都会抖，把"没改过"判成"改过"会制造假差异。
+# 初态清单的签名：字节数 + **全文件**内容摘要。用摘要而不是 mtime——mtime 在
+# copytree / checkout / 容器挂载下都会抖，把"没改过"判成"改过"会制造假差异；
+# 摘要也不能只取头部省时间，那会把头之后的就地改写漏判成"没改过"（见 _digest）。
 Signature = tuple[int, str]
 
 
-def _digest(path: Path, limit: int = 1 << 20) -> str:
-    hasher = hashlib.sha256()
+def _digest(path: Path) -> str:
+    """全文件 sha256[:16]，流式读取、**不设上限**。
+
+    这里不能"只摘前 N 字节"省时间：截断的摘要会把 N 之后的就地改写漏判成
+    "没改过"——一份 2MiB、大小不变的日志在中段被改 100 字节，changes 清单就
+    会说"无变更"，而那是**静默的假结论**。漏判比误报危险（与语义 diff 约束
+    同源），所以宁可多读。file_digest 分块读取，内存不随文件大小涨。
+    """
     try:
         with path.open("rb") as fh:
-            hasher.update(fh.read(limit))
+            return hashlib.file_digest(fh, "sha256").hexdigest()[:16]
     except OSError:
         return "unreadable"
-    return hasher.hexdigest()[:16]
 
 
 def _manifest(root: Path) -> dict[str, Signature]:
@@ -100,9 +106,16 @@ class FilesystemFixture(FixtureProvider):
             return []
         after = _manifest(handle.workdir)
         changes = _diff_manifest(before, after)
-        artifacts = [_changes_artifact(len(changes), changes, after, before)]
-        artifacts.extend(_content_artifacts(handle.workdir, changes, after))
-        return artifacts
+        changes_artifact = _changes_artifact(len(changes), changes, after, before)
+        contents, omitted = _content_artifacts(handle.workdir, changes, after)
+        if omitted > 0:
+            # 省略记账挂在 changes 产物上（它必然存在），而不是最后一条内容产物：
+            # 内容产物可能一件都没留存（全部读失败），那时的省略最需要被看见。
+            note = f"另有 {omitted} 个变更文件未留存内容（上限 {MAX_FILE_ARTIFACTS} 个）"
+            changes_artifact.note = (
+                f"{changes_artifact.note}；{note}" if changes_artifact.note else note
+            )
+        return [changes_artifact, *contents]
 
     async def cleanup(self, handle: FixtureHandle) -> None:
         shutil.rmtree(handle.workdir, ignore_errors=True)
@@ -147,10 +160,12 @@ def _size_for(rel: str, after: dict[str, Signature], before: dict[str, Signature
 
 def _content_artifacts(
     workdir: Path, changes: dict[str, str], after: dict[str, Signature]
-) -> list[SnapshotArtifact]:
+) -> tuple[list[SnapshotArtifact], int]:
     """为新增 / 修改的文件留下内容（失败现场的可复原部分）。
 
     只留 added / modified：deleted 的文件已不在磁盘上，没有内容可采。
+    返回 (留存的产物, 未留存的个数)：省略个数交由调用方记账——它可能发生在
+    "一件都没留存"的读失败上，不能在这里悄悄吞掉。
     """
     kept: list[SnapshotArtifact] = []
     candidates = [rel for rel, kind in changes.items() if kind in {"added", "modified"}]
@@ -177,9 +192,4 @@ def _content_artifacts(
                 ),
             )
         )
-    omitted = len(candidates) - MAX_FILE_ARTIFACTS
-    if omitted > 0 and kept:
-        last = kept[-1]
-        last.note = f"{last.note}；" if last.note else ""
-        last.note += f"另有 {omitted} 个变更文件未留存内容（上限 {MAX_FILE_ARTIFACTS} 个）"
-    return kept
+    return kept, len(candidates) - MAX_FILE_ARTIFACTS

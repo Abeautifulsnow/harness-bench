@@ -138,6 +138,21 @@ case-scheduler（独立，可一直不做）
 实现 `assertion-extensions` 时暴露、但不属于该任务表面的问题。记在这里是为了
 不让它随一次绿灯消失。
 
+### 发现的 4：report 不携带 case 级产物指针
+
+Spec §21.1 原本写"能力表……报告与 Web 直接引用它"，但实现只在 Web（REST
+`/runs/{id}/cases/{case}/artifacts`）消费 `UNAVAILABLE_KINDS`；report.json /
+report.html 里既没有 case 级产物索引、没有能力表，也没有指向失败现场的指针
+（实测：真实 report.json 中 `artifact` 出现 0 次）。CI 场景下只拿报告的人
+看不到"这个 FAIL 的现场在哪"。
+
+- **影响面**：呈现层缺口，不影响 Gate 结论（产物不参与判定）。
+- **2026-09-28 review 的处置**：把 Spec §21.1 的措辞收窄为"Web 直接引用它"，
+  并注明报告不携带是指账缺口而非承诺——先让文档与实现一致，不把缺口写成功能。
+- **若要补齐**：给 `CaseAggregate`/report.json 加一份 case 级产物指针
+  （`name`/`path`/`bytes`/`kind`，不塞内容），report.html 相应加"现场"链接；
+  动的是 report schema，应由独立增量做，而不是修文档时顺手加。
+
 ### 发现的 3：case 级产物的采集能力缺口
 
 `case-artifacts` 落地的能力表（Spec §21.1）里 ❌ 的五项**不是"没做"，是"采不到"**，
