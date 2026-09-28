@@ -4,7 +4,7 @@
 > V2.2 增补 §11 评测词汇表增补 / §12 Security 挂载点 / §13 Web Platform 只读契约，
 > Changelog 见 §14；V2.3 增补 §15 必跑套件校验 / §16 安全用例集口径 /
 > §17 Evaluator Plugin SDK / §18 用例集覆盖与 case 级 metric 参数 /
-> §19 断言扩展的落地与处置 / §20 语义级 Trace Diff；
+> §19 断言扩展的落地与处置 / §20 语义级 Trace Diff / §21 Case 级产物；
 > V2.1 的复核修订见 §10.1）
 > 上游文档：`agent-evaluation-regression-platform-engineering-prd-v2.md`（下称 PRD V2.0，保持有效，不因本文档作废）
 > 状态：Engineering Ready
@@ -1766,5 +1766,136 @@ fixtures/sales_v2/            只有 seed.sql，没有 .git
 断言要的是**事实**（文件存在、包含某串），不是"相对某个初态的补丁"。
 `git_diff` 保留在 `EXTENSION_KEYS` 里，但提示文案从笼统的"依赖其他任务"
 改为指向本节的裁决，下一步动作明确（改用 `file_state`）。
+
+---
+
+# 21. Case 级产物（PRD §90）
+
+本章回答四个问题：**什么时候采、能采到什么、怎么关联、怎么只读暴露**。
+PRD §90 只说了"需要"，这里把口径定死，否则"产物"这个词会滑向两件不同的事：
+判定用的观测句柄（Spec §19 的 `EnvironmentSnapshot`）与给人看的现场副本。
+本章只讲后者。
+
+## 21.1 采集能力表
+
+采不到的观测面**如实列出**，不造空文件占位——一个 0 字节的 `screenshot.png`
+会让"已采集"的统计说谎。能力表以代码为事实源
+（`models/artifacts.py` 的 `UNAVAILABLE_KINDS`），报告与 Web 直接引用它，
+避免"文档说支持、代码里没有"的漂移。
+
+| 观测面 | 当前 | 采集手段 / 采不到的原因 |
+| --- | --- | --- |
+| `files` | ✅ | `FilesystemFixture`：prepare 记清单（大小 + sha256[:16]），snapshot 重扫比对 |
+| `database` | ✅ | `SQLiteFixture`：`iterdump()` 导出 SQL 文本（不是 .db 二进制副本） |
+| `trace` | ✅ | 登记 trace 子系统已写的 Raw Trace 路径，不重写格式 |
+| `screenshots` | ❌ | 平台无浏览器 / 桌面 fixture（PRD §88 的 remote 环境也未落地） |
+| `logs` | ❌ | 进程日志走 stdout，未落盘，无文件可采集 |
+| `git_diff` | ❌ | 裁决不实现（§20.4），改用 `files` 快照 |
+| `command_output` | ❌ | 观测面已由 trace 事件流覆盖（`command.*` / `tool.result`），不重复落盘 |
+| `reports` | ❌ | run 级五件套已存在（§6.2），不属于 case 级 |
+
+三处刻意的取舍：
+
+1. **文件内容按 bytes 采**。变更文件可能是二进制（脚本、图片、sqlite 库），
+   按文本读会抛异常或静默替换字符——两者都让"现场"失真。
+2. **`files.changes.txt` 即使零变更也产出**。"agent 没改工作区"是一个真结论，
+   与"采不到的观测面被空文件冒充"是两件事（后者才是 §21.4 禁止的占位）。
+3. **上限一律 `truncated` + `note`，不静默截断**。上限值
+   （20 个文件 / 单文件 256KiB / 清单 500 行 / dump 512KiB）防的是病态情况
+   （agent 写几千个文件）撑爆报告与磁盘；被省略的个数写在最后一条记录的
+   `note` 里。"它有多大"本身是现场的一部分，直接跳过会让一次 100MB 的写入
+   看起来像没发生过。
+
+## 21.2 采集时机：cleanup 之前，且在 finally 里
+
+`Runner` 在 fixture 的 `finally` 块里、`provider.cleanup(handle)` **之前**调用
+`_collect_artifacts()`。两条约束：
+
+- **必须在 cleanup 之前**：cleanup 会删掉 workspace 与库文件（`SQLiteFixture`
+  连 `-wal` / `-shm` 一起删），之后就没有现场了。
+- **必须放在 finally 而不是成功路径**：infra error 的现场同样要可复原。
+  PRD §90 的"失败现场仍可获取"指的正是这一类（跑挂了才知道要看现场）。
+
+采集**不改变执行的判定**：`snapshot()` 抛异常 / 返回畸形值 / 名字非法 /
+写盘失败，四种情况全部记进 `CaseRunResult.artifact_notes`，结果是"这次少一件
+产物"，不是"这次执行失败"。理由与 Spec §17 第 8 条同源——provider 的
+`snapshot()` 是对外扩展点，可能来自第三方代码，不该有能力把一次跑完的执行
+改判成 ERROR。`artifact_notes` 是**如实记账**：静默跳过会让"少了一件"看起来像
+"本来就没有"，而这两件事的排查方向完全相反。
+
+`RunConfig.save_artifacts`（CLI `--no-save-artifacts`）关闭时直接返回：产物是
+可选的现场留存，不是判定依据。
+
+## 21.3 索引与关联：只有一份，挂在宿主对象上
+
+PRD §90 要求"产物必须与 case_run_id 关联"。实现方式是**不建映射表**：
+
+```text
+CaseRunResult.id                    ← 就是 case_run_id
+CaseRunResult.artifacts: list[ArtifactRecord]   ← 索引就挂在这里
+```
+
+反查天然成立：拿一个 case_run_id 就能取出它的产物清单。多一份
+`case_run_id → 产物` 的映射表就多一个漂移点，而漂移的表现是"产物在磁盘上、
+索引里查不到"——比没有索引更难查。
+
+`ArtifactRecord` 的字段含义（`path` 是**唯一**能被解析成磁盘文件的字段）：
+
+| 字段 | 说明 |
+| --- | --- |
+| `name` | provider 给的展示名（`database.sql` / `files/src/app.py`），**不拼路径** |
+| `kind` | `files` / `database` / `trace` |
+| `path` | run 目录**相对路径**，落盘时由 collector 算出，下载端点只认它 |
+| `bytes` / `collected_at` / `truncated` / `note` | 大小、时间、截断标记、说明 |
+
+`case_id` / `iteration` 刻意不进 `ArtifactRecord`：它们由宿主
+`CaseRunResult` 给出（`record` 挂在 `result` 上）。冗余一份会让"索引说 iter1、
+文件在 iter2"这种漂移没有单一事实源。
+
+落盘布局（`workspace/` 已被 cleanup 删掉，产物在其**同级**，活得比它久）：
+
+```text
+<run_dir>/artifacts/<case_id>/iter<N>/artifacts/files.changes.txt
+<run_dir>/artifacts/<case_id>/iter<N>/artifacts/database.sql
+<run_dir>/artifacts/<case_id>/iter<N>/artifacts/files/src/app.py
+<run_dir>/traces/<case>.iter<N>.events.jsonl        ← trace 子系统写，索引登记
+```
+
+## 21.4 只读暴露与路径穿越
+
+`GET /api/runs/{id}/cases/{case}/artifacts` 返回索引 + `notes` + **能力表**。
+能力表一并返回是有意的（PRD §57 的可见性要求）：UI 必须能区分"本次没有截图
+采集能力"（能力缺口）与"截图采集失败了"（要报账）。
+
+内容端点 `.../artifacts/{name}`（预览，仅文本类）与 `.../artifact-raw/{name}`（原样
+下载，含二进制）遵循同一条路径穿越防线。原文端点用**平级前缀**而不是
+`.../artifacts/{name}/raw` 后缀：后者在产物名为 `files/raw` 时会产生歧义
+——`/artifacts/files/raw` 被路由解读成"`files` 的原文"，于是"下载得到、预览
+404 说产物不存在"。前缀写法让歧义在结构上不存在。
+
+> **请求里的 `name` 必须与索引中某条已验证过的记录全等**，才会用该记录的
+> `path` 去解析文件。解析后还要再判一次"在 run 目录内"（symlink 只有解析
+> 之后才看得出指向哪里）。
+
+因此 `../../etc/passwd`、`C:\Windows\win.ini`、`%2e%2e/` 之类的输入连进入
+文件系统的机会都没有——它们在索引里不存在，直接 404。**只拒绝** `..` 是不够
+的（要想到所有逃逸写法），所以这里是"白名单查名"而不是"黑名单过滤"。
+三条附带规则：
+
+- 索引里有、磁盘上没有 → 404（不是 500）：被清理掉也是"取不到"。
+- 非文本类（图片、未知后缀）走内容端点 → 400 并指向原文端点；按 utf-8 硬解
+  会抛异常或替换成乱码，两种都算失真。**判"能否当文本"只看扩展名**，判不出
+  的一律按二进制（`Makefile` 这类无后缀文件也只给下载）——宁可不预览，
+  也不猜。
+- `iteration` 是查名的一部分（默认 1）：命中 iter1 的记录不会在 iter9 上被
+  "顺手找到"。同一个 `name` 在每个 iteration 各有一条索引。
+
+`ArtifactRecord.path` 虽然出自平台自己的落盘逻辑，仍要重判边界：它来自磁盘上的
+`case_runs/*.json`，那是数据，不是可信输入。落盘侧同步做了 name 白名单
+（`runner/artifacts.py` 的 `safe_artifact_name`）+ resolve 后的第二道闸门。
+
+**不造空文件占位**（PRD §90 原文）：能力表里 ❌ 的类型不产生任何文件。判据是
+"这个观测面能不能采"，不是"这个字段准不准空"——`files.changes.txt` 的
+"（无变更）"是采集到的结论，不是占位。
 
 ---

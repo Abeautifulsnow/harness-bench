@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from agent_eval.models.artifacts import ArtifactRecord
 from agent_eval.models.run import FailureSemantics
 
 
@@ -115,6 +116,13 @@ class CaseRunResult(BaseModel):
     metric_results: list[MetricResultModel] = Field(default_factory=list)
     error: str | None = None
     trace_path: str | None = None
+    # case 级产物索引（PRD §90）：挂在 CaseRunResult 上，于是"通过 case_run_id
+    # 反查产物"天然成立——id 就是索引的宿主，不需要第二份 case_run_id → 产物的
+    # 映射表（多一份映射就多一个漂移点）。
+    artifacts: list[ArtifactRecord] = Field(default_factory=list)
+    # 采集期被跳过的项（名字非法 / 写盘失败）。这是**如实记账**，不是错误列表：
+    # 静默跳过会让"少了一件产物"看起来像"这次本来就没有"。
+    artifact_notes: list[str] = Field(default_factory=list)
     started_at: str | None = None
     finished_at: str | None = None
 

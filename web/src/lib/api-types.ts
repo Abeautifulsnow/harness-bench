@@ -214,6 +214,41 @@ export interface ArtifactContent {
   text: string;
 }
 
+/** PRD §90：一条 case 级产物。`path` 是 run 目录相对路径，只用于展示。 */
+export interface CaseArtifactRow {
+  case_run_id: string;
+  case_id: string;
+  iteration: number;
+  name: string;
+  kind: string;
+  path: string;
+  bytes: number;
+  collected_at: string;
+  truncated: boolean;
+  note: string | null;
+  content_type: string;
+  url: string;
+  /** 服务端拼好的原文地址：前端不要自己往 `url` 上接 `/raw`（会吃掉 query）。 */
+  raw_url: string;
+}
+
+/** `unavailable` 是能力表（Spec §21.1），`notes` 是采集记账——两者不同。 */
+export interface CaseArtifacts {
+  run_id: string;
+  case_id: string;
+  items: CaseArtifactRow[];
+  notes: string[];
+  unavailable: Record<string, string>;
+}
+
+export interface CaseArtifactContent {
+  name: string;
+  content_type: string;
+  bytes: number;
+  text: string;
+  truncated: boolean;
+}
+
 export interface SpanNode {
   id: string;
   parent_span_id: string | null;

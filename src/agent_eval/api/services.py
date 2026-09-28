@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from agent_eval.errors import InvalidCallError
 from agent_eval.failures.analysis import AnalysisResult, analyse_run
@@ -33,6 +34,86 @@ CONTENT_TYPES = {
     "summary.md": "text/markdown",
     "report.html": "text/html",
 }
+
+# case 级产物的 MIME：按扩展名判，判不出的按二进制（不假装是文本）。
+CASE_CONTENT_TYPES = {
+    ".json": "application/json",
+    ".jsonl": "application/x-ndjson",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".sql": "application/sql",
+    ".log": "text/plain",
+    ".html": "text/html",
+    ".xml": "application/xml",
+    ".yaml": "text/yaml",
+    ".yml": "text/yaml",
+    ".csv": "text/csv",
+}
+
+# case 产物按这个集合判"能否当文本预览"：不在集合里的一律走下载（可能是图片、
+# sqlite 文件），硬按 utf-8 解会抛异常或替换成乱码，两种都算失真。
+TEXTUAL_CASE_TYPES = frozenset(
+    {
+        "application/json",
+        "application/x-ndjson",
+        "text/plain",
+        "text/markdown",
+        "application/sql",
+        "text/html",
+        "application/xml",
+        "text/yaml",
+        "text/csv",
+    }
+)
+MAX_PREVIEW_BYTES = 512 * 1024
+
+
+def case_content_type(name: str) -> str:
+    suffix = Path(name).suffix.lower()
+    return CASE_CONTENT_TYPES.get(suffix, "application/octet-stream")
+
+
+def _case_artifact_url(
+    run_id: str, case_id: str, iteration: int, name: str, *, raw: bool = False
+) -> str:
+    """case 产物端点 URL。name 按路径段转义：它可能含 ``/``（``files/src/app.py``）。
+
+    只转义 ``/`` 之外的部分不行——``?`` / ``#`` / 空格都会截断 URL，所以逐段
+    quote。这一步只是"URL 正确性"，不是安全边界：安全边界在索引查名（Spec §21.4）。
+
+    原文端点用**平级前缀** ``artifact-raw/`` 而不是 ``.../raw`` 后缀：后缀会被
+    name 吃掉歧义——agent 若在工作区根写出一个名为 ``raw`` 的文件，产物名就是
+    ``files/raw``，其预览 URL ``/artifacts/files/raw`` 会被后缀路由解读成
+    "``files`` 的原文"，于是"下载得到、预览 404"。前缀没有这个问题。
+    """
+    quoted = "/".join(quote(part, safe="") for part in name.split("/"))
+    if raw:
+        return (
+            f"/api/runs/{run_id}/cases/{quote(case_id, safe='')}"
+            f"/artifact-raw/{quoted}?iteration={iteration}"
+        )
+    return (
+        f"/api/runs/{run_id}/cases/{quote(case_id, safe='')}"
+        f"/artifacts/{quoted}?iteration={iteration}"
+    )
+
+
+def artifact_file_within(store: RunStore, run_id: str, relative: str) -> Path | None:
+    """把索引里的 run 目录相对路径解析成真实文件，越界或不存在返回 None。
+
+    先 ``resolve()`` 再判包含关系：顺序反了就没用了——symlink 只有在解析之后才
+    看得出指向哪里。调用方传进来的相对路径来自**索引**（不是请求参数），但这里
+    仍然重新判一次：索引本身来自 case_runs/*.json，那是磁盘上的数据，不是可信
+    输入（Spec §21.3）。
+    """
+    run_dir = store.run_dir_for(run_id).resolve()
+    try:
+        candidate = (run_dir / relative).resolve()
+    except OSError:
+        return None
+    if candidate != run_dir and run_dir not in candidate.parents:
+        return None
+    return candidate if candidate.is_file() else None
 
 
 class RunView:
@@ -153,6 +234,77 @@ class RunView:
 
     def case_results(self) -> list[dict[str, Any]]:
         return [case.as_dict() for case in self.aggregate().cases]
+
+    # -------------------------------------------------- case-level artifacts
+
+    def case_artifact_rows(self, case_id: str) -> list[dict[str, Any]]:
+        """某 case 全部 iteration 的产物索引（PRD §90）。
+
+        索引来源是 ``CaseRunResult.artifacts``：case_run_id 就是 ``CaseRunResult.id``，
+        所以每条产物的归属是**推导出来的**，不需要第二份映射表——少一个漂移点。
+        """
+        rows: list[dict[str, Any]] = []
+        for result in sorted(self.results, key=lambda r: r.iteration):
+            if result.case_id != case_id:
+                continue
+            for record in result.artifacts:
+                content_type = case_content_type(record.name)
+                rows.append(
+                    {
+                        "case_run_id": result.id,
+                        "case_id": result.case_id,
+                        "iteration": result.iteration,
+                        "name": record.name,
+                        "kind": record.kind.value,
+                        "path": record.path,
+                        "bytes": record.bytes,
+                        "collected_at": record.collected_at.isoformat(),
+                        "truncated": record.truncated,
+                        "note": record.note,
+                        "content_type": content_type,
+                        # 两个 URL 都由服务端拼好：让消费方（Web / 第三方）永远不需要
+                        # 自己往 URL 上接字符串——`${url}/raw` 这类拼接会吃掉 query，
+                        # 而这类 bug 只会在"第 2 个 iteration"上暴露。
+                        "url": _case_artifact_url(
+                            result.run_id, result.case_id, result.iteration, record.name
+                        ),
+                        "raw_url": _case_artifact_url(
+                            result.run_id,
+                            result.case_id,
+                            result.iteration,
+                            record.name,
+                            raw=True,
+                        ),
+                    }
+                )
+        return rows
+
+    def case_artifact_notes(self, case_id: str) -> list[str]:
+        """采集期记账（去重保序）：有内容就说明这次少了某件产物。"""
+        notes: list[str] = []
+        for result in sorted(self.results, key=lambda r: r.iteration):
+            if result.case_id != case_id:
+                continue
+            for note in result.artifact_notes:
+                if note not in notes:
+                    notes.append(note)
+        return notes
+
+    def find_case_artifact(
+        self, case_id: str, iteration: int, name: str
+    ) -> tuple[CaseRunResult, Any] | None:
+        """按 (case, iteration, name) 在索引里查一条产物。
+
+        查不到就返回 None → 端点回 404。**这一步就是路径穿越的闸门**：请求里带了
+        ``../../etc/passwd`` 也只会查不到，因为没有任何一条索引的 name 长这样。
+        """
+        for result in self.results:
+            if result.case_id != case_id or result.iteration != iteration:
+                continue
+            for record in result.artifacts:
+                if record.name == name:
+                    return result, record
+        return None
 
 
 _UNSET = object()

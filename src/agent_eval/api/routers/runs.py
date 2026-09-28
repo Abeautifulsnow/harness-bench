@@ -6,15 +6,19 @@ case_runs/*.json）→ 派生层（DuckDB）。因此就算投影层没 rebuild�
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 
 from agent_eval.api.deps import WorkspaceDep
 from agent_eval.api.schemas import (
     ArtifactContent,
     ArtifactRow,
+    CaseArtifactContent,
+    CaseArtifactRow,
+    CaseArtifacts,
     CaseResultRow,
     RunOverview,
     SpanNode,
@@ -22,8 +26,18 @@ from agent_eval.api.schemas import (
     TraceEvents,
     TraceView,
 )
-from agent_eval.api.services import CONTENT_TYPES, TEXT_ARTIFACTS, RunView, load_view
+from agent_eval.api.services import (
+    CONTENT_TYPES,
+    MAX_PREVIEW_BYTES,
+    TEXT_ARTIFACTS,
+    TEXTUAL_CASE_TYPES,
+    RunView,
+    artifact_file_within,
+    case_content_type,
+    load_view,
+)
 from agent_eval.errors import AgentEvalError
+from agent_eval.models.artifacts import UNAVAILABLE_KINDS
 from agent_eval.models.run import RunMetadata, RunStatus
 from agent_eval.storage.run_store import RunStore, _safe
 from agent_eval.trace.builder import TraceBuilder
@@ -390,6 +404,105 @@ def artifact_raw(run_id: str, name: str, workspace: WorkspaceDep) -> PlainTextRe
     if not path.is_file():
         raise HTTPException(status_code=404, detail=f"artifact not found: {name}")
     return PlainTextResponse(path.read_text(encoding="utf-8"), media_type=CONTENT_TYPES[name])
+
+
+# ------------------------------------------------------ case-level artifacts
+
+
+@router.get(
+    "/runs/{run_id}/cases/{case_id}/artifacts",
+    response_model=CaseArtifacts,
+    summary="PRD §90 case 级产物索引（含采集能力表）",
+)
+def case_artifacts(run_id: str, case_id: str, workspace: WorkspaceDep) -> CaseArtifacts:
+    """一次 case 的现场清单：产物索引 + 采集记账 + 能力表。
+
+    把 ``unavailable`` 一起返回是有意的（PRD §57 的可见性要求）：UI 需要能区分
+    "本次没有截图采集能力"与"截图采集失败了"，前者是能力缺口，后者要报账。
+    """
+    view = _view(workspace, run_id)
+    if not any(result.case_id == case_id for result in view.results):
+        raise HTTPException(status_code=404, detail=f"case not in run: {case_id}")
+    return CaseArtifacts(
+        run_id=run_id,
+        case_id=case_id,
+        items=[CaseArtifactRow(**row) for row in view.case_artifact_rows(case_id)],
+        notes=view.case_artifact_notes(case_id),
+        unavailable=dict(UNAVAILABLE_KINDS),
+    )
+
+
+def _case_artifact_file(
+    workspace: WorkspaceDep, run_id: str, case_id: str, iteration: int, name: str
+) -> tuple[RunView, Path]:
+    """索引查名 → 落到真实文件。查不到 / 越界一律 404，不做"猜路径"。
+
+    路径穿越的防线只在索引这一层：请求里的 name 必须与某条已验证过的索引项**全等**
+    才会被解析（Spec §21.3）。这样 ``../../etc/passwd``、``C:\\Windows\\win.ini``
+    之类的输入连进入文件系统的机会都没有——它们在索引里不存在。
+    """
+    view = _view(workspace, run_id)
+    hit = view.find_case_artifact(case_id, iteration, name)
+    if hit is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"artifact not found for case {case_id} iter{iteration}: {name}",
+        )
+    _result, record = hit
+    path = artifact_file_within(view.store, run_id, record.path)
+    if path is None:
+        # 索引里有、磁盘上没有（或被删/被替换成越界指向）：仍然是"取不到"。
+        raise HTTPException(status_code=404, detail=f"artifact file missing on disk: {name}")
+    return view, path
+
+
+@router.get(
+    "/runs/{run_id}/cases/{case_id}/artifact-raw/{name:path}",
+    response_class=FileResponse,
+    summary="case 级产物原文（二进制也照原样下载）",
+)
+def case_artifact_raw(
+    run_id: str,
+    case_id: str,
+    name: str,
+    workspace: WorkspaceDep,
+    iteration: Annotated[int, Query(ge=1)] = 1,
+) -> FileResponse:
+    _view_, path = _case_artifact_file(workspace, run_id, case_id, iteration, name)
+    return FileResponse(path, media_type=case_content_type(name), filename=Path(name).name)
+
+
+@router.get(
+    "/runs/{run_id}/cases/{case_id}/artifacts/{name:path}",
+    response_model=CaseArtifactContent,
+    summary="PRD §90 case 级产物内容（文本预览；二进制走 /raw）",
+)
+def case_artifact_content(
+    run_id: str,
+    case_id: str,
+    name: str,
+    workspace: WorkspaceDep,
+    iteration: Annotated[int, Query(ge=1)] = 1,
+) -> CaseArtifactContent:
+    _view_, path = _case_artifact_file(workspace, run_id, case_id, iteration, name)
+    content_type = case_content_type(name)
+    if content_type not in TEXTUAL_CASE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"artifact is not text-previewable: {content_type}"
+                "（请用 artifact-raw 端点下载原文件）"
+            ),
+        )
+    raw = path.read_bytes()
+    truncated = len(raw) > MAX_PREVIEW_BYTES
+    return CaseArtifactContent(
+        name=name,
+        content_type=content_type,
+        bytes=len(raw),
+        truncated=truncated,
+        text=raw[:MAX_PREVIEW_BYTES].decode("utf-8", errors="replace"),
+    )
 
 
 @router.get("/runs/{run_id}/status", response_model=dict, summary="Run 状态（轮询用）")

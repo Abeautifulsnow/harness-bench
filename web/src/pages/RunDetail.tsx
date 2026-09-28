@@ -35,7 +35,7 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
-import type { CaseResultRow, RunOverview } from "@/lib/api-types";
+import type { CaseArtifactRow, CaseResultRow, RunOverview } from "@/lib/api-types";
 import {
   fmtBytes,
   fmtCost,
@@ -416,11 +416,167 @@ function CaseRow({ runId, row }: { runId: string; row: CaseResultRow }) {
                   </TableBody>
                 </Table>
               </QueryState>
+
+              <CaseArtifactsPanel runId={runId} caseId={row.case_id} />
             </div>
           </TableCell>
         </TableRow>
       )}
     </>
+  );
+}
+
+/** PRD §90 / Spec §21：某 case 的现场产物（工作区变更、库快照、Raw Trace）。
+ *
+ * 三块内容含义不同，分开显示：
+ *  - items：这次真采到了什么（含 truncated / note，不静默）；
+ *  - notes：采集期的记账（名字非法 / 写盘失败 / provider 抛异常）——有内容就说明
+ *    这次确实少了一件，与"本来就没有"必须看得出差别；
+ *  - unavailable：能力表（Spec §21.1）——采不到的观测面如实列出，不造假产物。
+ */
+function CaseArtifactsPanel({ runId, caseId }: { runId: string; caseId: string }) {
+  const query = useQuery({
+    queryKey: ["case-artifacts", runId, caseId],
+    queryFn: () => api.caseArtifacts(runId, caseId),
+  });
+  const [preview, setPreview] = React.useState<CaseArtifactRow | null>(null);
+  const [showUnavailable, setShowUnavailable] = React.useState(false);
+  const content = useQuery({
+    queryKey: ["case-artifact", runId, caseId, preview?.name, preview?.iteration],
+    queryFn: () => api.caseArtifact(runId, caseId, preview!.name, preview!.iteration),
+    enabled: Boolean(preview),
+    retry: false,
+  });
+
+  const unavailable = Object.entries(query.data?.unavailable ?? {});
+
+  return (
+    <div className="space-y-2 border-t border-border pt-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[11px] tracking-wide text-muted-foreground uppercase">
+          case 现场产物（PRD §90）
+        </div>
+        {unavailable.length > 0 && (
+          <Button size="sm" variant="ghost" onClick={() => setShowUnavailable((v) => !v)}>
+            {showUnavailable ? "隐藏" : "采集能力表"}
+          </Button>
+        )}
+      </div>
+
+      <QueryState
+        isLoading={query.isLoading}
+        error={query.error}
+        isEmpty={query.data?.items.length === 0}
+        emptyTitle="没有采集到产物"
+        emptyHint="该 run 以 --no-save-artifacts 运行，或 case 未产生可采集的现场。"
+      >
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Iter</TableHead>
+              <TableHead>产物</TableHead>
+              <TableHead>类型</TableHead>
+              <TableHead>大小</TableHead>
+              <TableHead>case_run_id</TableHead>
+              <TableHead>说明</TableHead>
+              <TableHead />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {query.data?.items.map((item) => (
+              <TableRow key={`${item.case_run_id}-${item.name}`}>
+                <TableCell className="tabular text-xs">{item.iteration}</TableCell>
+                <TableCell className="font-mono text-xs">{item.name}</TableCell>
+                <TableCell className="text-xs text-muted-foreground">{item.kind}</TableCell>
+                <TableCell className="tabular text-xs">
+                  {fmtBytes(item.bytes)}
+                  {item.truncated && (
+                    <Badge variant="warn" className="ml-2">
+                      截断
+                    </Badge>
+                  )}
+                </TableCell>
+                <TableCell className="font-mono text-[11px] text-muted-foreground">
+                  {item.case_run_id}
+                </TableCell>
+                <TableCell className="max-w-sm text-xs text-muted-foreground">
+                  {item.note ?? "—"}
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center justify-end gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setPreview(item)}
+                      title="文本预览；二进制请用下载"
+                    >
+                      <FileJson2 /> 查看
+                    </Button>
+                    <Button size="sm" variant="ghost" asChild>
+                      <a href={item.raw_url} target="_blank" rel="noreferrer">
+                        <ExternalLink /> 原文
+                      </a>
+                    </Button>
+                    <Button size="sm" variant="ghost" asChild>
+                      <a href={item.raw_url} download={item.name.split("/").pop()}>
+                        <Download />
+                      </a>
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </QueryState>
+
+      {(query.data?.notes.length ?? 0) > 0 && (
+        <div className="space-y-1 rounded-md border border-[var(--warn)]/40 bg-[var(--warn)]/5 p-2">
+          <div className="text-[11px] text-[var(--warn)]">
+            采集记账（有内容 = 这次少了某件产物，不是"本来就没有"）
+          </div>
+          {query.data?.notes.map((note, index) => (
+            <div key={index} className="font-mono text-[11px] text-muted-foreground">
+              {note}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {showUnavailable && (
+        <div className="space-y-1 rounded-md border border-border bg-muted/20 p-2">
+          <div className="text-[11px] text-muted-foreground">
+            采集能力表（Spec §21.1）：以下类型的观测面当前采不到，故不落空文件占位。
+          </div>
+          {unavailable.map(([kind, reason]) => (
+            <div key={kind} className="text-[11px]">
+              <span className="font-mono text-muted-foreground">{kind}</span>
+              <span className="mx-1">·</span>
+              <span className="text-muted-foreground">{reason}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {preview && (
+        <div className="space-y-1">
+          <div className="text-[11px] text-muted-foreground">
+            预览 · <span className="font-mono">{preview.name}</span>（iter{preview.iteration}）
+          </div>
+          {content.error ? (
+            <p className="text-xs text-[var(--warn)]">
+              无法预览：{content.error.message}（用"原文 / 下载"取原文件）
+            </p>
+          ) : (
+            <QueryState isLoading={content.isLoading} error={null}>
+              <pre className="max-h-[40vh] overflow-auto rounded-md border border-border bg-muted/30 p-3 font-mono text-xs whitespace-pre-wrap">
+                {content.data?.truncated ? `${content.data.text}\n\n… 已截断（预览上限）` : content.data?.text}
+              </pre>
+            </QueryState>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

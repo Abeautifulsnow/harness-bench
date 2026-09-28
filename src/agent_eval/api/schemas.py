@@ -141,6 +141,53 @@ class ArtifactContent(BaseModel):
     text: str
 
 
+class CaseArtifactRow(BaseModel):
+    """一条 case 级产物（PRD §90，Spec §21.3）。
+
+    ``path`` 是 run 目录相对路径，也是内容端点的唯一解析入口——``name`` 只用于
+    展示与定位索引项，绝不拼磁盘路径。
+    """
+
+    case_run_id: str
+    case_id: str
+    iteration: int
+    name: str
+    kind: str
+    path: str
+    bytes: int
+    collected_at: str
+    truncated: bool = False
+    note: str | None = None
+    content_type: str = "application/octet-stream"
+    url: str
+    raw_url: str
+
+
+class CaseArtifacts(BaseModel):
+    """某 case 的产物视图：索引 + 采集缺口说明。
+
+    ``unavailable`` 是**能力表**（Spec §21.1），不是错误：采不到的观测面如实列出来，
+    这样"没有截图"与"截图采集坏了"在 UI 上长得不一样。``notes`` 是采集期的记账
+    （名字非法 / 写盘失败 / provider 抛异常），有内容就说明这次确实少了东西。
+    """
+
+    run_id: str
+    case_id: str
+    items: list[CaseArtifactRow] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    unavailable: dict[str, str] = Field(default_factory=dict)
+
+
+class CaseArtifactContent(BaseModel):
+    """产物内容预览（仅文本类；二进制回 400 并指向 ``/raw``）。"""
+
+    name: str
+    content_type: str
+    bytes: int
+    text: str = ""
+    truncated: bool = False
+
+
 class SpanNode(BaseModel):
     """PRD §76 Trace Viewer: 节点显示 duration / tokens / input / output / error。"""
 

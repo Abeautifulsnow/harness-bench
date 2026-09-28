@@ -7,7 +7,7 @@
 ## 检查命令（合并前必须全绿）
 
 ```bash
-uv run pytest        # 305 tests（含 e2e：FakeAgent 全链路 + 真实 TCP mock server + REST API）
+uv run pytest        # 369 tests（含 e2e：FakeAgent 全链路 + 真实 TCP mock server + REST API）
 uv run ruff check .  # 规则：E/F/I/UP/B/SIM；CLI 文件豁免 B008（Typer 惯用法）
 uv run ruff format --check .
 cd web && bun run typecheck && bun run build   # 前端改动时
@@ -166,6 +166,32 @@ judge 行为的用例标 `@pytest.mark.real_judge` 退出该夹具。装了 deep
 5. **`semantic: true` 是显式开关，默认关闭**，且只影响字符串值：`exact` 的字面
    语义不变（"把大小写差异判成不同"在某些用例里正是要断言的事），非字符串值仍走
    原有相等性。文件类 diff 用 `file_state` 快照比对，不引 git（Spec §20.4）。
+
+## Case 级产物约束（PRD §90，Spec §21）
+
+产物是"现场留存"，与判定无关：采不到不该让跑完的执行变 ERROR，采到了也不参与
+Gate。守住四条：
+
+1. **采集时机固定在 cleanup 之前的 `finally` 里**。cleanup 删掉 workspace 与库文件
+   （`SQLiteFixture` 连 `-wal`/`-shm` 一起删），之后就没有现场；放 `finally` 而不是
+   成功路径，是为了让 infra error 的现场同样可复原。
+2. **索引只有一份，挂在宿主上**。`CaseRunResult.id` 就是 `case_run_id`，
+   `CaseRunResult.artifacts` 就是索引——不要建 `case_run_id → 产物` 的映射表
+   （多一份映射多一个漂移点，漂移的表现是"文件在磁盘上、索引里查不到"）。
+   `ArtifactRecord` 里不放 `case_id`/`iteration`：那是宿主给的。
+3. **采集失败一律记账，不改判定**。provider `snapshot()` 抛异常 / 返回畸形值 /
+   元素类型不对 / name 非法 / 写盘失败，五种情况都进 `CaseRunResult.artifact_notes`。
+   静默跳过会让"少了一件产物"看起来像"本来就没有"——两者的排查方向相反。
+4. **采不到的观测面不造空文件占位**（PRD §90 原文），在能力表
+   （`models/artifacts.py` 的 `UNAVAILABLE_KINDS`）里如实写明原因与替代手段，
+   并让 API/Web 把它渲染出来。`files.changes.txt` 的"无变更"是采集到的结论，
+   不属于占位。上限（文件个数 / 单文件字节 / 清单行数 / dump 字节）必须配
+   `truncated=True` + `note`，不许静默截断。
+
+路径解析只有一条规则：**请求里的 `name` 必须与索引中某条记录全等**，再用该记录的
+`path` 去解析文件，解析后再判"在 run 目录内"。`ArtifactRecord.path` 出自磁盘上的
+`case_runs/*.json`，那是数据不是可信输入，所以第二道判断不能省。落盘侧另有
+`safe_artifact_name()`（白名单 + 逐段 `..` 检查，两层缺一不可）。
 
 ## 用例集覆盖约束（PRD §103，Spec §18）
 

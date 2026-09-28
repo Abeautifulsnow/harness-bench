@@ -17,9 +17,15 @@ Spec（V2.2）的验收条款，不是"感觉还差点"。
 | 二（体量） | `harness-evaluators` + `evaluator-plugin-sdk` | ✅ | `9baed6a` |
 | 二（体量） | `mvp-case-expansion` | ✅ | `2604520` |
 | 三（扩展面） | `assertion-extensions` | ✅ | `c612c74` |
-| 三（扩展面） | `semantic-trace-diff` | ✅ | 本轮 |
-| 三（扩展面） | `case-artifacts` | ⏳ 待做（依赖 `semantic-trace-diff` 的 git diff 裁决） | — |
+| 三（扩展面） | `semantic-trace-diff` | ✅ | `c1c5707` |
+| 三（扩展面） | `case-artifacts` | ✅ | 本轮 |
 | 可选 | `case-scheduler` | 不做（纯重构，见下） | — |
+
+批次三的 4 项全部落地。`case-artifacts` 的口径写在 **Spec §21**：
+采集时机（cleanup 之前的 `finally`）、能力表（`UNAVAILABLE_KINDS`，
+采不到的观测面不造空文件占位）、索引只有一份（`CaseRunResult.artifacts`，
+`id` 就是 `case_run_id`，不建第二份映射）、只读暴露（请求 name 必须与索引
+全等才解析路径，越界一律 404）。
 
 `semantic-trace-diff` 的第三项交付（`git diff`）的裁决与依据写在
 **Spec §20.4**：**不实现**，改用已落地的 `file_state` 文件快照比对。
@@ -58,7 +64,7 @@ mvp-case-expansion ───┴────────────────�
                      └──> assertion-extensions
 
 case-artifacts ──> assertion-extensions（database_state / file_state）
-semantic-trace-diff ──> case-artifacts（git diff 采集）
+semantic-trace-diff ──> case-artifacts（git diff 采集 → 裁决改为文件快照，Spec §20.4）
 
 case-scheduler（独立，可一直不做）
 ```
@@ -131,6 +137,21 @@ case-scheduler（独立，可一直不做）
 
 实现 `assertion-extensions` 时暴露、但不属于该任务表面的问题。记在这里是为了
 不让它随一次绿灯消失。
+
+### 发现的 3：case 级产物的采集能力缺口
+
+`case-artifacts` 落地的能力表（Spec §21.1）里 ❌ 的五项**不是"没做"，是"采不到"**，
+但其中两项的缺口与 PRD 的"未来"项绑定，值得单独记账：
+
+- `logs`：平台**没有 run 级日志文件**——进程日志直接走 stdout，从未落盘。
+  于是 PRD §90 的 "logs" 这一类产物在 V1 结构上就取不到（不是忘了实现）。
+  要采它得先决定日志的落盘位置与轮转策略，属于运维面变更。
+- `screenshots`：依赖 PRD §88 的 remote/浏览器 fixture，V1 不存在该观测面。
+- `command_output`：由 trace 事件流覆盖（`command.started/finished`、
+  `tool.result`），已可从 Raw Trace 复原，重复落盘只会造成两份事实。
+
+三条都不影响 Gate 结论（产物不参与判定），记账的目的是让"能力缺口"与
+"采集失败"在报告里长得不一样——后者会进 `CaseRunResult.artifact_notes`。
 
 ### 发现的 1：run-level metric diff 没有噪声下限
 

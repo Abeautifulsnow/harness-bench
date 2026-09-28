@@ -1,6 +1,8 @@
 """FixtureProvider 抽象与注册（PRD §89）。
 
-生命周期（Spec §2.4）：每个 iteration prepare → 执行 → cleanup，iteration 间零共享。
+生命周期（Spec §2.4）：每个 iteration prepare → 执行 → snapshot → cleanup，
+iteration 间零共享。``snapshot`` 的位置是契约的一部分：它必须在 cleanup **之前**
+被调用，否则 provider 已经销毁了要观测的东西（Spec §21.2）。
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_eval.errors import InvalidCallError
+from agent_eval.models.artifacts import SnapshotArtifact
 from agent_eval.models.case import EnvironmentSpec
 
 
@@ -26,6 +29,20 @@ class FixtureProvider(ABC):
 
     @abstractmethod
     async def prepare(self, spec: EnvironmentSpec, workdir: Path) -> FixtureHandle: ...
+
+    async def snapshot(self, handle: FixtureHandle) -> list[SnapshotArtifact]:
+        """采集 cleanup 前的环境现场（PRD §90，Spec §21）。
+
+        缺省实现返回空列表——**不是**每个 provider 都有值得留存的状态
+        （如"无 fixture"的纯 echo 用例）。这里用空列表而不是 ``None``：
+        "未产出"与"产出了零项"在调用侧是同一件事，多一个 ``None`` 只会多出
+        一条永远走不到的分支（与 Spec §17 第 8 条"未声明 ≠ 声明为空"相反——
+        那里的两者含义不同，这里的两者含义相同）。
+
+        约定：**不抛异常**。快照失败不应把一次已经跑完的执行变成 infra error，
+        采集不到就少一件产物，并在 ``note`` 里说明（调用侧兜底记 note）。
+        """
+        return []
 
     @abstractmethod
     async def cleanup(self, handle: FixtureHandle) -> None: ...

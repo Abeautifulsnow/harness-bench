@@ -81,6 +81,14 @@ export const api = {
   runArtifacts: (id: string) => get<T.ArtifactRow[]>(`/runs/${id}/artifacts`),
   artifact: (id: string, name: string) =>
     get<T.ArtifactContent>(`/runs/${id}/artifacts/${name}`),
+  /** PRD §90 case 级产物：索引 + 采集记账 + 能力表（三者含义不同，别合并展示）。 */
+  caseArtifacts: (runId: string, caseId: string) =>
+    get<T.CaseArtifacts>(`/runs/${runId}/cases/${encodeURIComponent(caseId)}/artifacts`),
+  caseArtifact: (runId: string, caseId: string, name: string, iteration: number) =>
+    get<T.CaseArtifactContent>(
+      `/runs/${runId}/cases/${encodeURIComponent(caseId)}/artifacts/${name}`,
+      { iteration },
+    ),
   runStatus: (id: string) =>
     get<{ run_id: string; status: string; verdict: string | null; finished_at: string | null }>(
       `/runs/${id}/status`,

@@ -44,7 +44,7 @@ from agent_eval.evaluators.registry import (
     run_plugin,
     scan_unsupported_assertions,
 )
-from agent_eval.fixtures.base import FixtureHandle, get_provider
+from agent_eval.fixtures.base import FixtureHandle, FixtureProvider, get_provider
 from agent_eval.fixtures.snapshot import EnvironmentSnapshot, snapshot_from_handle
 from agent_eval.ids import new_id
 from agent_eval.loading.loader import (
@@ -80,6 +80,7 @@ from agent_eval.reports.aggregate import RunAggregate, build_aggregate
 from agent_eval.reports.cost import PricingTable
 from agent_eval.reports.html import render_html_safe
 from agent_eval.reports.report import write_reports
+from agent_eval.runner.artifacts import collect_artifacts, trace_artifact_record
 from agent_eval.security.evaluator import evaluate_security
 from agent_eval.storage.analytics import Analytics
 from agent_eval.storage.baseline_store import BaselineStore
@@ -109,6 +110,9 @@ class RunConfig:
     no_judge: bool = False
     timeout: float | None = None
     save_trace: bool = True
+    # PRD §90：case 级产物（workdir 变更 / db dump / trace 索引）。
+    # 默认开启——失败现场的可复原性是默认能力，不是可选项。
+    save_artifacts: bool = True
     experiment_id: str | None = None
     variant_id: str | None = None
     agent_model: str | None = None
@@ -557,6 +561,11 @@ class Runner:
             )
         finally:
             if handle is not None:
+                # Spec §21.2：产物必须在 cleanup **之前**采集——cleanup 会删掉
+                # workspace 与库文件，之后就没有现场了。放在 finally 而不是成功
+                # 路径上，是为了让 infra error 的现场同样可复原（PRD §90 的
+                # "失败现场仍可获取"指的是这一类）。
+                await self._collect_artifacts(result, provider, handle, workdir)
                 await provider.cleanup(handle)
 
     async def _open_session(
@@ -674,6 +683,47 @@ class Runner:
                 )
             )
         return out
+
+    async def _collect_artifacts(
+        self,
+        result: CaseRunResult,
+        provider: FixtureProvider,
+        handle: FixtureHandle,
+        workdir: Path,
+    ) -> None:
+        """采集 case 级产物并写进 result（PRD §90，Spec §21）。
+
+        三条约束都体现在这一段里：
+
+        1. **在 cleanup 之前调用**（调用点就在 finally 的第一行）；
+        2. **不抛异常**：快照失败是"这次少一件产物"，不是"这次执行失败"。
+           provider 的 snapshot 是对外扩展点（可能是第三方代码），把它写成
+           "可能让一次跑完的执行变 ERROR"会让整个 run 的结论被一件附属品污染；
+        3. **如实记账**：provider 抛异常 / 返回畸形值 / 名字非法 / 写盘失败，
+           四种情况都进 ``artifact_notes``。静默跳过会让"少了一件"看起来像
+           "本来就没有"——而这两件事的排查方向完全相反。
+        """
+        if not self.cfg.save_artifacts:
+            return
+        run_dir = self.store.run_dir  # type: ignore[union-attr]
+        snapshot: list = []
+        try:
+            raw = await provider.snapshot(handle)
+            if isinstance(raw, list):
+                snapshot = raw
+            else:
+                result.artifact_notes.append(
+                    f"fixture snapshot returned {type(raw).__name__}, expected list"
+                )
+        except Exception as exc:  # noqa: BLE001 — 见第 2 条
+            result.artifact_notes.append(f"fixture snapshot failed: {exc!r}")
+
+        records, skipped = collect_artifacts(snapshot, workdir=workdir, run_dir=run_dir, now=_now())
+        # Raw Trace 由 trace 子系统写，这里只登记路径：让"这个 case_run 有哪些
+        # 现场可看"能从一个地方回答（Spec §21.3）。
+        records.extend(trace_artifact_record(result.trace_path, run_dir, _now()))
+        result.artifacts.extend(records)
+        result.artifact_notes.extend(skipped)
 
     async def _finish_iteration(
         self, case: Case, phase: _AgentPhase, ctx: _CaseContext
