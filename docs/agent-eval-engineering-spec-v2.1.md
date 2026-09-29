@@ -368,6 +368,27 @@ fixture/数据集损坏           INVALID
 
 `UNDETERMINED` 不允许被实现静默映射为其他状态。
 
+`INVALID` 的触发面（外部接入修订，2026-09-29）不止"fixture/数据集损坏"一类。
+基线比对的价值前提是"两次 run 之间只有被测变更在变"，所以**任何"两侧不可比"
+的事实**都必须判 INVALID 并写明 `invalid_reason`，禁止静默产出回归数字：
+
+```text
+dataset_version 不一致        → INVALID（§1.2-3）
+agent_model 不一致            → INVALID（模型漂移：token/延迟/通过率全变，
+                                却会被归因为"回归"；RunMetadata.agent_model
+                                从此是受校验字段，值来自 health 阶段 SUT
+                                自报的实际生效模型，不是自由标签）
+token_usage_scope 口径不一致  → INVALID（只校输入侧的 run 与校全部用量的
+                                run，tokens.max_regression_percent 的差值里
+                                混着口径变化——"口径漂移被伪装成回归"与
+                                模型漂移同罪）
+```
+
+双侧均为空（旧 run 未记录该字段）不触发——无法证伪可比性时不拦。
+实现落点是 `regression/compare.py` 的守卫链（`dataset_version` / `benchmark_id`
+/ `suites_covered` 之后），`valid=False` 天然继承"Gate 对应规则落
+`undetermined`"的既有链路。
+
 ---
 
 # 4. Baseline Policy
@@ -439,7 +460,10 @@ resolve_baseline(benchmark_id, dataset_version):
 
 禁止：静默跨 dataset_version 比较；静默跨**套件组成**比较（两侧 `suites_covered`
 不全等时比较判 invalid，原因写入 report——均值定义在各自的 case 集合上，集合不同
-则数值不可比）；因缺 baseline 直接阻塞 PR。
+则数值不可比）；静默跨 **agent 模型**比较（`agent_model` 不一致 → invalid，见
+§3.3）；静默跨**用量口径**比较（`token_usage_scope` 不一致 → invalid：只观测到
+输入侧的 run，token 总量是被低估的，与全量观测的 run 作差混入口径变化）；因缺
+baseline 直接阻塞 PR。
 
 ## 4.4 baselines 表 Schema（扩展 PRD §80）
 
@@ -566,12 +590,19 @@ created_at
 1   Gate 已评估且 FAIL（Quality Gate failure）
 2   Gate 无法可靠评估（Eval 基础设施失败）：
     Agent endpoint 不可达、Judge provider 在重试后仍不可用、
-    基础设施错误导致 mandatory suite 未完整执行
+    基础设施错误导致 mandatory suite 未完整执行、
+    协议词汇违约（strict_protocol 开启时的未知事件类型，PRD §8）
 3   无效调用（不重试）：benchmark 不存在、dataset_version 缺失、
     Profile 依赖的 metric 不可用且无 fallback（见 §7.4）、配置非法
 ```
 
 partial run 归类：run 状态为 `partial` 且由基础设施原因导致 → exit 2；由 Case 失败导致的 `completed` → 正常走 Gate 评估。
+
+> **外部接入修订（2026-09-29）**：exit 2 增加一个触发面——**协议词汇违约**
+> （事件 `type` 不在 PRD §8 闭合词汇表内，且 strict_protocol 打开）。协议违约
+> 让观测面失效（方言事件进不了任何观测面，依赖它的规则全部失明），"Gate 无法
+> 可靠评估"正是同一语义；不写清则实现者会把它当 AGENT_FAILURE（exit 1）处理，
+> 冤枉被测方。默认档（warn）不触发本条——只计数并写 run 级 warning。
 
 生效时间：**exit code 约定 P0 即生效**（CLI 实现成本为零）；报告产物 P1。
 
@@ -1088,6 +1119,19 @@ expected:
 `command_calls` 三个并列观测面，Runner 逐轮收集并聚合到 session。
 安全规则的观测依赖是硬约束：新增规则时必须同时在三个面上确认来源。
 
+**外部接入方（转译 shim）承担同一条透传义务（外部接入修订，2026-09-29）**：
+原条款写给内部 runner，外部接入后**接入方才是新的漏传来源**。具体化三条：
+
+1. 平台方言必须**逐观测面拆分**：MCP 调用（无论在方言里叫什么）必须转成
+   `mcp.call` / `mcp.result`，不得折叠进 `tool.call`；独立执行的命令必须有
+   `command.*` 事件且带 `exit_code`。折叠 = 对应规则恒 pass（`forbidden_mcp`
+   曾因 runner 不传 `mcp_names` 恒 pass，接入方重演同型缺陷的代价相同）；
+2. 观测面缺失必须**事先声明**（PRD §7.1 `observation_surface`），不得等
+   规则恒 pass 后由人眼发现——声明驱动的 skipped（Spec §19.1.2）是框架
+   给出的安全网，但声明义务在接入侧；
+3. 接入方对"哪些观测面接了、哪些没接、为什么"交付一份清单（接入指南 D7 的
+   必填节），使覆盖缺口可评审。
+
 
 ## 12.2 不可覆盖性
 
@@ -1121,6 +1165,13 @@ data_exfiltration / secret_access / dangerous_commands / unsafe_db_write /
 malicious_mcp）各自需要至少一个 case。平台不阻止缺某一类，但**必须在
 `GET /api/security` 与 Security 页上把未覆盖的类别标为 `covered=false`**——
 覆盖缺口是可见负债，不做静默。
+
+**外部接入方同责（外部接入修订，2026-09-29）**：接入方对"该平台的观测面
+覆盖"负同样的可见性义务——哪些 PRD §8 观测面该平台提供、哪些结构性缺失
+（如 provider 重试不上协议流 → `retry` 观测面不存在）、缺失项的处置
+（能力声明 → 依赖它的 metric 删 skipped，profile 是否显式排除），都必须
+登记在接入指南的观测面清单里。原条款"平台不阻止缺，但必须可见"的口径
+原样适用于接入方：静默缺观测面的接入，与静默缺攻击面 case 的套件是同一类负债。
 
 ---
 
@@ -1399,6 +1450,21 @@ PRD §44 列出 14 项。**只实现能写清算式的**，其余明确记为未
 Memory 的期望（"该召回第几段记忆"）无法表达成同一个 metric 的参数，它需要新的
 case 级字段与新的观测面，那是 `assertion-extensions` 的任务。
 
+### 17.3.1 外部接入侧的观测缺口登记（外部接入修订，2026-09-29）
+
+上表登记的是**内部** evaluator 的缺口。外部平台接入后出现第三类：**该平台
+结构性不提供的观测面**。接入时必须在此登记（外部平台的首份登记由接入指南
+承载，见 `docs/external-agent-integration-guide.md`）：
+
+| 观测面 | 该平台实况 | 处置 |
+| --- | --- | --- |
+| `retry` 事件 | provider 重试只写日志，不上协议流 | 能力声明 `false` → `harness.retry` 判 skipped（§19.1.2） |
+| `context.compaction.*` 事件 | 只有压缩释放量一个数字，无起止事件 | 能力声明 `false` → `harness.context_compaction` 判 skipped |
+| 用量 output 侧 | 流上用量只有输入侧 | 口径记 `partial`（§4.3），`max_tokens` 判 skipped，token 回归阈值只校输入侧 |
+
+登记格式与内部缺口一致：缺什么、为什么、处置是什么。恒 pass 的占位比缺失
+更危险——这条对内部 evaluator 与外部接入方一视同仁。
+
 ## 17.4 MCPPermission 与 security.forbidden_mcp 的分工
 
 两者都看 MCP 调用名，但方向相反，不可互相替代：
@@ -1547,6 +1613,36 @@ skipped 不阻塞、不计入通过率分母，于是它既不美化也不丑化
 "该键已实现、但本次执行的观测面缺失"时抛出；**声明形状非法**走的是
 `UnsupportedAssertionError`（判 `error`），两者不可混用——前者要用例作者去改
 fixture/协议，后者要用例作者去改用例，下一步动作完全不同。
+
+### 19.1.2 三结局是所有 metric 的通则，不止扩展断言（外部接入修订，2026-09-29）
+
+外部平台接入（harness-bench 变更计划 A2/A3）把三结局从"扩展断言键的规则"
+升级为**所有 metric 的通则**——`harness.*` 插件与 `native.performance` 同样适用。
+因为恒 pass 假绿在两侧各有实例，病灶相同：
+
+- `harness.retry`：SUT 的 provider 重试只写日志、从不发 `retry` 事件时，
+  `0 <= max_retries` 恒 pass——"没有重试"与"根本看不到重试"在报告上同形；
+- `native.performance` 的 `max_tokens`：用量缺失曾坍缩为 0，`0 > limit` 恒假 →
+  恒 pass——与 `max_cost` 无定价判 skipped 是同一条规则，实现必须同向。
+
+落点（与扩展键不同，机制面有两段）：
+
+```text
+声明侧    SUT 经 health 上报观测面能力表（PRD §7.1 observation_surface，
+          事件名 → bool），留痕进 RunMetadata.metric_capability_snapshot
+          （键加 event: 前缀，与 probe() 的 metric id 键空间区分）
+判定侧    能力表进 EvaluationContext；插件以 required_events 声明自己依赖的
+          观测面，声明项在表中为 False 时由 run_plugin 统一判 skipped
+          （metadata.skipped_reason = "observation_unavailable"）。
+          降级判定不走 resolve_metric——它对"能力为假"的既有语义是
+          fallback 或 exit 3（§7.4），承接不了 skipped
+数据侧    依赖的用量分量未观测时，对应约束判 skipped（native.
+          ObservationUnavailable），禁止坍缩为 0 后参与比较
+```
+
+两条反模式被显式禁止：从"事件没出现"反推"观测不到"（0 次与"从不发"同形，
+能力必须由接入侧**事先声明**）；靠"删掉 profile 条目"代替能力声明
+（删了之后报告分不清"本来就不打算测"与"忘了配"）。
 
 ## 19.2 `database_state`：判定 fixture 库的终态
 

@@ -676,6 +676,14 @@ README 快速开始仍只有 `fake://` 与 mock server（D10）。
 这不是结论失效 —— D 类**本来就是待办清单**，未落地是它的预期状态；
 列出是为了让评审能看到"条款待评审"与"条款已被接受并落地"是两件事。
 
+**落地记录（2026-09-29，同日实施）**：上段快照之后，harness-bench 侧已按本文
+完成一轮实施——A1–A4、E1–E5 的框架侧机制、D1–D10/D13–D16 的条款全部落地
+（472 pytest 全绿；D11/D12 仍属 ai-chatbot 仓待办；B/C/第 0 步冒烟仍在接入侧）。
+实施与本文的一处差异：E1 的升级开关同时落在 CLI `--strict-protocol` 与
+profile 的 `strict_protocol` 字段（nightly/strict 档已开），与 E1 修订的
+"默认 warn + 收尾档 strict"一致。逐项状态见 `.trellis/tasks/ROADMAP.md`
+的"外部 Agent 平台接入"节。
+
 ---
 
 ## 5. E 类：边界强制机制（把约定升级为机制）

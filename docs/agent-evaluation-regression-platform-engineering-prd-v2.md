@@ -136,6 +136,10 @@ Regression Dataset
 - 大规模 Human Annotation Platform
 - 强依赖 ACP
 - 自研 LLM Judge 框架替代 DeepEval
+- **代管被测平台的容器化与数据播种**（外部接入修订，2026-09-29）：平台提供
+  fixture workdir 透传与清理（§7.2 的 `metadata.workdir`），不为外部 SUT 构建
+  隔离环境、不重置其数据库、不管理其部署形态。被测方的基础设施准备是接入方
+  （转译 shim / 运维）的义务——边界不说清会变成无限责任。
 
 ---
 
@@ -279,6 +283,29 @@ class AgentAdapter(ABC):
         ...
 ```
 
+### 6.2.1 Adapter 的四项义务（外部接入修订，2026-09-29）
+
+接口只有四个方法，但**每个 adapter 实现都隐含承担四项协议义务**。把它们写明，
+否则会被当成"实现细节"各行其是——而它们是"框架保持通用"的唯一保障：
+
+1. **能力声明**：SUT 支持哪些观测面（PRD §8 事件），必须在 `health_check` 阶段
+   整份上报（`HealthStatus.observation_surface`，事件名 → bool）。能力是 run 级
+   事实——放 `create_session` 意味着每个 case 各报一次、会话失败的 case 干脆
+   没有声明。声明表是外部接入侧的义务，框架**不得**从"事件没出现"反推
+   "观测不到"（两者在数据上同形）。
+2. **事件归一化**：平台方言必须在接入侧转译成 §8 的固定词汇，不得透传。
+   未在词汇表内的事件类型按 §8 的校验后果处置（默认 run 级 warning，
+   strict 档 exit 2）。
+3. **环境回执**：收到 `create_session` 的 `metadata.workdir` 后，SUT 必须
+   探测其可达性并经**响应侧字段**（`workdir_accessible`）回执。回执缺失按
+   "未知"处理并记 warning——不得默认视为可达：SUT 拿到访问不了的路径会静默
+   退化为"环境轴不存在"，那是最难排查的假信号。注意回执只能走响应体：
+   `AgentSession.metadata` 是请求回显，SUT 写不进去。
+4. **用量口径上报**：SUT 必须让框架知道"哪些用量分量被观测到了"
+   （`RunMetadata.token_usage_scope`：full / partial / 未观测）。单侧观测的
+   run 与全量观测的 run 之间，token 类数值不可比——口径不明的基线会被
+   模型漂移同类的"口径漂移"静默污染（Spec §4.3）。
+
 ## 6.3 未来 Adapter
 
 ```text
@@ -289,6 +316,20 @@ StdioAgentAdapter
 PythonAgentAdapter
 RemoteAgentAdapter
 ```
+
+**外部自研平台接入是已定型形态（外部接入修订，2026-09-29）**：上列 6 个名字
+是未来工作，不代表"外部平台必须先等其中一个实现"。外部自研平台（自有 HTTP
+服务、事件流与本平台 §8 词汇不同构）的定型接入方式是：
+
+```text
+HTTP(S) 直连 + 接入侧转译 shim
+```
+
+shim 是**测试侧组件**：对上实现本平台的 `/health`、`/api/agent/sessions`、
+`/run`、`/cancel` 四端点契约，对下调用被测平台的原生 API，并把平台方言
+归一化成 §8 词汇。它不进被测平台的生产代码路径、不进本框架——每个异构 SUT
+各有一份 shim，这份成本是真实的，不应伪装成零。指南见
+`docs/external-agent-integration-guide.md`。
 
 ---
 
@@ -306,6 +347,28 @@ GET /health
 }
 ```
 
+扩展字段（外部接入修订，2026-09-29；均**可选**，缺省按"未声明"处理）：
+
+```json
+{
+  "status": "ok",
+  "observation_surface": {
+    "retry": false,
+    "tool.call": true,
+    "context.compaction.started": false
+  },
+  "agent_model": "sut-effective-model-id"
+}
+```
+
+- `observation_surface`：观测面能力表（PRD §8 事件名 → bool）。`false` = 该事件
+  本平台**从不发出**，依赖它的 metric 一律判 skipped（`observation_unavailable`），
+  绝不拿"0 次观测"当"满足"。键不在表内 = 未声明 = 框架按"具备"处理。
+  这是 run 级事实，必须在 health 阶段整份上报（见 §6.2.1 义务 1）。
+- `agent_model`：SUT 自报的**实际生效**模型标识。它权威于 CLI `--model` 标签，
+  落入 `RunMetadata.agent_model` 并参与基线守卫：两侧不一致的比较判 INVALID
+  （Spec §4.3）——模型漂移不得被静默归因为"回归"。
+
 ## 7.2 Create Session
 
 ```http
@@ -321,6 +384,31 @@ POST /api/agent/sessions
   }
 }
 ```
+
+**metadata 允许携带扩展键**（外部接入修订，2026-09-29）。四个平台键之外，
+接入方自定义的键（如 `workdir`）原样透传，框架不解释其语义：
+
+- `metadata.workdir`（扩展键语义约定）：本 case 的 fixture 沙箱目录。SUT 应把
+  它当作本次会话的工作区根——文件操作、产物输出都应落在这个目录内，且
+  **不得**越出该目录（红队用例的安全性依赖这一点：agent 拿到的路径若不是
+  一次性沙箱，`rm` 打中的就是真实工程目录）。workdir 属**会话级**而非轮级，
+  每个 iteration 独立。
+
+**响应体**：
+
+```json
+{
+  "session_id": "sess_xxx",
+  "workdir_accessible": true
+}
+```
+
+- `session_id`：必填。
+- `workdir_accessible`（可选回执，外部接入修订）：SUT 对 `metadata.workdir`
+  可达/可写性的探测回执。`false` → 框架按 `InfraError`（exit 2）终止该 case
+  ——把"配置错"（如容器路径与宿主不共享）与"agent 失败"分开；缺省/非布尔
+  → 按"未知"处理并记 run 级 warning，**不得默认视为可达**。回执走**响应体**：
+  `AgentSession.metadata` 是请求载荷的回显，SUT 无法写它。
 
 ## 7.3 Run
 
@@ -375,6 +463,27 @@ retry
 interrupt
 cancel
 ```
+
+**本词汇表是闭合的（外部接入修订，2026-09-29）**：它是框架消费侧的固定契约，
+新增事件类型必须走**框架升级**（在此清单登记），不得由接入方自行扩展——
+接入方的平台方言必须在转译层归一化为上述词汇（§6.2.1 义务 2）。把平台私有
+事件名塞进事件流会让依赖对应观测面的规则静默失效（例如把 `mcp.call` 写成
+`mcp_call`，`mcp` span 恒空，MCP 越权规则恒 pass——一个不会自己暴露的缺陷）。
+
+校验后果（事件 `type` 不在清单内）：
+
+```text
+默认：产出 run 级计数（RunMetadata.protocol_violations：类型 → 次数），
+      并写入 aggregate.warnings——可见但不阻断，不改变任何 verdict 与 exit code
+升级：strict_protocol 打开时（CLI --strict-protocol 或 profile 声明），
+      判 InfraError → exit 2
+```
+
+默认 warn 而非 strict 的理由：词汇表会演进（`context.compaction.*` 就是本项目
+自己新加的），默认 strict 会把"框架该升级词汇表"错判成"接入方违约"；升级开关
+交给愿意承担红线的团队（收尾档 nightly/strict 常开，PR 档保持 warn）。
+框架实现上 `type` 保持 `str` 而非 `Literal`，`EVENT_TYPES` 是**声明式清单**，
+新增事件类型 = 改这一处，路径必须保留。
 
 事件最小结构：
 

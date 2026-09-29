@@ -24,6 +24,25 @@ uv run python -m agent_eval.dev.mock_server --port 8802   # 内置 mock agent
 uv run agent-eval benchmark run smoke
 ```
 
+### 评价一个外部 Agent 平台
+
+外部自研平台的接入形态是 **HTTP 直连 + 接入侧转译 shim**（平台方言在 shim 里
+归一化为本平台的 PRD §8 事件词汇）。最小路径（详细契约与清单见
+[docs/external-agent-integration-guide.md](docs/external-agent-integration-guide.md)）：
+
+```bash
+# 1. 起 shim：对上实现 /health、/api/agent/sessions、/run、/cancel 四端点，
+#    在 /health 里上报观测面能力表（observation_surface）与实际生效模型
+# 2. 配 profile：SUT 不提供的观测面（如 retry）经能力声明自动 skipped，
+#    也可在 profile 里显式排除对应 metric
+# 3. 跑 benchmark：
+export AGENT_EVAL_AGENT_ENDPOINT=http://127.0.0.1:<shim-port>
+uv run agent-eval benchmark run <benchmark> --no-judge      # 先跑确定性指标
+#    开发期建议加 --strict-protocol，把 shim 的事件笔误在第一次就拦下
+# 4. 读报告：.agent-eval/runs/<run_id>/report.json + report.html
+#    （warnings 里不应有协议违规；被观测面跳过的 metric 会标 skipped 而非 pass）
+```
+
 ## 开发
 
 ```bash

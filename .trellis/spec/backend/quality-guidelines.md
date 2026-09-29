@@ -254,6 +254,43 @@ Gate。守住五条：
 uv 的通用 PEP 517 桥接子进程在本机损坏（`stream did not contain valid UTF-8`）。
 pyproject 已配置 `uv_build` 原生构建后端绕开。**不要**把 build-backend 改回 hatchling/setuptools。
 
+**个别源文件的读取器分叉（2026-09-29 发现）**：`api/routers/runs.py`、
+`evaluators/harness.py`、`reports/aggregate.py` 三个文件在部分读取器（ruff 直读、
+Read 工具、certutil）眼里是坏字节（`E902 stream did not contain valid UTF-8` /
+"Unsupported or binary text encoding"），而 python / git / cat 读到的字节完好
+（与 HEAD 全同、UTF-8、LF、经 stdin 喂给 ruff 全绿）。certutil 两次哈希不一致，
+说明是**读取期**非稳定损坏（磁盘/过滤驱动层），不是内容问题，`git checkout`
+与删除重建都修不掉。处置：这类文件的内容校验走
+`cat <file> | ruff check --stdin-filename <name> -`（cat 阵营读到的字节可信）；
+`ruff check .` 的 E902 若只落在内容已验证的文件上，不视为回归。若范围扩大，
+先跑 `chkdsk` 再怀疑代码。
+
+## 外部接入约束（2026-09-29，change-plan A2/A3/B2 的固化）
+
+外部 SUT 经转译 shim 接入后，"观测面透传"的漏传来源从内部 runner 变成了接入方。
+三条硬约束把评审结论固化成条款：
+
+1. **外部映射必须逐观测面拆分**。MCP 调用必须转成 `mcp.call` / `mcp.result`，
+   独立命令必须有 `command.*` 事件且带 `exit_code`——把 MCP/command 折叠进
+   `tool.*`，`forbidden_mcp` / `forbidden_command` / `harness.mcp_permission`
+   全部恒 pass（`security/evaluator.py` 要求三路逐条透传的注释里写着教训）。
+2. **未被 SUT 观测能力覆盖的 metric 必须显式处置**：能力经 health 上报
+   （`observation_surface`，事件名 → bool）并在 `metric_capability_snapshot`
+   以 `event:` 前缀留痕；依赖缺失观测面的插件以 `required_events` 声明、由
+   `run_plugin` 判 skipped（`observation_unavailable`）。**不得静默 pass，
+   也不得靠删 profile 条目掩盖**——删了之后报告分不清"不打算测"与"忘了配"。
+3. **"外部数据缺失"的判定必须与 `max_cost` 同向**：依赖的分量未观测即
+   skipped（`ObservationUnavailable`），禁止坍缩为 0 后参与比较。`tokens: int`
+   缺省 0 让 `max_tokens` 的 `0 > limit` 恒假 → 恒 pass，与 `cost: float | None`
+   的不对称不是设计选择，是遗漏（修复见 `native.py::_check_constraints` 的
+   分量级观测标志）。同向的推论：口径（哪侧被观测）要进 `RunMetadata` 并参与
+   基线守卫，否则口径漂移会被伪装成回归。
+
+框架通用性的机制保障（change-plan E 类）落在 `tests/test_framework_boundary.py`：
+专有方言 deny-list 扫 `src/agent_eval/`、`SessionContext.extra` 保持不透明。
+往框架里加平台相关分支/字段/事件名之前先过那条测试与它的判断标准：
+**这个标识在换一个 SUT 之后还成立吗？**
+
 ## 示例数据集约定
 
 `evals/` 下的 smoke suite 必须对 fake:// 与 mock server 保持确定性 PASS（作为回归基线）；

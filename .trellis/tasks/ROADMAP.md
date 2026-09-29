@@ -110,6 +110,27 @@ GET /api/cases        100ms     53ms
 
 ---
 
+## 外部 Agent 平台接入（2026-09-29 登记，change-plan `docs/external-agent-integration-change-plan.md`）
+
+需求源是评审已过的变更计划（四轮校准）。本次接入把框架侧缺陷一次性补齐，
+**框架侧全部落地**（观测面能力协商、性能三结局、词汇校验、边界机制、
+workdir 透传、基线守卫、文档条款）；接入侧两块不在本仓：
+
+| 切片 | 内容 | 状态 |
+| --- | --- | --- |
+| A2+E2 观测面能力 | health 上报 `observation_surface`（事件名 → bool）→ `metric_capability_snapshot`（`event:` 前缀留痕）→ 插件 `required_events` 声明、`run_plugin` 判 skipped（不走 `resolve_metric`——它给的是 fallback/exit 3）；runner 阶段顺序改为 health → `_resolve_profiles` | ✅ 本轮 |
+| A3 性能三结局 | `EvalScope` 分量级观测标志（`input_tokens`/`output_tokens: int \| None`）；`max_tokens` 在依赖分量未观测时判 skipped（与 `max_cost` 同向，禁坍缩为 0）；口径进 `RunMetadata.token_usage_scope`（full/partial/None） | ✅ 本轮 |
+| A4 模型钉住 | health 自报模型回填 `agent_model`（权威于 CLI 标签）；`compare.py` 两条守卫：`agent_model` 不一致、`token_usage_scope` 不一致 → `INVALID` + `invalid_reason`（Spec §3.3/§4.3） | ✅ 本轮 |
+| E1 词汇校验 | 消费 `EVENT_TYPES`：未知事件类型 → `RunMetadata.protocol_violations` → `aggregate.warnings`（默认 warn）；`--strict-protocol` / profile `strict_protocol`（nightly/strict 已开）升级 exit 2；不复用 Gate 的 `strict` 字段，不改 `type` 为 Literal | ✅ 本轮 |
+| E3/E4 边界机制 | `tests/test_framework_boundary.py`：专有方言 deny-list 扫 `src/agent_eval/`（基线零命中，防以后变脏）；`SessionContext.extra` 不透明冻结 | ✅ 本轮 |
+| A1 workdir 透传 | `_open_session` 经 `SessionContext.extra["workdir"]` 把 fixture 沙箱交给被测方（逐迭代独立）；http_adapter 响应体解析 `workdir_accessible` 回执：False → InfraError（exit 2），缺失 → run 级 warning（未知 ≠ 可达）；E4：extra 不透明，`project_dir` 类具名字段被边界测试禁止 | ✅ 本轮 |
+| D 文档条款 | PRD §3.2/§6.2.1/§6.3/§7.1/§7.2/§8、Spec §3.3/§4.3/§6.1/§12.1.1/§12.4/§17.3.1/§19.1.2、quality-guidelines 外部接入三条、README 外部平台最小路径、`docs/external-agent-integration-guide.md`（新增） | ✅ 本轮 |
+| B 转译 shim | ai-chatbot 侧测试组件（四端点契约 + §8 词汇归一化 + 审批策略 + 观测面声明），**最大单项工作量，在另一个仓** | ⬜ 接入侧 |
+| C 专用评测集 | ai-chatbot 工具面/fixture 形态的 dataset + profile/gate/suite，在 ai-chatbot 仓（`evals/` 数据随本仓走，具体用例依赖 shim 先行） | ⬜ 接入侧 |
+| 第 0 步冒烟 | 直连 `POST /api/chat` 的运行时行为验证（chunk 时序 / 402 时点 / 审批收尾 / `id===toolCallId` / usage 时机），shim 写码前的第一优先动作 | ⬜ 接入侧 |
+
+---
+
 ## 优先级视图
 
 | 任务 | 优先级 | 性质 | 阻塞了什么 |
