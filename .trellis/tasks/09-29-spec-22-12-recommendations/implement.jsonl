@@ -1,0 +1,5 @@
+{"file": "docs/agent-eval-engineering-spec-v2.1.md", "reason": "§22.12 两项建议项的原文与推迟理由（本次要关账的两条）；§13 Web Platform 只读契约（定义层直接读 evals/ 文件树、不引 TTL 缓存的依据）；§6.3 junit 与 gate.json aggregate 同源；§19.1.1 skipped 是独立结局"}
+{"file": "docs/agent-evaluation-regression-platform-engineering-prd-v2.md", "reason": "§19/§62 Suite 与安全套件的选择口径（list_suites 按 tag 统计，属于定义层事实）；§103 case 量级（缓存触发条件的依据）"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门槛（pytest 全绿 / ruff 干净 / 前端 typecheck）、测试不得靠 mock 抹平类型约束、本机构建怪癖（必须用 .venv 的 python）"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "src/agent_eval 分层：loading/ 是定义层装载、security/ 是判定、api/routers 是只读暴露——本次改动跨这三层，要按既有分层落点"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "失败语义三分法与 exit code 0–3；warning 不属于任何失败语义，加 warning 不得改动 exit code"}

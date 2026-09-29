@@ -87,6 +87,29 @@ Spec（V2.2）的验收条款，不是"感觉还差点"。
 
 ---
 
+## §22.12 两项建议项收口（2026-09-29）
+
+Spec §22.12 末尾记的两处"未修建议项"一起收掉。口径写在 **Spec §25**。
+
+| 项 | 处置 | 关键裁决 |
+| --- | --- | --- |
+| `/api/suites` 每次请求全量装载 dataset | ✅ 收口 | 两项改动：`_read_yaml` 换 libyaml（`CSafeLoader`，缺失回退 `SafeLoader`，语义与 `safe_load` 逐字相同，有逐文件等价断言 + `!!python/object` 仍报错的护栏）；同一请求里同一份事实只装载一次（`GET /api/suites` 曾把每个 dataset 装两遍——suites 计数一遍、安全套件 tag 计数又一遍）。**不引缓存**：Spec §13 的契约是"定义层直接读 evals/ 文件树"，TTL 会让刚改完的定义在页面不更新；真要加，键必须是内容哈希或 `(mtime,size)` |
+| junit `skipped` 只有单测覆盖 | ✅ 收口 | 推迟理由"补 fixture 要动套件组成"**实测不成立**：临时 evals 树即可构造（仓库既有范式，示例数据集组成零改动）。两条端到端路径（声明侧全 skipped / `max_cost` 无定价 → `ObservationUnavailable`）都用真实 `Runner` 跑并断言落盘的 `junit.xml`。**顺带暴露**：全 skipped 的 run 与全量验证通过同形（verdict 都是 pass）。处置取保守选项——加 run 级 `UNJUDGED` warning 指名道姓列 case，**不改 gate 规则 / exit code / verdict**（那是判定口径变更，独立增量拍板）。warning 与 junit 计数共用 `case_status_for_junit`，同源 |
+
+实测（示例数据集 40 条 case，中位数）：
+
+```text
+                       前        后
+load_dataset          ~62ms     ~24ms
+GET /api/suites       249ms     73ms    （解析 88 次 → 47 次，重复装载 41 次 → 0）
+GET /api/cases        100ms     53ms
+```
+
+两条新护栏都验证过"可红"：摘掉 warning 构造逻辑 → `assert 0 == 1`；
+把 `list_suites` 换回自带装载的旧行为 → 护栏立刻报出重复的 `database-core`。
+
+---
+
 ## 优先级视图
 
 | 任务 | 优先级 | 性质 | 阻塞了什么 |

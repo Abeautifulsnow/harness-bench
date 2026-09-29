@@ -1,10 +1,13 @@
 # Agent Eval Platform Engineering Specification V2.1
 
-> 文档版本：V2.3（Engineering Specification，增补型；P0 缺口回填与扩展面落地，
+> 文档版本：V2.6（Engineering Specification，增补型；P0 缺口回填与扩展面落地，
 > V2.2 增补 §11 评测词汇表增补 / §12 Security 挂载点 / §13 Web Platform 只读契约，
 > Changelog 见 §14；V2.3 增补 §15 必跑套件校验 / §16 安全用例集口径 /
 > §17 Evaluator Plugin SDK / §18 用例集覆盖与 case 级 metric 参数 /
 > §19 断言扩展的落地与处置 / §20 语义级 Trace Diff / §21 Case 级产物；
+> V2.3.1 为 §22 审计修复回填；V2.4 增补 §23 Challenge Set 与 Nightly Profile；
+> V2.5 增补 §24 run 级 diff 噪声下限 / 报告产物指针 / judge 跳过策略；
+> V2.6 增补 §25 定义层解析开销与 skipped 的 run 级可见性；
 > V2.1 的复核修订见 §10.1）
 > 上游文档：`agent-evaluation-regression-platform-engineering-prd-v2.md`（下称 PRD V2.0，保持有效，不因本文档作废）
 > 状态：Engineering Ready
@@ -2161,6 +2164,9 @@ dataset（case 数上千时再议缓存）；junit `skipped` 分支仍只有单�
 fixture 能让一条 case 的全部 metric 都 skipped——补 fixture 要动套件组成，不应
 顺手做。
 
+**两项已于 2026-09-29 收口，见 §25。** 其中第二条的推迟理由（"补 fixture 要动套件
+组成"）经实测不成立：临时 evals 树就能构造，不需要碰示例数据集。
+
 ---
 
 # 23. Challenge Set 与 Nightly Profile（V2.4，缺口回填）
@@ -2288,5 +2294,71 @@ PRD §92 执行顺序 Native → 明显 Hard Failure → **按策略跳过部分
 
 `skipped` 是独立结局（§19.1.1）：跳过必须留痕为 skipped 的 metric result，
 静默不产出会让"这条 judge 没跑"看起来像"本来就没有 judge"。
+
+---
+
+# 25. 定义层解析开销与 skipped 的 run 级可见性（V2.6，§22.12 建议项收口）
+
+§22.12 记的两项"未修建议项"，本轮一起收口。第一条的量测结论与当初的记载有一处
+出入，先记事实再定口径。
+
+## 25.1 定义层解析开销：换解析器 + 去重复装载，不引缓存
+
+实测（本机，示例数据集 40 条 case）：
+
+```text
+                             收口前        收口后
+load_dataset                 ~62ms        ~24ms
+GET /api/suites                88 次解析     47 次解析
+（其中重复装载同一个 dataset）   41 次         0 次
+```
+
+两项改动：
+
+1. **`_read_yaml` 换 libyaml**（`CSafeLoader`，缺失时回退 `SafeLoader`）。
+   `load_dataset` 的开销 82% 在 PyYAML 的**纯 Python** 解析器上（40ms/62ms），
+   而 C 解析器只要 4ms。语义与 `safe_load` 逐字相同——它的实现就是同一个 loader
+   类的实例化 + `get_single_data` + `dispose`。**换的是实现，不是语义**，这条有
+   测试钉住：逐文件比对 `_parse_yaml` 与 `yaml.safe_load` 的结果，另一条断言
+   `!!python/object` 仍然报错（safe 语义是契约，不靠读代码确认）。
+2. **同一请求里同一份事实只装载一次**。`GET /api/suites` 曾把每个 dataset 装两遍：
+   suites/*.yaml 的计数一遍，安全套件的 tag 计数又一遍。定义层因此抽出
+   `dataset_refs` / `load_all_datasets` / `count_suite_cases` / `classify_cases`，
+   把"读一遍"与"怎么用"分开——策略留在调用方（`/api/suites` 遇到损坏的 dataset
+   报 400，套件清单则跳过它、把其余部分显示出来）。护栏测试断言**同一 ref 不被
+   装载两次**（钉住原因），而不是断言耗时可接受（钉住结果）。
+
+**不引缓存的理由不是"快够了"，是契约**。Spec §13 写的是"定义层是事实：直接读
+`evals/` 文件树"——TTL 缓存会让刚改完的 case 定义在页面上不更新，把事实层降级成
+近似层。真要加，键必须是内容哈希（`load_dataset` 本来就在算 sha256）或
+`(mtime_ns, size)`，**不是 TTL**；而那要等触发条件真的成立，不在本轮。
+
+## 25.2 junit `skipped` 的真实覆盖，以及"零验证的 run"可见性
+
+§22.12 记的推迟理由是"补 fixture 要动套件组成"——**实测不成立**。在临时 `evals/`
+树里新写 dataset / benchmark / suite / profile 即可（仓库既有范式：
+`test_harness_evaluators`、`test_case_coverage`），示例数据集的套件组成一个都没动。
+
+两条端到端可达路径，都用真实 `Runner` 跑、断言**落盘的 `junit.xml`**：
+
+```text
+1. 声明侧全 skipped：case 不声明任何 expected + profile 只挂
+   "参数未声明即 skipped" 的插件（harness.skill_load / harness.mcp_permission）
+2. 观测面不可用：case 只声明 constraints.max_cost 且无 pricing.yaml
+   → native.performance 走 ObservationUnavailable（PRD §59 的 null ≠ 0）
+```
+
+**顺带暴露并处置的问题**：全 skipped 的 run 在报告与门禁上与"全量验证通过"同形——
+`verdict` 都是 `pass`，warnings 里只有 baseline 那条。这正是 §19.1.1 与 §22 整轮在
+修的假绿类别，只剩这一处。
+
+处置取**保守选项**：加 run 级 `UNJUDGED` warning，指名道姓列出没被真正判过的
+case；**不改 gate 规则、不改 exit code、不改 verdict**。判据是分工——本轮的任务是
+"补覆盖 + 让现状可见"，而"零验证是否该让门禁变红"是判定口径变更（会改变既有 CI
+的绿/红分布），应由独立增量拍板。warning 与 junit 的 `skipped` 计数共用
+`case_status_for_junit`，**同源**，不各写一份。
+
+可见性测试同样证明可红：摘掉 warning 的构造逻辑后，断言 `len(unjudged) == 1`
+立即失败（实测 `assert 0 == 1`）。
 
 ---

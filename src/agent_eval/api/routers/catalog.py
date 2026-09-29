@@ -16,6 +16,8 @@ from agent_eval.api.deps import WorkspaceDep
 from agent_eval.api.schemas import BenchmarkRow, CaseRow, SuiteRow
 from agent_eval.errors import AgentEvalError
 from agent_eval.loading.loader import (
+    dataset_refs,
+    load_all_datasets,
     load_benchmark,
     load_dataset,
     load_suites,
@@ -29,13 +31,6 @@ from agent_eval.models.run import RunMetadata
 router = APIRouter(tags=["catalog"])
 
 CaseQuery = Annotated[str | None, Query(description="dataset 引用：<id> 或 <id>@<version>")]
-
-
-def _dataset_refs(root: Path) -> list[str]:
-    datasets_dir = root / "datasets"
-    if not datasets_dir.is_dir():
-        return []
-    return sorted(d.name for d in datasets_dir.iterdir() if (d / "dataset.yaml").is_file())
 
 
 def _load_all_cases(root: Path, ref: str) -> tuple[DatasetInfo, list[Case]]:
@@ -151,7 +146,7 @@ def benchmark_cases(name: str, workspace: WorkspaceDep) -> list[CaseRow]:
 @router.get("/datasets", response_model=list[DatasetInfo], summary="PRD §13 Dataset 列表")
 def list_datasets(workspace: WorkspaceDep) -> list[DatasetInfo]:
     out: list[DatasetInfo] = []
-    for ref in _dataset_refs(workspace.evals_root):
+    for ref in dataset_refs(workspace.evals_root):
         info, _ = _load_all_cases(workspace.evals_root, ref)
         out.append(info)
     return out
@@ -174,7 +169,7 @@ def list_cases(
     q: Annotated[str | None, Query(description="id/name/description 子串匹配")] = None,
     limit: Annotated[int, Query(ge=1, le=2000)] = 500,
 ) -> list[CaseRow]:
-    refs = [dataset] if dataset else _dataset_refs(workspace.evals_root)
+    refs = [dataset] if dataset else dataset_refs(workspace.evals_root)
     rows: list[CaseRow] = []
     for ref in refs:
         if not ref:
@@ -198,7 +193,7 @@ def get_case(
     workspace: WorkspaceDep,
     dataset: CaseQuery = None,
 ) -> Case:
-    refs = [dataset] if dataset else _dataset_refs(workspace.evals_root)
+    refs = [dataset] if dataset else dataset_refs(workspace.evals_root)
     for ref in refs:
         if not ref:
             continue
@@ -254,10 +249,14 @@ def list_suite_rows(workspace: WorkspaceDep) -> list[SuiteRow]:
         suites: dict[str, SuiteDef] = load_suites(root)
         # 计数必须用真实选择结果：套件通常只声明 tags（case_ids 为空），
         # 按 len(case_ids) 计会让每个套件都显示 0 个 case，与实际跑了几条矛盾。
-        all_cases: list[Case] = []
-        for ref in _dataset_refs(root):
-            _, cases = load_dataset(root, ref)
-            all_cases.extend(cases)
+        #
+        # 定义树整树只装一次：suites/*.yaml 的计数与下方安全套件的 tag 计数读的是
+        # 同一份 case，分头装载会让同一请求把每个 dataset 解析两遍（Spec §22.12）。
+        cases_by_ref, errors = load_all_datasets(root)
+        if errors:
+            ref, exc = next(iter(errors.items()))
+            raise HTTPException(status_code=400, detail=f"{ref}: {exc.message}")
+        all_cases = [case for cases in cases_by_ref.values() for case in cases]
         counts = {name: len(select_suite_cases(suite, all_cases)) for name, suite in suites.items()}
     except AgentEvalError as exc:
         raise HTTPException(status_code=400, detail=exc.message) from exc
@@ -273,7 +272,7 @@ def list_suite_rows(workspace: WorkspaceDep) -> list[SuiteRow]:
     # 安全/红队套件按 tag 选择 case，不在 suites/*.yaml 里，单独成行
     from agent_eval.security.suites import list_suites
 
-    for summary in list_suites(root):
+    for summary in list_suites(root, cases_by_ref=cases_by_ref):
         out.append(
             SuiteRow(
                 name=summary.name,

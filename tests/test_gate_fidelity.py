@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from agent_eval.errors import MetricUnavailableError
@@ -249,6 +251,163 @@ class TestJunitSkippedReachable:
         )
         aggregate = build_aggregate(self._meta(), [result])
         assert case_status_for_junit(aggregate.cases[0]) == "passed"
+
+
+class TestJunitSkippedEndToEnd:
+    """junit 的 ``skipped`` 必须是**真实 run 能走到**的分支，不只是单测里拼的对象。
+
+    此前这条分支只有上面那组手工构造的用例覆盖（Spec §22.12 记的"未修建议项"），
+    而"单测能构造"与"真实链路能产出"是两件事：判 skipped 的 metric 需要在
+    Runner 里被真的产出、聚合、写进 junit.xml。这里跑真实 Runner，断言落盘的
+    文件内容。
+
+    构造方式与仓库既有范式一致（`test_harness_evaluators`、`test_case_coverage`）：
+    在临时 evals 树里新写 dataset / benchmark / suite / profile，**不动示例数据集
+    的套件组成**。
+    """
+
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def _tree(self, tmp_path: Path) -> tuple[Path, Path, Path]:
+        """临时 evals 树 + fixtures + data_root；返回 (evals_root, fixtures, data_root)。"""
+        import shutil
+
+        evals_root = tmp_path / "evals"
+        shutil.copytree(self.ROOT / "evals", evals_root)
+        fixtures = tmp_path / "fixtures"
+        shutil.copytree(self.ROOT / "fixtures", fixtures)
+        data_root = tmp_path / "data"
+        data_root.mkdir()
+        return evals_root, fixtures, data_root
+
+    def _write_benchmark(self, evals_root: Path, *, profile: str) -> None:
+        import yaml
+
+        (evals_root / "benchmarks" / "junit-skip.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "name": "junit-skip",
+                    "dataset": "junitskip@1.0.0",
+                    "suites": ["js"],
+                    "default_profile": profile,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (evals_root / "suites" / "js.yaml").write_text(
+            yaml.safe_dump({"name": "js", "tags": ["js"]}), encoding="utf-8"
+        )
+
+    def _write_dataset(self, evals_root: Path, *, expect: dict | None) -> None:
+        import yaml
+
+        ds = evals_root / "datasets" / "junitskip"
+        (ds / "cases").mkdir(parents=True)
+        (ds / "dataset.yaml").write_text("id: junitskip\nversion: 1.0.0\n", encoding="utf-8")
+        body: dict = {
+            "id": "js.unjudged",
+            "version": 1,
+            "name": "js.unjudged",
+            "tags": ["js"],
+            "input": {"type": "single_turn", "prompt": "ping"},
+            "execution": {"timeout": 15, "repeat": 1},
+        }
+        if expect is not None:
+            body["expected"] = expect
+        (ds / "cases" / "js.unjudged.yaml").write_text(yaml.safe_dump(body), encoding="utf-8")
+
+    async def _run(self, tmp_path: Path, *, profile_body: dict, expect: dict | None) -> Path:
+        """跑真实 Runner，返回 run 目录。"""
+        import yaml
+
+        from agent_eval.runner.runner import RunConfig, Runner
+
+        evals_root, fixtures, data_root = self._tree(tmp_path)
+        self._write_dataset(evals_root, expect=expect)
+        self._write_benchmark(evals_root, profile="unjudged")
+        (evals_root / "profiles" / "unjudged.yaml").write_text(
+            yaml.safe_dump({"name": "unjudged", **profile_body}), encoding="utf-8"
+        )
+        cfg = RunConfig(
+            evals_root=evals_root,
+            fixtures_root=fixtures,
+            data_root=data_root,
+            benchmark="junit-skip",
+            agent_endpoint="fake://",
+            gate="pr",
+            no_judge=True,
+        )
+        outcome = await Runner(cfg).run()
+        return data_root / "runs" / outcome.run_id
+
+    async def test_all_skipped_case_writes_skipped_to_junit(self, tmp_path: Path) -> None:
+        """路径一：case 不声明任何期望 + profile 只挂"参数未声明即 skipped"的插件。"""
+        import xml.etree.ElementTree as ET
+
+        run_dir = await self._run(
+            tmp_path,
+            profile_body={
+                "metrics": [
+                    {"id": "harness.skill_load", "blocking": False},
+                    {"id": "harness.mcp_permission", "blocking": False},
+                ]
+            },
+            expect=None,
+        )
+        xml = ET.parse(run_dir / "junit.xml").getroot()
+        assert xml.get("skipped") == "1", ET.tostring(xml, encoding="unicode")
+        testcase = xml.find("testcase")
+        assert testcase is not None
+        skipped = testcase.find("skipped")
+        assert skipped is not None, "全 skipped 的 case 必须渲染成 <skipped>，不能是 passed"
+
+    async def test_observation_unavailable_writes_skipped_to_junit(self, tmp_path: Path) -> None:
+        """路径二：只声明 ``max_cost`` 且无定价表 → ``ObservationUnavailable`` 判 skipped。
+
+        PRD §59 / Spec §19 的 `null ≠ 0`：拿不到成本时不能当 0 过闸。
+        """
+        import xml.etree.ElementTree as ET
+
+        run_dir = await self._run(
+            tmp_path,
+            profile_body={"metrics": [{"id": "harness.skill_load", "blocking": False}]},
+            expect={"constraints": {"max_cost": 0.01}},
+        )
+        xml = ET.parse(run_dir / "junit.xml").getroot()
+        assert xml.get("skipped") == "1", ET.tostring(xml, encoding="unicode")
+        assert xml.find("testcase/skipped") is not None
+
+    async def test_run_level_warning_names_unjudged_cases(self, tmp_path: Path) -> None:
+        """可见性：零验证的 run 必须在 warnings 里说清哪些 case 没被真判过。
+
+        当前口径下这类 run **仍然判 pass**（判定口径变更由独立增量决定，见 Spec
+        §22.12 的收口说明），所以 warnings 是 CI 上唯一的可见信号——它必须存在且
+        指名道姓，只报个数等于让读者自己去翻 junit。
+        """
+        import json
+        import xml.etree.ElementTree as ET
+
+        run_dir = await self._run(
+            tmp_path,
+            profile_body={
+                "metrics": [
+                    {"id": "harness.skill_load", "blocking": False},
+                    {"id": "harness.mcp_permission", "blocking": False},
+                ]
+            },
+            expect=None,
+        )
+        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+        unjudged = [w for w in report["warnings"] if w.startswith("UNJUDGED")]
+        assert len(unjudged) == 1, report["warnings"]
+        assert "js.unjudged" in unjudged[0]
+        # 口径未变：零验证的 run 仍判 pass，warning 只负责可见
+        assert report["verdict"] == "pass"
+
+        # warning 与 junit 的 skipped 计数同源
+        gate = json.loads((run_dir / "gate.json").read_text(encoding="utf-8"))
+        junit_skipped = int(ET.parse(run_dir / "junit.xml").getroot().get("skipped", "0"))
+        assert gate["aggregate"]["skipped"] == junit_skipped == 1
 
 
 class TestHardFailureCategoriesConsumed:

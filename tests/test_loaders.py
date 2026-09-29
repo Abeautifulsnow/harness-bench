@@ -100,3 +100,38 @@ def test_duplicate_case_id_rejected(tmp_path: Path) -> None:
 def test_single_turn_requires_prompt() -> None:
     with pytest.raises(Exception, match="prompt"):
         Case.model_validate({"id": "x", "version": 1, "name": "x", "input": {}})
+
+
+class TestDefinitionTreeParser:
+    """Spec §22.12：换解析器（libyaml）只换实现，不换语义。"""
+
+    def test_parser_matches_yaml_safe_load_on_every_definition_file(self) -> None:
+        """对整棵定义树逐文件比对：``_parse_yaml`` 必须与 ``yaml.safe_load`` 同结果。
+
+        这条断言不依赖本机有没有 libyaml——它钉住的正是"两者等价"这件事本身。
+        """
+        import yaml as yaml_mod
+
+        from agent_eval.loading.loader import _parse_yaml
+
+        files = sorted(EVALS.rglob("*.yaml"))
+        assert files, "定义树里应当有 YAML 文件"
+        for path in files:
+            with path.open("r", encoding="utf-8") as fh:
+                assert _parse_yaml(fh) == yaml_mod.safe_load(path.read_text(encoding="utf-8")), path
+
+    def test_definition_loader_refuses_python_object_tags(self, tmp_path: Path) -> None:
+        """safe 语义是契约：``!!python/object`` 必须报错，不能构造任意对象。
+
+        这条把"用的是 safe 解析器"变成可执行的断言，而不是靠读代码确认。
+        """
+        import yaml as yaml_mod
+
+        from agent_eval.loading.loader import _read_yaml
+
+        evil = tmp_path / "evil.yaml"
+        evil.write_text(
+            "payload: !!python/object/apply:os.system ['echo pwned']\n", encoding="utf-8"
+        )
+        with pytest.raises(yaml_mod.YAMLError):
+            _read_yaml(evil)

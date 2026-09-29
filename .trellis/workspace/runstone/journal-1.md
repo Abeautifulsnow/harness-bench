@@ -627,3 +627,127 @@ Spec 新增 **§24**（三缺口的判定口径）；ROADMAP「收尾批次」�
 ### Next Steps
 
 - 环境恢复后重跑 `ruff check .` 与 Mimosa 完整扫描
+
+
+## Session 10: §22.12 两项建议项收口——定义层解析开销与 junit skipped 覆盖
+
+**Date**: 2026-09-29
+**Task**: Spec §22.12 记的两处"未修建议项"一起收口
+**Branch**: `main`
+
+### Summary
+
+loader 换 libyaml + 去同一请求内重复装载；junit skipped 端到端覆盖；零验证 run 加 UNJUDGED warning
+
+### Main Changes
+
+### 1. 定义层解析开销（原记"case 上千时再议缓存"）
+
+先量清楚再动手，量出来的结论修正了原记录的判断：
+
+```text
+                             前          后
+load_dataset                 ~62ms      ~24ms
+GET /api/suites               249ms      73ms
+GET /api/benchmarks           181ms      71ms
+GET /api/cases                100ms      53ms
+```
+
+`load_dataset` 的 62ms 里 **40ms 是 PyYAML 的纯 Python 解析器**（读文件 4.6ms、
+`Case.model_validate` 0.4ms）；本机 libyaml 可用，同组文件只要 4.4ms。
+
+两项改动：
+
+1. `_read_yaml` 换 libyaml，缺失回退。**语义与 `safe_load` 逐字相同**——写成
+   loader 实例（`CSafeLoader(...)` + `get_single_data` + `dispose`）而不是把类交给
+   `yaml.load` 入口，一是因为后者会被静态安全扫描一律报"不安全反序列化"、分不出
+   这里的 Loader 就是 safe 语义的类（实测被拦两次），二是实例形式让真正的风险面与
+   误报区分开。护栏两条：逐文件比对 `_parse_yaml` 与 `yaml.safe_load` 结果一致；
+   `!!python/object` 仍然报错（safe 语义是契约，不靠读代码确认）。
+2. **同一请求里同一份事实只装载一次**。`GET /api/suites` 曾把每个 dataset 装两遍：
+   suites/*.yaml 计数一遍（catalog），安全套件 tag 计数又一遍（security.suites）。
+   定义层抽出 `dataset_refs` / `load_all_datasets`，判定层抽出 `count_suite_cases` /
+   `classify_cases`——"读一遍"与"怎么用"分开，策略留调用方（`/api/suites` 遇损坏
+   dataset 报 400，套件清单则跳过它）。`GET /api/security` 同样收了一次。
+   护栏断言**同一 ref 不被装载两次**（钉原因），不是断言耗时（钉结果）。
+
+**不引缓存**：Spec §13 的契约是"定义层是事实，直接读 `evals/` 文件树"。TTL 会让
+刚改完的 case 定义在页面上不更新——把事实层降级成近似层。真要加，键必须是内容哈希
+（`load_dataset` 本来就在算 sha256）或 `(mtime_ns, size)`，且要等触发条件真的成立。
+
+### 2. junit `skipped` 的真实覆盖
+
+原记录的推迟理由"补 fixture 要动套件组成"**实测不成立**：临时 evals 树就能构造，
+仓库既有范式（`test_harness_evaluators`、`test_case_coverage`），示例数据集组成零改动。
+
+两条端到端路径，都用真实 `Runner` 跑、断言**落盘的 `junit.xml`**：
+
+- 声明侧全 skipped：case 不声明任何 `expected` + profile 只挂"参数未声明即
+  skipped"的插件；
+- 观测面不可用：只声明 `constraints.max_cost` 且无 `pricing.yaml` →
+  `ObservationUnavailable`（PRD §59 的 `null ≠ 0`）。
+
+### 3. 顺带暴露并处置：零验证的 run 与全量通过同形
+
+全 skipped 的 run，`report.json` 的 `verdict` 是 `pass`、warnings 里只有 baseline
+那条、gate 同样 `pass`——**只有去读 junit 的 `skipped` 属性才分得出来**。这正是
+§19.1.1 与 §22 整轮在修的假绿类别，还剩这一处。
+
+处置取**保守选项**：加 run 级 `UNJUDGED` warning，指名道姓列出没被真正判过的 case；
+**不改 gate 规则、不改 exit code、不改 verdict**。分工是清楚的——本轮任务是"补覆盖
++ 让现状可见"，而"零验证是否该让门禁变红"是判定口径变更（会改既有 CI 的绿/红分布），
+应由独立增量拍板。warning 与 junit 计数共用 `case_status_for_junit`，同源不各写一份。
+
+### 护栏都验证过"可红"
+
+- 摘掉 warning 构造逻辑 → `assert len(unjudged) == 1` 立即失败（实测 `0 == 1`）；
+- 把 `list_suites` 换回自带装载的旧行为 → 护栏立刻报出重复的 `database-core`。
+
+### 验证
+
+- 全量 pytest：**441 passed**（+7：解析器等价 1、safe 语义 1、不重复装载 2、
+  junit skipped 端到端 3）
+- ruff：路径模式对 `runs.py` / `aggregate.py` 仍报 E902（Session 9 记的环境层
+  过滤器问题，本轮复现且**扩大到本轮改动的 `aggregate.py`**）。全部 9 个变更文件
+  用 `ruff check --stdin-filename` + `ruff format --stdin-filename` 做等效检查，
+  逐文件确认 0 违规且格式与 formatter 输出逐字节一致（用 python 比对字节，
+  绕开 shell 管道的文本转换）。**未宣称"ruff 按路径全绿"。**
+- Spec 新增 §25（两项的判定口径与量测）；§22.12 的推迟理由就地更正；
+  文档版本号 V2.3 → V2.6；ROADMAP 增「§22.12 两项建议项收口」小节。
+
+### 环境侧记录
+
+工作区里有三处**非本会话产生**的改动，未纳入本次提交：
+`.gitignore`（新增 `.codegraph/`、`outputs/`、`.trellis/`）、`AGENTS.md`
+（CodeGraph 使用规则）、`docs/external-agent-integration-change-plan.md`
+（第二轮校准）。其中 `.gitignore` 的 `.trellis/` 一条与现状冲突——仓库里
+`.trellis/tasks/` 与 `.trellis/workspace/` 共 96 个文件是**已跟踪**的，
+新增忽略规则会让新任务目录与 journal 需要 `-f` 才能入版本库。这是仓库级决定，
+留给用户定夺。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 环境恢复后重跑 `ruff check .`（路径模式）确认 E902 消失
+- `/api/suites` 的缓存触发条件（case 上千）真出现时，按 §25.1 用内容哈希为键
+- "零验证的 run 是否该让 Gate 变红"作为独立口径变更拍板
+
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

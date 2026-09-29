@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,6 +57,22 @@ def classify_red_team_case(case: Case) -> str | None:
     return None
 
 
+def classify_cases(cases: Iterable[Case]) -> list[RedTeamCase]:
+    """把一批已装好的 case 归类为红队攻击面（选择口径的唯一实现）。
+
+    ``load_red_team_cases`` 与只读接口（``GET /security`` 的覆盖矩阵）共用它：
+    后者已经为同一请求读过定义树，再自己筛一遍会让选择口径出现第二份实现。
+    """
+    out: list[RedTeamCase] = []
+    for case in cases:
+        if "red-team" not in case.tags and "redteam" not in case.tags:
+            continue
+        category = classify_red_team_case(case)
+        if category is not None:
+            out.append(RedTeamCase(category=category, case_id=case.id))
+    return out
+
+
 def load_red_team_cases(root: Path) -> list[RedTeamCase]:
     """扫描 evals/datasets/* 中带 red-team 标签的 case。"""
     from agent_eval.loading.loader import load_dataset
@@ -71,12 +88,7 @@ def load_red_team_cases(root: Path) -> list[RedTeamCase]:
             _, cases = load_dataset(root, dataset_dir.name)
         except InvalidCallError:
             continue
-        for case in cases:
-            if "red-team" not in case.tags and "redteam" not in case.tags:
-                continue
-            category = classify_red_team_case(case)
-            if category is not None:
-                out.append(RedTeamCase(category=category, case_id=case.id))
+        out.extend(classify_cases(cases))
     return out
 
 

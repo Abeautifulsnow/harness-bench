@@ -93,6 +93,44 @@ class TestCatalog:
         assert {s["kind"] for s in suites} >= {"suite", "security", "red-team"}
 
 
+class TestDefinitionTreeLoadedOnce:
+    """Spec §22.12：同一请求里同一份定义事实只装载一次。
+
+    这条断言比"耗时可接受"更耐久——它钉住的是原因（重复装载），不是结果（毫秒数）。
+    """
+
+    @staticmethod
+    def _count_loads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        from agent_eval.loading import loader as loader_mod
+
+        calls: list[str] = []
+        original = loader_mod.load_dataset
+
+        def counting(root: Path, ref: str):
+            calls.append(ref)
+            return original(root, ref)
+
+        monkeypatch.setattr(loader_mod, "load_dataset", counting)
+        return calls
+
+    def test_suites_endpoint_loads_each_dataset_once(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._count_loads(monkeypatch)
+        assert client.get("/api/suites").status_code == 200
+        assert calls, "该端点应当装载定义树"
+        assert sorted(calls) == sorted(set(calls)), f"同一 dataset 被重复装载：{calls}"
+
+    def test_security_endpoint_loads_each_dataset_once(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """套件计数与红队覆盖矩阵读同一份 case：不能各装一遍。"""
+        calls = self._count_loads(monkeypatch)
+        assert client.get("/api/security").status_code == 200
+        assert calls, "该端点应当装载定义树"
+        assert sorted(calls) == sorted(set(calls)), f"同一 dataset 被重复装载：{calls}"
+
+
 class TestRuns:
     async def test_run_detail_tabs(self, workspace, client: TestClient) -> None:
         run_id = await _run(workspace)

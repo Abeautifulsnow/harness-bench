@@ -278,6 +278,19 @@ def build_aggregate(
         )
     if comparison is not None and not comparison.valid:
         warnings.append(f"比较无效：{comparison.invalid_reason}")
+    # Spec §19.1.1 的 skipped 独立结局在 run 级同样要可见：判定为 skipped 的 case 是
+    # "什么都没判成"，它的 junit 形态与门禁规则都不受影响，于是零验证的 run 与全量
+    # 验证通过的 run 在 CI 上同形。这里只说清"哪些 case 没被真正判过"——是否让它
+    # 影响 Gate 结论是判定口径变更，不在此处顺手改。
+    # 判定复用 case_status_for_junit：warning 与 junit 的 skipped 计数必须同源，
+    # 各写一份就会漂移。
+    unjudged = [c.case_id for c in cases if case_status_for_junit(c) == "skipped"]
+    if unjudged:
+        warnings.append(
+            f"UNJUDGED：{len(unjudged)}/{len(cases)} 个 case 没有任何 metric 参与判定"
+            f"（Spec §19.1.1，全部 skipped）——它们的 PASS/FAIL 无依据："
+            f"{', '.join(sorted(unjudged))}"
+        )
     return RunAggregate(
         run=meta,
         cases=cases,

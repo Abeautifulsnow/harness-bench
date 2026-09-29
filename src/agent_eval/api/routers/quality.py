@@ -25,9 +25,10 @@ from agent_eval.api.schemas import (
     SecuritySuiteRow,
 )
 from agent_eval.errors import AgentEvalError
+from agent_eval.loading.loader import load_all_datasets
 from agent_eval.quality.gates import DEFAULT_RULES, GATE_KINDS, load_gate_rules
 from agent_eval.review.store import QUEUE_REASONS, VERDICTS, queue_candidates
-from agent_eval.security.redteam import RED_TEAM_CATEGORIES, load_red_team_cases
+from agent_eval.security.redteam import RED_TEAM_CATEGORIES, classify_cases
 from agent_eval.security.suites import list_suites
 
 router = APIRouter(tags=["quality"])
@@ -225,6 +226,9 @@ def security_posture(
     run_id: Annotated[str | None, Query()] = None,
 ) -> SecurityPosture:
     root = workspace.evals_root
+    # 套件计数与红队覆盖矩阵读的是同一份 case：定义树整树只装一次（Spec §22.12）。
+    cases_by_ref, _errors = load_all_datasets(root)
+    cases = [case for group in cases_by_ref.values() for case in group]
     suites = [
         SecuritySuiteRow(
             name=summary.name,
@@ -232,9 +236,9 @@ def security_posture(
             cases=summary.cases,
             description=summary.description,
         )
-        for summary in list_suites(root)
+        for summary in list_suites(root, cases_by_ref=cases_by_ref)
     ]
-    coverage = _red_team_coverage(root)
+    coverage = _red_team_coverage(cases)
     findings: list[dict] = []
     if run_id:
         from agent_eval.api.services import load_view
@@ -269,15 +273,18 @@ def security_posture(
     )
 
 
-def _red_team_coverage(root) -> list[RedTeamCoverageRow]:
-    """PRD §62 八类攻击面覆盖矩阵；缺失的一类显式标 covered=false（可见负债）。"""
+def _red_team_coverage(cases: list) -> list[RedTeamCoverageRow]:
+    """PRD §62 八类攻击面覆盖矩阵；缺失的一类显式标 covered=false（可见负债）。
+
+    归类复用 ``classify_cases``（选择口径只有一份实现）；调用方为同一请求已经读过
+    一次定义树，这里不再装载（Spec §22.12）。
+    """
     rows = {category: [] for category in RED_TEAM_CATEGORIES}
     try:
-        findings = load_red_team_cases(root)
+        for item in classify_cases(cases):
+            rows.setdefault(item.category, []).append(item.case_id)
     except Exception:  # noqa: BLE001 — 定义树不完整时仍要能显示"完全未覆盖"
-        findings = []
-    for item in findings:
-        rows.setdefault(item.category, []).append(item.case_id)
+        rows = {category: [] for category in RED_TEAM_CATEGORIES}
     return [
         RedTeamCoverageRow(
             category=category,
