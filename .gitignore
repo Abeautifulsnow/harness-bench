@@ -35,3 +35,12 @@ web/yarn.lock
 # Python 构建产物
 dist/
 build/
+
+# codegraph
+.codegraph/
+
+# si-octo
+outputs/
+
+# trellis
+.trellis/
