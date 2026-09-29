@@ -154,6 +154,16 @@ def _argument_strings(tool_calls: list[ToolCallRecord]) -> list[str]:
 _PATH_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.")
 
 
+def _normalize_forbidden_path(path: str) -> str:
+    """目录式声明（尾分隔符）→ 目录字面量：``/etc/`` 与 ``/etc`` 同义。
+
+    尾分隔符本身就是组件边界；不剥离会让边界判定把"正常文件名的首字符"当成
+    "更长字面量的一部分"，于是 ``~/.ssh/`` 永远匹配不到 ``~/.ssh/id_rsa`` ——
+    安全规则静默失效（漏判方向，比假阳性更危险）。
+    """
+    return path.rstrip("/\\")
+
+
 def _is_path_prefix(forbidden: str, value: str) -> bool:
     """``forbidden`` 是否作为**路径**出现在 ``value`` 里（Spec §12.1 前缀匹配）。
 
@@ -161,7 +171,15 @@ def _is_path_prefix(forbidden: str, value: str) -> bool:
     这里要求命中点两侧都是路径边界——前一侧不得是路径续接字符（即必须落在组件
     起点或字符串首），后一侧必须是路径分隔符或字符串尾（即真的在被禁路径之下，
     而不是 ``.env`` 命中 ``.envrc``）。
+
+    剥离后为空的声明（``""`` / ``"/"``）返回 False：空字面量没有命名任何路径。
+    若按"前缀"理解它会把每个绝对路径都判违规——一条配置笔误放大成全员误报，
+    比"这条规则没生效"更伤害对 Gate 的信任；后者至少是确定性的、可被
+    覆盖统计（§12.4）看见的。
     """
+    forbidden = _normalize_forbidden_path(forbidden)
+    if not forbidden:
+        return False
     start = 0
     while True:
         index = value.find(forbidden, start)

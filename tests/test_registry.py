@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import types
+from typing import Any
 
 import pytest
 
@@ -17,6 +18,73 @@ from agent_eval.evaluators.registry import (
 )
 from agent_eval.models.case import Case
 from agent_eval.models.profile import MetricSpec
+
+
+class _FakeToolCall:
+    """镜像 SDK 4.2.5 ``ToolCall`` 的字段约束：字段名/类型错了就抛。
+
+    上一版替身是 ``lambda **kw: {...}``——对任何签名都"构造成功"，本批的两个
+    SDK 形状硬伤（test case 类名、``tools_called`` 必须是 ``ToolCall``）因此在
+    整套测试里不可见。替身必须与真 SDK 一样**拒绝错形状**，否则它验证不了任何
+    东西；真实签名的最终裁决仍由 ``test_build_test_case_against_real_sdk`` 给出。
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        input_parameters: dict[str, Any] | None = None,
+        description: str | None = None,
+        reasoning: str | None = None,
+        output: Any = None,
+    ) -> None:
+        if not isinstance(name, str) or not name:
+            raise TypeError("ToolCall.name must be a non-empty string")
+        if input_parameters is not None and not isinstance(input_parameters, dict):
+            raise TypeError("ToolCall.input_parameters must be None or a dict")
+        self.name = name
+        self.input_parameters = input_parameters
+        self.description = description
+        self.reasoning = reasoning
+        self.output = output
+
+
+class _FakeLLMTestCase:
+    """镜像 SDK 4.2.5 ``LLMTestCase``：显式形参表，未知 kwarg / 错类型一律抛。"""
+
+    def __init__(
+        self,
+        *,
+        input: str,
+        actual_output: Any,
+        expected_output: Any = None,
+        context: list[str] | None = None,
+        retrieval_context: list[str] | None = None,
+        tools_called: list[_FakeToolCall] | None = None,
+        expected_tools: list[_FakeToolCall] | None = None,
+        completion_time: float | None = None,
+        token_cost: float | None = None,
+        input_token_count: int | None = None,
+        output_token_count: int | None = None,
+    ) -> None:
+        if not isinstance(input, str):
+            raise TypeError("LLMTestCase.input must be a string")
+        for field, value in (("tools_called", tools_called), ("expected_tools", expected_tools)):
+            if value is not None and (
+                not isinstance(value, list) or not all(isinstance(v, _FakeToolCall) for v in value)
+            ):
+                raise TypeError(f"'{field}' must be None or a list of ToolCall")
+        self.input = input
+        self.actual_output = actual_output
+        self.expected_output = expected_output
+        self.context = context
+        self.retrieval_context = retrieval_context
+        self.tools_called = tools_called
+        self.expected_tools = expected_tools
+        self.completion_time = completion_time
+        self.token_cost = token_cost
+        self.input_token_count = input_token_count
+        self.output_token_count = output_token_count
 
 
 def test_native_always_available() -> None:
@@ -130,6 +198,33 @@ def test_deepeval_convert_multi_turn_folds_prior_turns_into_context() -> None:
     assert trace["context"] == ["背景", "user: 第一问", "assistant: 第一答"]
 
 
+def test_deepeval_convert_uses_expected_final_as_reference_for_multi_turn() -> None:
+    """multi-turn 的判官参照取 ``expected.final.output``（Spec §2.5）。
+
+    回归：``_expected_output_text`` 只读 case 级 ``expected.output``，而多轮 case
+    把最终输出的期望写在 ``expected.final`` —— 判官在无参照的情况下给
+    TaskCompletion 评分，单轮与多轮的判官质量不一致。
+    """
+    case = Case.model_validate(
+        {
+            "id": "m",
+            "version": 1,
+            "name": "m",
+            "input": {"type": "multi_turn", "turns": [{"user": "一"}, {"user": "二"}]},
+            "expected": {"final": {"output": {"contains": ["30 天"]}}},
+        }
+    )
+    from agent_eval.trace.builder import TraceBuilder
+
+    trace = DeepEvalCapabilityAdapter().convert(
+        case, TraceBuilder().build(), final_output="最近 30 天的订单", latency_ms=1
+    )
+    assert trace["expected_output"] == "30 天"
+    # 期望块整体被搬进 expected_final 后，case 级 expected 不再有 output 断言，
+    # 旧实现会在这里拿到 None。
+    assert trace["actual_output"] == "最近 30 天的订单"
+
+
 def test_deepeval_convert_does_not_use_context_as_expected_output() -> None:
     """回归：`expected_output` 曾是 ``case.context``（judge 背景），拿背景当标准答案。"""
     case = Case.model_validate(
@@ -163,8 +258,10 @@ def test_deepeval_evaluate_with_fake_module(monkeypatch) -> None:
 
     fake_metrics.TaskCompletionMetric = TaskCompletionMetric
     fake_test_case = types.ModuleType("deepeval.test_case")
-    fake_test_case.LLMTestCase = lambda **kw: {"fake": kw}
-    fake_test_case.ToolCall = lambda **kw: {"tool": kw}
+    # 形状严格的替身（见类 docstring）：错 kwarg / 错类型在这里就要抛，
+    # 而不是被 ``lambda **kw`` 静默放行。
+    fake_test_case.LLMTestCase = _FakeLLMTestCase
+    fake_test_case.ToolCall = _FakeToolCall
     fake_pkg = types.ModuleType("deepeval")
     fake_pkg.metrics = fake_metrics
     fake_pkg.test_case = fake_test_case
@@ -195,7 +292,7 @@ def test_probe_rejects_incompatible_sdk_shape(monkeypatch) -> None:
     for class_name in DEEPEVAL_AGENT_METRICS.values():
         setattr(fake_metrics, class_name, type(class_name, (), {}))
     fake_test_case = types.ModuleType("deepeval.test_case")
-    fake_test_case.LLMTestCase = lambda **kw: kw  # 没有 ToolCall
+    fake_test_case.LLMTestCase = _FakeLLMTestCase  # 刻意不提供 ToolCall
     fake_pkg = types.ModuleType("deepeval")
     fake_pkg.metrics = fake_metrics
     fake_pkg.test_case = fake_test_case

@@ -451,3 +451,66 @@ Mimosa deep 扫描 `scan-2026-09-28T07-40-40.862Z-fce672ff8910`：0 findings，
 ### Next Steps
 
 - 呈现层缺口（报告携带 case 级产物指针）如需补齐，应由独立增量做（Spec §21.1）
+
+
+## Session 7: ebf408c 评审复核与修复（review-workflow）
+
+**Date**: 2026-09-29
+**Task**: 对全量审计修复 commit（ebf408c）做独立复核并修复发现项
+**Branch**: `main`
+
+### Summary
+
+对 ebf408c（681a341..ebf408c，21 文件）跑 review-workflow：审查者为该 commit
+作者，因此核心判断交由独立复核流程承担。结论：4 项问题（1 阻塞 / 3 应修），
+全部确认后由用户授权修复。最值得记的是 **#I01 的方向教训**：修"假阳性"时引入了
+"漏判"，安全规则的两个失败方向必须一起看。
+
+### 发现与修复（Spec §22.12 有完整记账）
+
+1. **#I01 🔴 阻塞**：`_is_path_prefix` 的边界判定把目录式声明（`~/.ssh/`、
+   `/etc/`）尾分隔符后的正常文件名当成"更长字面量"，这类写法永远匹配不到其下
+   文件——上一版子串实现是命中的，属本轮引入的**反向漏判**。修法：匹配前剥去
+   声明值尾部分隔符；空字面量匹配不到任何东西（把它当"前缀"理解会把每个绝对
+   路径判违规，一条配置笔误放大成全员误报）。现有 fixture 无尾斜杠声明，
+   影响是潜伏的。
+2. **#I02 🟡**：多轮判官参照只读 `expected.output`，`expected.final` 被忽略——
+   `database.query.multi_turn_refine` 声明了 `expected.final.output.contains`
+   但 judge 拿到 `expected_output=None`，无参照评分。修法：参照优先取
+   `expected_final.output`（Spec §2.5 在 judge 侧的落点）。
+3. **#C01 🟡**：`_mask` 脱敏只接进 `exact` 分支，同一份含密钥值换 `contains` /
+   `regex` 匹配器就把原文写进 reason（实测复现）。修法：三种匹配器同源脱敏。
+4. **#C02 🟢**：假 `deepeval` 模块仍是 `lambda **kw`（§22.11 第 2 条的残留），
+   对签名漂移免疫。换成显式形参表 + 类型校验的替身；真 SDK 测试仍是最终裁决。
+
+### 明确不修（记账）
+
+- `/api/suites` 计数每次请求全量装载 dataset——case 数上千时再议缓存。
+- junit `skipped` 分支仍只有单测覆盖（真实 run 均 skipped=0）——补 fixture 要动
+  套件组成，不应顺手做。
+
+### 验证
+
+- 定向：`test_gate_fidelity` / `test_registry` / `test_native_eval` → 97 passed
+- 全量：见提交前记录（pytest -q）
+- `ruff check` / `format --check` → 全绿
+- 秘密扫描（内置正则，diff 新增行）→ 0 命中
+- 工作区干净，临时文件（.review-tmp）已清理
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| (pending) | fix(review): 评审修复——目录式声明漏判、多轮判官参照与 reason 脱敏 |
+
+### Testing
+
+- [OK] 全量 pytest + ruff
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

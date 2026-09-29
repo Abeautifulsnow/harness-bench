@@ -167,14 +167,16 @@ class ToolArgumentMatcher(BaseModel):
             # Spec §11.2：非字符串先做 JSON 序列化再匹配（`{"id": 1}` 的 contains "id"）
             text = value if isinstance(value, str) else _serialize(value)
             if text is None or self.contains not in text:
-                return f"expected to contain {self.contains!r}, got {text!r}"
+                # reason 与 exact 分支同源脱敏（§12.3）：失败 reason 会进 PR 评论，
+                # contains/regex 恰恰常被用来断言带凭据的字段（header、payload）。
+                return f"expected to contain {_mask(self.contains)!r}, got {_mask(text)!r}"
             return None
         if self.regex is not None:
             import re
 
             text = value if isinstance(value, str) else _serialize(value)
             if text is None or re.search(self.regex, text) is None:
-                return f"expected to match {self.regex!r}, got {text!r}"
+                return f"expected to match {_mask(self.regex)!r}, got {_mask(text)!r}"
             return None
         return None
 

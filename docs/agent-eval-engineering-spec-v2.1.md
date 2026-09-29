@@ -286,6 +286,11 @@ turn 级 expect → 仅由 Native Evaluator 消费，不传递给 DeepEval
 > **一律只构造 `LLMTestCase`**——PRD §35 的六个 `agent.*` metric 只接受这一种
 > test case；多轮用 `context` 承接前序轮次（`user: ...` / `assistant: ...`）。
 > case 类型由 `case_type` 字段承载，不借 test case 的类型字段。
+>
+> **评审修正（2026-09-29，§22.12 #I02）**：多轮的判官参照取 `expected.final.output`
+> （本行"expected.final 作用于最终轮 actual_output"在 judge 侧的落点——Adapter 的
+> `actual_output` 正是最终轮）。只读 case 级 `expected.output` 会让多轮判官在
+> 没有参照作答的情况下评分，恰好漏掉"多轮逐步细化"这类最需要语义判定的用例。
 
 ---
 
@@ -988,6 +993,10 @@ score      = 通过的检查数 / 检查总数（连续）
 > **实现修正（2026-09-28，见 §22.2）**：上述"对每个 occurrence 判定"最初只判了
 > 第一次匹配的调用；`contains` / `regex` 对非字符串值也未做 JSON 序列化；score
 > 只出 0/1。三处均已改正，reason 里的实际值按 §12.3 脱敏。
+>
+> **评审修正（2026-09-29，§22.12 #C01）**：脱敏最初只接进了 `exact` 分支——同一份
+> 含密钥的值，换 `contains` / `regex` 匹配器就把原文写进 reason。现三种匹配器的
+> 失败 reason 同源脱敏。
 
 要点：
 
@@ -1043,6 +1052,13 @@ expected:
 > 两侧都不得是路径续接字符（`_` / `-` / `.` / 字母数字），因此 `/etc/passwd.d/x`
 > 不命中 `/etc/passwd`。安全断言里的假阳性会卡住本不该卡的 PR，而假阳性会让人
 > 逐渐不信任这条 Hard Gate。
+>
+> **评审修正（2026-09-29，§22.12 #I01）**：边界判定曾把**目录式声明**（尾分隔符，
+> `~/.ssh/`、`/etc/`）末尾的 `/` 后的正常文件名当成"更长字面量"，使这类写法永远
+> 匹配不到其下文件——上一版子串实现是命中的，属于本轮引入的反向漏判。现声明值
+> 在匹配前剥去尾部分隔符（`/etc/` ≡ `/etc`）；剥离后为空的声明（`""`、`"/"`）
+> 匹配不到任何东西——空字面量没有命名路径，把它当"前缀"理解会把每个绝对路径
+> 判违规，一条配置笔误放大成全员误报，比"规则没生效"更伤害对 Gate 的信任。
 
 ### 12.1.1 观测来源的透传义务（V2.3 回填）
 
@@ -2110,5 +2126,25 @@ tag-only 套件的 `case_ids` 恒为空，于是 Web 上**每个套件的 case �
 | `test_custom_namespace_fails_fast_instead_of_silent_drop` | `tests/test_registry.py` | `custom.*` / 拼错 native 必须抛，不许静默 |
 | `tests/test_gate_fidelity.py` | 19 条 | 前缀匹配 / 全出现次数 / 连续 score / skipped 可达 / hard categories 有消费点 |
 | `tests/test_baseline_policy.py` | 5 条 | main-latest 的分支过滤（含"feature 分支不得成为候选"的反例） |
+
+## 22.12 评审复核（2026-09-29，review-workflow 对 ebf408c 的独立复核）
+
+§22.1–§22.10 的修复本身经一轮独立评审（4 项问题：1 阻塞 / 3 应修），全数闭环。
+最值得记的是 **#I01 的方向教训**：修"假阳性"时引入了"漏判"——同一个边界判定，
+把目录式声明（`~/.ssh/`）末尾分隔符后的正常文件名当成了"更长字面量"。安全规则的
+两个失败方向必须一起看，**少拦比多拦危险**；改动前后的行为对照（旧子串实现命中、
+新实现不命中）是判定"回归"而非"取舍"的依据。
+
+| # | 问题 | 位置 | 严重程度 | 处置 |
+| --- | --- | --- | --- | --- |
+| #I01 | 目录式声明（尾分隔符）永远匹配不到其下文件——本轮引入的反向漏判 | `security/evaluator.py` | 🔴 阻塞 | 匹配前剥去声明值尾部分隔符；空字面量匹配不到任何东西 |
+| #I02 | 多轮判官参照只读 `expected.output`，`expected.final` 被忽略 → 无参照评分 | `evaluators/deepeval_adapter.py` | 🟡 | 参照优先取 `expected_final.output`（Spec §2.5 在 judge 侧的落点） |
+| #C01 | 脱敏只接进 `exact` 分支，`contains` / `regex` 把含密钥原文写进 reason | `models/case.py` | 🟡 | 三种匹配器的失败 reason 同源脱敏 |
+| #C02 | 假 `deepeval` 模块仍是 `lambda **kw`，对签名漂移免疫（§22.11 第 2 条的残留） | `tests/test_registry.py` | 🟢 | 换成显式形参表 + 类型校验的替身；真 SDK 测试仍是最终裁决 |
+
+另记录两处**未修**的建议项，留作独立增量：`/api/suites` 的计数现每次请求全量装载
+dataset（case 数上千时再议缓存）；junit `skipped` 分支仍只有单测覆盖，没有真实
+fixture 能让一条 case 的全部 metric 都 skipped——补 fixture 要动套件组成，不应
+顺手做。
 
 ---

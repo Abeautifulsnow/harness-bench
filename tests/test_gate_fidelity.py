@@ -16,7 +16,7 @@ import pytest
 from agent_eval.errors import MetricUnavailableError
 from agent_eval.evaluators.native import EvalScope, _check_tool_arguments, _group_score
 from agent_eval.evaluators.registry import resolve_metric
-from agent_eval.models.case import Assertion, SecurityAssertion
+from agent_eval.models.case import Assertion, SecurityAssertion, ToolArgumentMatcher
 from agent_eval.models.profile import MetricSpec
 from agent_eval.models.results import CaseRunResult, CaseStatus, MetricResultModel, ToolCallRecord
 from agent_eval.models.run import RunMetadata, RunStatus
@@ -79,6 +79,62 @@ class TestForbiddenPathPrefix:
         """`.env` 不得命中 `.envrc`；但 `/app/.env` 要命中。"""
         assert self._findings("/app/.envrc", [".env"])["security.forbidden_path"] == "pass"
         assert self._findings("/app/.env", [".env"])["security.forbidden_path"] == "fail"
+
+    def test_trailing_slash_directory_declaration_is_a_hit(self) -> None:
+        """目录式声明（尾分隔符）与不带斜杠同义：`/opt/secret/` 要罩住其下所有文件。
+
+        回归：边界判定曾把声明值末尾的 `/` 后的正常文件名当成"更长字面量"，
+        于是 `~/.ssh/`、`/etc/` 这类写法让规则静默失效（旧子串实现是命中的）。
+        """
+        assert (
+            self._findings("/opt/secret/key.txt", ["/opt/secret/"])["security.forbidden_path"]
+            == "fail"
+        )
+        assert self._findings("cat ~/.ssh/id_rsa", ["~/.ssh/"])["security.forbidden_path"] == "fail"
+
+    def test_trailing_slash_declaration_still_rejects_sibling(self) -> None:
+        """规范化只剥尾分隔符，不放松组件边界：`/etc/` 不得命中 `/etcX/foo`。"""
+        assert self._findings("/etcX/foo", ["/etc/"])["security.forbidden_path"] == "pass"
+
+    def test_backslash_directory_declaration_is_a_hit(self) -> None:
+        """Windows 目录式声明同样要生效：`secrets\\` 罩住 `D:\\secrets\\k.txt`。"""
+        assert (
+            self._findings("D:\\secrets\\k.txt", ["secrets\\"])["security.forbidden_path"] == "fail"
+        )
+
+    def test_empty_declaration_matches_nothing(self) -> None:
+        """剥离后为空的声明没有命名任何路径，不得放大成"匹配一切绝对路径"。"""
+        assert self._findings("/opt/anything", [""])["security.forbidden_path"] == "pass"
+
+
+class TestMatcherReasonRedaction:
+    """reason 里回显的实际值必须脱敏（Spec §12.3 口径），且与匹配器种类无关。
+
+    回归：`_mask` 只接进了 `exact` 分支，`contains` / `regex` 失败时把原文写进
+    reason —— 而 reason 会进 PR 评论与工单，`tool_arguments` 恰恰常在断言里
+    比对凭据类参数。
+    """
+
+    def test_contains_masks_secret_shaped_value(self) -> None:
+        reason = ToolArgumentMatcher(contains="zzz").check("token=abcdefghijklmnop")
+        assert reason is not None
+        assert "abcdefghijklmnop" not in reason
+        assert "token=abcd***" in reason
+
+    def test_contains_masks_serialized_dict(self) -> None:
+        reason = ToolArgumentMatcher(contains="zzz").check({"password": "hunter2xyzsecret"})
+        assert reason is not None
+        assert "hunter2xyzsecret" not in reason
+
+    def test_regex_masks_secret_shaped_value(self) -> None:
+        reason = ToolArgumentMatcher(regex="^SELECT").check("token=abcdefghijklmnop")
+        assert reason is not None
+        assert "abcdefghijklmnop" not in reason
+
+    def test_exact_branch_still_masks(self) -> None:
+        reason = ToolArgumentMatcher(exact="zzz").check("token=abcdefghijklmnop")
+        assert reason is not None
+        assert "abcdefghijklmnop" not in reason
 
 
 class TestToolArgumentsAllOccurrence:

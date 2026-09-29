@@ -24,8 +24,15 @@ def _expected_output_text(case: Case) -> str | None:
     ``exact`` 是字面期望；只有 ``contains`` 时把命中词表作为期望语义的近似。
     两者都没有（例如只断言工具与约束）时返回 None —— 不拿 ``case.context``
     顶替，那是 judge 的背景说明，当成标准答案会让评分口径整体错位。
+
+    multi-turn 的参照取 ``expected.final.output``（Spec §2.5：expected.final
+    作用于最终轮 actual_output，而本 Adapter 的 ``actual_output`` 正是最终轮）。
+    只读 case 级 ``expected.output`` 会让多轮判官在没有参照作答的情况下评分
+    ——单轮与多轮的判官质量不一致，且恰恰漏掉"多轮逐步细化"这类最需要
+    语义判定的用例。
     """
-    expected = case.expected.output
+    source = case.expected_final if case.expected_final is not None else case.expected
+    expected = source.output
     if expected.exact is not None:
         return expected.exact
     if expected.contains:
