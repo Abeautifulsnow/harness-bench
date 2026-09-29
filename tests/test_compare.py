@@ -47,15 +47,38 @@ class TestDirectionSemantics:
         for metric in ("task_success", "native.status", "agent.task_completion"):
             assert not _lower_is_better(metric), metric
 
-    def test_more_tokens_is_a_regression_not_an_improvement(self) -> None:
-        diffs = _metric_diffs({"tokens": 240.0}, {"tokens": 266.6667})
+    def test_more_tokens_beyond_threshold_is_a_regression(self) -> None:
+        # +37.5% 超出 tokens 的噪声下限（25%，与 case 级性能回归同源）
+        diffs = _metric_diffs({"tokens": 240.0}, {"tokens": 330.0})
         assert [d.verdict for d in diffs] == ["regressed"]
 
-    def test_fewer_tokens_is_an_improvement(self) -> None:
-        diffs = _metric_diffs({"tokens": 240.0}, {"tokens": 200.0})
+    def test_fewer_tokens_beyond_threshold_is_an_improvement(self) -> None:
+        diffs = _metric_diffs({"tokens": 240.0}, {"tokens": 150.0})
         assert [d.verdict for d in diffs] == ["improved"]
 
-    def test_higher_task_success_is_an_improvement(self) -> None:
+    def test_resource_change_within_threshold_is_unchanged(self) -> None:
+        """ROADMAP 发现的 1：方向是信号不是算术，阈值内的资源变化不给方向。
+
+        +11.1% 的 token 波动在 case 级性能回归的 25% 阈值内本来就是 unchanged；
+        display 方向与 gate 阈值同源，否则同一份报告两处口径。
+        """
+        diffs = _metric_diffs({"tokens": 240.0}, {"tokens": 266.6667})
+        assert [d.verdict for d in diffs] == ["unchanged"]
+        latency = _metric_diffs({"latency_ms": 100.0}, {"latency_ms": 115.0})
+        assert [d.verdict for d in latency] == ["unchanged"]  # +15% < latency 20%
+
+    def test_wall_clock_below_millisecond_floor_is_unchanged(self) -> None:
+        """毫秒以下的 wall-clock 均值没有任何信号：调度抖动就足以让它翻倍/归零。
+
+        实测 flake：同一 mock 连跑 latency_ms 均值 0.4 ↔ 0，相对变化 ±100%，
+        相对阈值在 0 基线/近 0 基线上拦不住，只能用绝对判据（< 1ms 判 unchanged）。
+        """
+        for base, cand in ((0.4, 0.0), (0.0, 0.4), (0.4, 0.8)):
+            diffs = _metric_diffs({"latency_ms": base}, {"latency_ms": cand})
+            assert [d.verdict for d in diffs] == ["unchanged"], (base, cand)
+
+    def test_quality_direction_has_no_noise_floor(self) -> None:
+        """质量类 metric 的方向不需要下限：得分是确定性的，任何变化都是信号。"""
         diffs = _metric_diffs({"task_success": 0.5}, {"task_success": 0.75})
         assert [d.verdict for d in diffs] == ["improved"]
 

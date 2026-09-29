@@ -109,6 +109,10 @@ class RunConfig:
     # PRD §108: suites a gate run must execute; None = use the benchmark's own list.
     suites: list[str] = field(default_factory=list)
     no_judge: bool = False
+    # PRD §92 的"按策略跳过部分高成本 Judge"。``none``（缺省）= 现状，judge 全跑；
+    # ``skip_blocked`` = case 已被阻断性失败判死时跳过该 case 的**非阻断** judge
+    # 指标——判定已定，judge 只会花钱不会改结论（保守双条件见 _judge_skip_reason）。
+    judge_skip_policy: str = "none"
     timeout: float | None = None
     save_trace: bool = True
     # PRD §90：case 级产物（workdir 变更 / db dump / trace 索引）。
@@ -973,6 +977,25 @@ class Runner:
     ) -> str:
         if not resolved.judge_specs or tree is None or scope is None:
             return ""
+        # PRD §92 执行顺序：Native → 明显 Hard Failure → 按策略跳过高成本 Judge。
+        # 跳过发生在 convert 之前：连 trace 都不用构造，一分钱不花。
+        skip_reason = _judge_skip_reason(result, resolved.judge_specs, self.cfg.judge_skip_policy)
+        if skip_reason:
+            for spec in resolved.judge_specs:
+                result.metric_results.append(
+                    MetricResultModel(
+                        id=new_id("mr"),
+                        case_run_id=result.id,
+                        metric=spec.id,
+                        evaluator="deepeval",
+                        threshold=spec.threshold,
+                        verdict="skipped",
+                        blocking=False,
+                        reason=skip_reason,
+                        metadata={"policy": "skip_blocked"},
+                    )
+                )
+            return ""
         trace = ctx.judge.convert(
             case,
             tree,
@@ -1137,6 +1160,26 @@ def _error(result: CaseRunResult, semantics: FailureSemantics, msg: str) -> Case
     result.error = msg
     result.failure_category = f"infra.{semantics.value.lower()}"
     return result
+
+
+def _judge_skip_reason(result: CaseRunResult, judge_specs: list, policy: str) -> str:
+    """PRD §92 的"按策略跳过部分高成本 Judge"：返回跳过原因，空串 = 不跳。
+
+    两个保守条件缺一不可，方向都是"不能因省钱改判定"：
+    - 只跳**非阻断**的 judge 指标——blocking 的 judge 参与判定，跳过等于改判；
+      此时宁可贵也要跑（调用方应改 profile，而不是指望跳过策略省成本）。
+    - 只在本次 iteration 已有 blocking fail 时跳——判定已定，judge 只会花钱
+      不会改结论；``metric_results`` 此时已含 native / harness / security 的结果
+      （_finish_iteration 的执行顺序），security Hard Failure 也在其中（§12.2
+      的 blocking=True）。
+    """
+    if policy != "skip_blocked" or not judge_specs:
+        return ""
+    if any(spec.blocking for spec in judge_specs):
+        return ""
+    if not any(m.blocking and m.verdict in {"fail", "error"} for m in result.metric_results):
+        return ""
+    return "case 已被阻断性失败判死，judge 按策略跳过（PRD §92）"
 
 
 def _num(value: object) -> float | None:

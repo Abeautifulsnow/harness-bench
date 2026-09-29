@@ -234,15 +234,9 @@ class TestRegressionViews:
         assert payload["candidate_run_id"] == second
         diffs = {row["metric"]: row["verdict"] for row in payload["metric_diffs"]}
         assert diffs, "两侧 run 至少应有一个可比的 run-level metric"
-        # 同一个 mock 跑两次：**计数量**指标必须判 unchanged，而不是随方向噪声乱标
-        # （tokens / tool_calls / task_success 都是确定性的）。
-        #
-        # latency_ms 例外：它是 wall-clock 时长，进程内 mock 的量级在 0~数 ms，
-        # 调度抖动就会让均值从 0 变成 0.4，于是 run-level diff 标出 "regressed"。
-        # 断言它恰好相等只会得到 flaky 红灯——红灯若不代表信号，本身就是噪声。
-        # 真正的口径问题（run-level diff 缺少噪声下限）记在 ROADMAP 跟进项里，
-        # 不在这里用一个更弱的断言把它盖掉。
-        wall_clock = {"latency_ms"}
-        deterministic = {k: v for k, v in diffs.items() if k not in wall_clock}
-        assert deterministic, "两侧 run 至少应有一个确定性的 run-level metric 可比"
-        assert set(deterministic.values()) == {"unchanged"}, deterministic
+        # 同一个 mock 跑两次：所有 run-level metric 都必须判 unchanged。
+        # tokens / tool_calls / task_success 是确定性的；latency_ms 是 wall-clock，
+        # 但 run-level diff 现在带噪声下限（毫秒以下判 unchanged，阈值与 case 级
+        # 性能回归同源，ROADMAP 发现的 1）——此前这里的 latency 例外已摘除，
+        # 摘除本身就是对该修复的回归断言。
+        assert set(diffs.values()) == {"unchanged"}, diffs

@@ -640,6 +640,32 @@ class TestRunnerCollectsArtifacts:
         payload = _run_case_json(data_root, "database.query.top_customers")[0]
         assert any("expected list" in note for note in payload["artifact_notes"])
 
+    async def test_report_carries_artifact_pointers(self, evals_tree, fixtures_root) -> None:
+        """ROADMAP 发现的 4：报告必须携带 case 级产物指针，CI 只拿报告也要能找到现场。
+
+        三份呈现面各断一条：report.json 的 per-case `artifacts`（只含指针不塞内容）、
+        summary.md 的「现场」小节（相对链接与产物落盘同目录，链接因此成立）、
+        report.html 的 Cases 表「现场」列。
+        """
+        evals_root, data_root = evals_tree
+        outcome = await Runner(_cfg(evals_root, data_root, fixtures_root)).run()
+        run_dir = data_root / "runs" / outcome.run_id
+
+        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+        case = next(c for c in report["cases"] if c["case_id"] == "database.query.top_customers")
+        pointers = case["artifacts"]
+        assert {item["kind"] for item in pointers} == {"database", "trace"}
+        assert all(item["iteration"] == 1 for item in pointers)
+        # 指针必须真实可解析：path 相对 run 目录，文件在盘上
+        assert all((run_dir / item["path"]).is_file() for item in pointers)
+
+        summary = (run_dir / "summary.md").read_text(encoding="utf-8")
+        assert "## Case Artifacts (现场)" in summary
+        assert "database.sql" in summary
+
+        html = (run_dir / "report.html").read_text(encoding="utf-8")
+        assert ">database.sql</a>" in html
+
 
 def _scripted_sqlite_failure(evals_root: Path) -> str:
     """注入一个必然失败的 sqlite case：断言要的输出不存在。"""

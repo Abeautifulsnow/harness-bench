@@ -44,6 +44,11 @@ def benchmark_run(
     ),
     run_id_file: Path | None = typer.Option(None, "--run-id-file"),
     no_judge: bool = typer.Option(False, "--no-judge"),
+    judge_skip_policy: str = typer.Option(
+        "none",
+        "--judge-skip-policy",
+        help="none | skip_blocked：case 已被阻断判死时跳过其非阻断 judge（PRD §92 省成本）",
+    ),
     no_save_artifacts: bool = typer.Option(
         False,
         "--no-save-artifacts",
@@ -78,6 +83,7 @@ def benchmark_run(
         gate=gate,
         suites=list(suite),
         no_judge=no_judge,
+        judge_skip_policy=judge_skip_policy,
         save_artifacts=not no_save_artifacts,
         timeout=timeout,
         agent_model=model,

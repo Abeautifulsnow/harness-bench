@@ -56,6 +56,13 @@ class CaseAggregate:
     # "什么都没判成"，不是"判过了"——junit 必须能把它渲染成 skipped（§6.3），
     # 否则观测不足的 case 会以 passed 的形态出现在 CI 报告里。
     evaluated_metrics: int = 0
+    # case 级产物指针（PRD §90，ROADMAP 发现的 4）：只有 iteration/name/kind/
+    # path/bytes，不塞内容——内容走 REST 端点按需读。report.json / report.html /
+    # summary.md 由此让"只拿报告的 CI 读者"能找到失败现场。指针从各 iteration
+    # 的 CaseRunResult.artifacts 摊平而来；iteration 必须进指针——Spec §21.3
+    # 刻意不把它放进 ArtifactRecord 是因为宿主对象给得出，摊平到 case 级后宿主
+    # 是多个 iteration，不标 iteration 就无法与下载端点的查名参数对上。
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def has_error(self) -> bool:
@@ -93,6 +100,7 @@ class CaseAggregate:
             "metric_means": dict(self.metric_means),
             "blocking_failures": list(self.blocking_failures),
             "evaluated_metrics": self.evaluated_metrics,
+            "artifacts": [dict(item) for item in self.artifacts],
         }
 
 
@@ -203,6 +211,22 @@ def _case_aggregate(
         ),
         failure_category=next((r.failure_category for r in iterations if r.failure_category), None),
         evaluated_metrics=sum(1 for m in all_metrics if m.verdict != "skipped"),
+        artifacts=sorted(
+            (
+                {
+                    "iteration": r.iteration,
+                    "name": record.name,
+                    "kind": record.kind.value
+                    if hasattr(record.kind, "value")
+                    else str(record.kind),
+                    "path": record.path,
+                    "bytes": record.bytes,
+                }
+                for r in iterations
+                for record in r.artifacts
+            ),
+            key=lambda item: (item["iteration"], item["name"]),
+        ),
     )
 
 

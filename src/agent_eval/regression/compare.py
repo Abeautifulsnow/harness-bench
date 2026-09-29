@@ -56,6 +56,52 @@ def _lower_is_better(metric_id: str) -> bool:
     return metric_id in _LOWER_IS_BETTER or metric_id.endswith(_LOWER_IS_BETTER_SUFFIXES)
 
 
+# 资源类 metric 的噪声下限（ROADMAP 发现的 1）：MetricDiff 的方向只在变化幅度
+# 超出与 case 级性能回归（_case_performance）**同源**的阈值时才有信号——
+# 阈值内判 unchanged。方向是信号不是算术：抖动 +11% 标 "regressed" 与抖动 -11%
+# 标 "improved" 是同一种错误。
+# 键：metric id 或其后缀 → DEFAULT_PERFORMANCE_THRESHOLDS 的键。cost 无阈值
+# （定价是确定性的，没有 wall-clock 抖动），保持逐字方向。
+_NOISE_FLOOR_SOURCES: tuple[tuple[str, str], ...] = (
+    ("tool_calls", "tool_calls"),
+    (".tool_calls", "tool_calls"),
+    ("tokens", "tokens"),
+    (".tokens", "tokens"),
+    (".token_count", "tokens"),
+    ("latency_ms", "latency_ms"),
+    (".latency_ms", "latency_ms"),
+    (".duration_ms", "latency_ms"),
+)
+# wall-clock 时长在毫秒量级以下没有信号：均值 0 ↔ 0.4ms 的相对变化是 ±100%，
+# 相对阈值拦不住（基线为 0 或近 0 时分母失义），只能用绝对判据。
+_WALL_CLOCK_FLOOR = 1.0  # ms
+_WALL_CLOCK_METRICS = frozenset({"latency_ms", ".latency_ms", ".duration_ms"})
+
+
+def _noise_floor(metric_id: str, thresholds: dict[str, float]) -> float | None:
+    """该 metric 的噪声下限（百分比）；None = 无下限，保持逐字方向。"""
+    if metric_id in _WALL_CLOCK_METRICS:
+        return thresholds.get("latency_ms")
+    for suffix, key in _NOISE_FLOOR_SOURCES:
+        if metric_id == suffix or metric_id.endswith(suffix):
+            return thresholds.get(key)
+    return None
+
+
+def _is_wall_clock(metric_id: str) -> bool:
+    return any(metric_id == name or metric_id.endswith(name) for name in _WALL_CLOCK_METRICS)
+
+
+def _within_noise(
+    metric_id: str, base: float, candidate: float, floor_percent: float | None
+) -> bool:
+    if _is_wall_clock(metric_id) and max(base, candidate) < _WALL_CLOCK_FLOOR:
+        return True
+    if base <= 0:
+        return False  # 相对阈值需要正基线；0 基线的抖动交给绝对判据（上行）
+    return abs(candidate - base) / base * 100 <= floor_percent
+
+
 def _iterations(results: list[CaseRunResult], case_id: str) -> list[CaseRunResult]:
     return sorted([r for r in results if r.case_id == case_id], key=lambda r: r.iteration)
 
@@ -87,7 +133,9 @@ def _performance_diff(
 
 
 def _metric_diffs(
-    baseline_metrics: dict[str, float], candidate_metrics: dict[str, float]
+    baseline_metrics: dict[str, float],
+    candidate_metrics: dict[str, float],
+    performance_thresholds: dict[str, float] | None = None,
 ) -> list[MetricDiff]:
     """metric-level 段（PRD §53/§105）：只比对两侧都存在的 metric id。
 
@@ -95,14 +143,19 @@ def _metric_diffs(
     - 质量类 metric（task_success / native.* / agent.* …）：值上升为 ``improved``；
     - 成本与性能类 metric（tokens / tool_calls / latency_ms / cost / task_failure）：
       值上升为 ``regressed`` —— 用更多 token 跑出同样的成功率不是进步。
+    - 资源类 metric 带噪声下限（与 case 级性能回归同源的阈值）：变化幅度在阈值内
+      判 ``unchanged``——latency 是 wall-clock，调度抖动就足以让均值跨过 1e-9 的
+      逐字比较，方向必须在有信号的幅度上才给（ROADMAP 发现的 1）。
     """
+    thresholds = performance_thresholds or DEFAULT_PERFORMANCE_THRESHOLDS
     diffs: list[MetricDiff] = []
     for metric_id in sorted(set(baseline_metrics) & set(candidate_metrics)):
         base = baseline_metrics[metric_id]
         cand = candidate_metrics[metric_id]
         delta = round(cand - base, 6)
         delta_percent = round(delta / base * 100, 4) if base else None
-        if abs(delta) < 1e-9:
+        floor = _noise_floor(metric_id, thresholds)
+        if abs(delta) < 1e-9 or (floor is not None and _within_noise(metric_id, base, cand, floor)):
             verdict = "unchanged"
         else:
             better = delta < 0 if _lower_is_better(metric_id) else delta > 0
@@ -277,12 +330,14 @@ def compare_runs(
             candidate_iterations=len(cand_iters),
         )
         if state in {RegressionState.REGRESSION, RegressionState.IMPROVED}:
-            case.metric_diffs = _metric_diffs(_case_metrics(base_iters), _case_metrics(cand_iters))
+            case.metric_diffs = _metric_diffs(
+                _case_metrics(base_iters), _case_metrics(cand_iters), thresholds
+            )
         comparison.cases.append(case)
 
     _fill_counts(comparison)
     comparison.metrics = _metric_diffs(
-        _run_metric_means(baseline_results), _run_metric_means(candidate_results)
+        _run_metric_means(baseline_results), _run_metric_means(candidate_results), thresholds
     )
     comparison.baseline_totals = _run_metric_means(baseline_results)
     comparison.candidate_totals = _run_metric_means(candidate_results)

@@ -580,3 +580,50 @@ Mimosa deep 扫描 `scan-2026-09-28T07-40-40.862Z-fce672ff8910`：0 findings，
 ### Next Steps
 
 - None - task complete
+
+
+## Session 9: 剩余缺口收口——发现 1、发现 4、§92
+
+**Date**: 2026-09-29
+**Task**: 修复三个已记账缺口的最后一项可行动集合
+**Branch**: `main`
+
+### 修复内容
+
+1. **发现 1**：`MetricDiff` 方向曾逐字比较（1e-9），wall-clock 的 latency_ms 抖动
+   就打假方向。现资源类 metric 的方向只在超出与 case 级性能回归**同源**的阈值
+   （tool_calls 20% / tokens 25% / latency 20%）时给出；wall-clock 类加绝对判据
+   （两侧均值 < 1ms → unchanged），基线近 0 时相对阈值分母失义，实测 flake
+   （0.4↔0ms，±100%）只有这个诚实的结论。`test_api` 的 latency 例外摘除——
+   摘除本身就是回归断言。方向语义契约按 ROADMAP 预告连带更新（阈值内=unchanged）。
+2. **发现 4**：`CaseAggregate.artifacts` 指针（iteration/name/kind/path/bytes）
+   进 report.json / REST Cases 行 / summary.md「现场」小节 / report.html「现场」列。
+   iteration 必须进指针（摊平后宿主是多个 iteration）；指针 ≠ 能力表
+   （Spec §21.1 已回写）。测试断言指针与落盘文件真实互解。
+3. **§92**：`--judge-skip-policy skip_blocked`。保守双条件（非阻断才可跳、
+   判定已定才可跳），跳过留痕为 skipped metric result（metadata 记 policy），
+   发生在 convert 之前——连 trace 都不构造。缺省 none 行为不变。
+
+### 文档
+
+Spec 新增 **§24**（三缺口的判定口径）；ROADMAP「收尾批次」补三行；发现 1/4 关账。
+
+### 验证
+
+- 全量 pytest：**434 passed**（+9：方向语义 3、噪声下限 3、产物指针 1、§92 6 −
+  重叠计数）；web `tsc --noEmit` 绿；secret 扫描 0 命中
+- ⚠️ **ruff 路径读取异常（环境层，非代码问题）**：本轮中途开始，ruff 0.13/0.16
+  对 `runs.py` 及任何**由 python 进程新写入**的文件报 E902（invalid UTF-8），
+  而同一字节经 stdin 喂入通过、bun/git/python 读取正常、HEAD 原字节亦复现。
+  判定：机器上的过滤器对本会话 python 写入的文件向 ruff 提供了损坏视图。
+  **处置**：全部 11 个变更文件用 `ruff check --stdin-filename` 完成等效检查
+  （0 违规）；`ruff format`（自身的读写路径）报告全部文件已格式化。
+  未宣称"ruff 按路径全绿"；建议环境恢复后（重启/更新 Mimosa）重跑 `ruff check .`。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 环境恢复后重跑 `ruff check .` 与 Mimosa 完整扫描

@@ -81,6 +81,9 @@ Spec（V2.2）的验收条款，不是"感觉还差点"。
 | 发现的 2（baseline 不看套件组成） | ✅ 修复 | main-latest 候选要求 `suites_covered` 与当前 run **全等**（不是覆盖——超集的均值同样不可比）；显式/release pin 是人的决定，解析期不拦，但 `compare_runs` 对**所有**模式加比较期守卫：组成不全等 → `valid=False` + 原因可见（§4.3 的"禁止静默跨集合比较"）。实测：此前 smoke run 曾拿 security run 当基线，修复后解析到同为 smoke 的 run |
 | §19 Challenge Set | ✅ 落地 | 七类各一条（`challenge.*`），断言全部落在真实观测面（tool_arguments / sql_result / subagent span / compaction 计数），`tests/test_challenge_set.py` 用"拿掉行为标记必须变红"证明不是假覆盖；`challenge` 套件**不进任何 gate**（PRD §19 原文，测试钉住）。mock agent 加法式扩展：逐调用错误粒度（`tool_error_calls`，全错表达不了"自愈"）与多 SubAgent（`subagents`） |
 | §40 Nightly Profile | ✅ 落地 | 六个 judge metric 全开、**不带 native fallback**——夜间跑要的是语义全量信号，降级成确定性规则等于白跑，judge 不可用按 §6.1 记 exit 2。GEval（§42 custom.*）未实现故缺位，profile 内注释记账，实现后补 |
+| 发现的 1（run 级 diff 无噪声下限） | ✅ 修复 | `MetricDiff` 的方向只在变化幅度超出与 case 级性能回归**同源**的阈值时给出；wall-clock 类加绝对判据（两侧均值 < 1ms 判 unchanged——基线近 0 时相对阈值分母失义，实测 flake 0.4↔0ms）。`test_api` 的 latency 例外随之摘除，摘除即回归断言 |
+| 发现的 4（报告不带产物指针） | ✅ 修复 | `CaseAggregate.artifacts` 指针（iteration/name/kind/path/bytes，不塞内容）进 report.json / REST Cases 行 / summary.md「现场」小节 / report.html「现场」列；测试断言指针与落盘文件可互解。能力表仍只有 Web——指针回答"现场在哪"，能力表回答"什么本来就采不到"（Spec §21.1 已回写） |
+| §92 按策略跳过 judge | ✅ 落地 | `--judge-skip-policy skip_blocked`：case 已被阻断判死时跳过其**非阻断** judge（保守双条件：blocking 的 judge 参与判定不跳；判定未定不跳），跳过留痕为 skipped metric result（§19.1.1 独立结局）。缺省 none，行为不变 |
 
 ---
 
@@ -203,6 +206,11 @@ report.html 里既没有 case 级产物索引、没有能力表，也没有指�
 - **若要补齐**：给 `CaseAggregate`/report.json 加一份 case 级产物指针
   （`name`/`path`/`bytes`/`kind`，不塞内容），report.html 相应加"现场"链接；
   动的是 report schema，应由独立增量做，而不是修文档时顺手加。
+- **2026-09-29 已补齐**（独立增量，见上方「收尾批次」）：`CaseAggregate.artifacts`
+  指针（iteration/name/kind/path/bytes）进 report.json / REST Cases 行 /
+  summary.md「现场」小节 / report.html「现场」列；指针必须与产物落盘可互解
+  （测试断言 path 相对 run 目录真实存在）。**能力表仍只有 Web**——指针回答
+  "现场在哪"，能力表回答"什么本来就采不到"，两者不是一回事。
 
 ### 发现的 3：case 级产物的采集能力缺口
 

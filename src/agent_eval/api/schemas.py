@@ -125,6 +125,9 @@ class CaseResultRow(BaseModel):
     error_semantics: list[str] = Field(default_factory=list)
     failure_category: str | None = None
     tags: list[str] = Field(default_factory=list)
+    # case 级产物指针（PRD §90，Spec §21.1）：只有指针不塞内容，内容走
+    # /runs/{id}/cases/{case}/artifacts 端点按需读。
+    artifacts: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ArtifactRow(BaseModel):

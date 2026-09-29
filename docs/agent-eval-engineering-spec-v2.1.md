@@ -1848,9 +1848,13 @@ PRD §90 只说了"需要"，这里把口径定死，否则"产物"这个词会�
 采不到的观测面**如实列出**，不造空文件占位——一个 0 字节的 `screenshot.png`
 会让"已采集"的统计说谎。能力表以代码为事实源
 （`models/artifacts.py` 的 `UNAVAILABLE_KINDS`），Web 直接引用它。
-报告（report.json / report.html）目前**不携带** case 级产物索引与能力表——
-这是已记账的缺口（见 ROADMAP「执行中的发现」），不是已实现的承诺；
-在这句话改回"报告与 Web"之前，别把报告当成产物可见性的消费方。
+
+> **2026-09-29 更新（ROADMAP 发现的 4 关账）**：报告现在**携带 case 级产物指针**——
+> report.json 的 per-case `artifacts`（iteration/name/kind/path/bytes，不塞内容）、
+> report.html Cases 表的「现场」列（相对链接，与产物落盘同目录所以成立）、
+> summary.md 的「现场」小节。**能力表仍然只有 Web 有**：指针回答"现场在哪"，
+> 能力表回答"什么观测面本来就采不到"，后者是 §12.4 式的可见性约束，报告侧
+> 尚未承载；这句话里"报告与 Web"因此只对指针成立。
 
 | 观测面 | 当前 | 采集手段 / 采不到的原因 |
 | --- | --- | --- |
@@ -2219,5 +2223,70 @@ GEval                                                   ← custom.* 未实现�
   的取舍，不是 nightly 该继承的。
 - **GEval 缺位是记账不是遗漏**：把 `custom.*` 写进 profile 会让所有 nightly run
   启动期 exit 3（§22.7 的 fail-fast）。PRD §42 实现后在 profile 内补列。
+
+---
+
+# 24. Run-level Diff 噪声下限、报告产物指针与 Judge 跳过策略（V2.5，缺口回填）
+
+三个此前"已记账未修"的缺口，一次收口。每条都先回答"为什么它是缺陷"再定口径。
+
+## 24.1 Run-level metric diff 的噪声下限（ROADMAP 发现的 1）
+
+`MetricDiff.verdict` 的方向曾是**逐字比较**（1e-9）：任何非零变化都给
+`improved` / `regressed`。`latency_ms` 是 wall-clock——调度抖动足以让均值从
+`0` 变成 `0.4`，Run-level Diff（PRD §105）于是打出一行假的 `latency_ms regressed`
+（有间歇性失败测试为证）。方向是**信号不是算术**：抖动 +11% 标 regressed 与
+-11% 标 improved 是同一种错误。
+
+口径（与 case 级性能回归 `_case_performance` **同源**的阈值）：
+
+```text
+资源类 metric（tool_calls / tokens / latency_ms 及其后缀形态）：
+  |Δ%| ≤ 阈值（20% / 25% / 20%）        → unchanged
+  超出阈值                               → 按方向给 improved / regressed
+wall-clock 类（latency_ms / .duration_ms）：
+  max(两侧均值) < 1ms                    → unchanged（绝对判据）
+cost / task_failure / 质量类             → 无下限，保持逐字方向
+```
+
+绝对判据是必需的：基线为 0 或近 0 时相对阈值的分母失义，`0 ↔ 0.4ms` 的 ±100%
+只有"都在毫秒以下"这一个诚实的结论。质量类 metric 不设下限——得分是确定性的，
+任何变化都是信号。此前的 `test_api` latency 例外随之摘除：摘除本身就是修复的
+回归断言。
+
+## 24.2 报告携带 case 级产物指针（ROADMAP 发现的 4，§21.1 更新的实现面）
+
+`CaseAggregate.artifacts`：从各 iteration 的 `CaseRunResult.artifacts` 摊平的
+指针列表（`iteration` / `name` / `kind` / `path` / `bytes`），随 `as_dict()` 进入
+report.json、REST Cases 行、summary.md「现场」小节与 report.html「现场」列。
+
+三条边界：
+
+- **只有指针，不塞内容**——内容走 REST 端点按需读（§21.4 的按需读上限不变）；
+- **`iteration` 必须进指针**：§21.3 刻意不把它放 `ArtifactRecord` 是因为宿主
+  `CaseRunResult` 给得出；摊平到 case 级后宿主是多个 iteration，不标就与下载
+  端点的查名参数对不上；
+- **指针 ≠ 能力表**：指针回答"现场在哪"（现在报告有了），能力表回答"什么观测面
+  本来就采不到"（§12.4 式可见性，仍只有 Web 承载）。
+
+## 24.3 Judge 跳过策略（PRD §92 的第三层）
+
+PRD §92 执行顺序 Native → 明显 Hard Failure → **按策略跳过部分高成本 Judge**。
+`skip_blocked` 实现第三层：本次 iteration 已被阻断性失败判死时，其非阻断 judge
+指标记 `skipped`（reason 带 PRD §92，metadata 记 `policy`），不再构造 trace、
+不再调用 SDK。`--judge-skip-policy none|skip_blocked`，缺省 `none`。
+
+两个保守条件缺一不可，方向都是"不能因省钱改判定"：
+
+```text
+1. 只跳非阻断的 judge 指标——blocking 的 judge 参与判定，跳过等于改判；
+   要省这种成本应改 profile，而不是指望跳过策略
+2. 只在判定已定时跳（metric_results 已含 native / harness / security，
+   security Hard Failure 的 blocking=True 在 §12.2）——判定未定时 judge 的
+   分数仍可能改变结论，没有"不会改结论"的保证就不跳
+```
+
+`skipped` 是独立结局（§19.1.1）：跳过必须留痕为 skipped 的 metric result，
+静默不产出会让"这条 judge 没跑"看起来像"本来就没有 judge"。
 
 ---

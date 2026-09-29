@@ -321,6 +321,17 @@ def render_summary(report: dict[str, Any], gate: GateReport | None = None) -> st
                 f"- `{case['case_id']}` iter{failure['iteration']} "
                 f"{failure['metric']} @ {mount} ({failure['verdict']}): {failure['reason']}"
             )
+    # case 级产物指针（PRD §90，ROADMAP 发现的 4）：CI 场景下只拿报告的人也要能
+    # 找到失败现场。路径是 run 目录相对路径，summary.md 与 report.json 同目录落盘，
+    # 相对链接因此成立。只列指针不塞内容（Spec §21.1）。
+    pointers = [(case, item) for case in report["cases"] for item in case.get("artifacts", [])]
+    if pointers:
+        lines += ["", "## Case Artifacts (现场)", ""]
+        for case, item in pointers:
+            lines.append(
+                f"- `{case['case_id']}` iter{item['iteration']} [{item['name']}]"
+                f"({item['path']}) — {item['kind']}, {item['bytes']} bytes"
+            )
     flaky = [c["case_id"] for c in report["cases"] if c["stability"] == Stability.FLAKY.value]
     if flaky:
         lines += ["", "## Flaky Cases (PRD §32)", ""]

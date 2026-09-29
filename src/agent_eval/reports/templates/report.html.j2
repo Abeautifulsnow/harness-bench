@@ -188,7 +188,7 @@
 <div class="card scroll">
 <table>
   <thead><tr><th>Case</th><th>Ver</th><th>Tags</th><th>Stability</th><th>Pass rate</th>
-    <th>Regression</th><th>Tool calls</th><th>Tokens</th><th>Latency</th><th>Failures</th></tr></thead>
+    <th>Regression</th><th>Tool calls</th><th>Tokens</th><th>Latency</th><th>Failures</th><th>现场</th></tr></thead>
   <tbody>
   {% for case in report.cases %}
     <tr>
@@ -202,6 +202,7 @@
       <td>{{ case.tokens_mean }}</td>
       <td>{{ case.latency_mean }} ms</td>
       <td>{{ case.blocking_failures | length }}</td>
+      <td>{% if case.artifacts %}{% for item in case.artifacts %}<a href="{{ item.path }}" class="muted">{{ item.name }}</a>{% if not loop.last %} · {% endif %}{% endfor %}{% else %}<span class="muted">—</span>{% endif %}</td>
     </tr>
   {% endfor %}
   </tbody>
