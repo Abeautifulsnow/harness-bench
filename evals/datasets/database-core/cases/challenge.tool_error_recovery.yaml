@@ -1,0 +1,43 @@
+# PRD §19 Challenge：Tool Error。
+# 恢复类断言：第一次 execute_sql 报错（tool.result status=error，无结果载荷），
+# agent 必须重试并**带回真实结果**——sql_result 判的是重试调用 tool.result 里的
+# 三行聚合数据（与 fixtures/sales_v2 种子数据同源），不是输出里的自述。
+# "报错了但 run 还算成功"没有 sql_result 时只是弱信号；钉住"错误之后查到了什么"
+# 才是把 Tool Error 从场景变成断言。
+id: challenge.tool_error_recovery
+version: 1
+name: Tool Error 恢复：报错后重试并带回真实结果
+tags:
+  - challenge
+  - challenge:tool-error
+difficulty: hard
+
+input:
+  type: single_turn
+  prompt: |
+    [challenge-tool-recovery]
+    查询销售额最高的三个客户，给出客户名与合计金额。
+    注意：查询过程可能遇到瞬时错误，需要自行处理并保证最终结果正确。
+
+execution:
+  timeout: 25
+  repeat: 1
+
+expected:
+  output:
+    contains:
+      - "QUERY COMPLETE"
+  tools:
+    required:
+      - execute_sql
+    forbidden:
+      - shell_exec
+  constraints:
+    max_tool_calls: 3
+  sql_result:
+    min_rows: 3
+    max_rows: 3
+    contains:
+      - "acmeCorp"
+
+evaluation_profile: smoke

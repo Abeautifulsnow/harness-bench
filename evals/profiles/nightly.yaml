@@ -1,0 +1,47 @@
+name: nightly
+description: >
+  Nightly Profile（PRD §40）：六个 judge 指标全开的夜间档，供夜间全量跑与
+  Main Gate 外推使用（Spec §8 场景 C 的标定对象）。不带 native fallback——
+  夜间跑的目的是拿语义判定的全量信号，降级成确定性规则等于白跑；
+  judge 不可用时按 §6.1 记 exit 2，而不是静默降级。
+  PRD §40 清单中的 GEval（PRD §42 custom.*）平台尚未实现（Spec §22.7），
+  因此缺位——写进 profile 只会在启动期 fail-fast，这里以注释记账。
+
+judge_concurrency: 2
+
+metrics:
+  - id: agent.task_completion
+    provider: deepeval
+    threshold: 0.70
+    blocking: false
+
+  - id: agent.step_efficiency
+    provider: deepeval
+    threshold: 0.70
+    blocking: false
+
+  - id: agent.tool_correctness
+    provider: deepeval
+    threshold: 0.80
+    blocking: false
+
+  - id: agent.argument_correctness
+    provider: deepeval
+    threshold: 0.80
+    blocking: false
+
+  - id: agent.plan_quality
+    provider: deepeval
+    threshold: 0.70
+    blocking: false
+
+  - id: agent.plan_adherence
+    provider: deepeval
+    threshold: 0.70
+    blocking: false
+
+  # PRD §40 还列有 GEval —— custom.* 命名空间未实现（Spec §22.7），
+  # 列入会让所有 nightly run 启动期 exit 3。实现 PRD §42 后在此补：
+  # - id: custom.<name>
+  #   provider: custom
+  #   threshold: 0.70

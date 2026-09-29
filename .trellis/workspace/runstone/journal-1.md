@@ -514,3 +514,69 @@ Mimosa deep 扫描 `scan-2026-09-28T07-40-40.862Z-fce672ff8910`：0 findings，
 ### Next Steps
 
 - None - task complete
+
+
+## Session 8: 收尾批次——发现 2 修复、§19 Challenge Set、§40 Nightly Profile
+
+**Date**: 2026-09-29
+**Task**: 按建议顺序收掉三个剩余缺口
+**Branch**: `main`
+
+### 发现 2（判定正确性）：baseline 解析不看套件组成
+
+- main-latest 候选要求 `suites_covered` 与当前 run **全等**——不是"覆盖"：
+  超集的均值同样不可比，全等才保证两侧是同一 case 总体。
+- `compare_runs` 对**所有**模式（含显式/release pin）加比较期守卫：组成不全等
+  → `valid=False` + 指名道姓的原因。解析期拦 main-latest 是因为候选是算出来的；
+  pin 是人的决定，不替用户改主意，但比较期照旧明说不可比（§4.3 同一原则）。
+- 实测复验：历史 run 里确有现行犯（smoke run 的 baseline 解析到 security run）；
+  修复后新 run 解析到同为 `{smoke: 3}` 的基线。Spec §4.2/§4.3 已回填。
+
+### §19 Challenge Set：七类各一条
+
+- 断言全部落在真实观测面：`tool_arguments`（模糊意图/协作/冲突——"参数绑了"
+  才算数）、`sql_result`（Tool Error 恢复判**重试调用带回的真实行数据**）、
+  `subagent_routing` + 容器内工具（多 SubAgent）、`context_compaction` 恰好 1 次
+  + 压缩后约束保留（超长上下文）、`step_efficiency` 基线 4（长链路不绕路）。
+- `test_challenge_assertions_can_go_red`：拿掉行为标记后断言必须变红——
+  "不是假覆盖"的直接证明。
+- `challenge` 套件不进任何 gate（PRD §19 原文），测试钉住三个 gate 的 suites。
+- mock agent 两处加法式扩展：`tool_error_calls`（逐调用错误粒度——全错表达不了
+  "自愈"；结果载荷只挂成功调用，否则 sql_result 会把失败调用当候选）、
+  `subagents`（多容器；单数形式保留兼容）。
+- 词汇表没有的**不发明**：顺序敏感约束用"步数=理想值"表达，顺序断言缺口仍在
+  §17.3 记账。
+
+### §40 Nightly Profile
+
+- 六个 agent.* 全开（threshold 0.70/0.80），**不带 native fallback**：夜间跑要
+  语义全量信号，降级成确定性规则等于白跑；judge 不可用按 §6.1 记 exit 2。
+- GEval（§42 custom.*）未实现故缺位——写进去会让所有 nightly run 启动期
+  exit 3（§22.7 fail-fast）。profile 内注释记账，实现 PRD §42 后补列。
+
+### 验证
+
+- 全量 pytest：425 passed（+11：发现 2 的 2+4 条、challenge 5 条）
+- 真实链路：`--suite challenge --agent fake:// --no-judge` → 7 条全过、
+  NO_BASELINE 提示正确（该组成无历史基线）
+- ruff check / format 全绿；web `tsc --noEmit` 绿
+- Spec 新增 §23（Challenge Set 与 Nightly Profile 的判定口径）；ROADMAP
+  「收尾批次」+ 发现 2 关账
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| (pending) | feat(challenge): 收尾批次——baseline 套件组成约束、Challenge Set、Nightly Profile |
+
+### Testing
+
+- [OK] 425 passed / ruff / tsc
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

@@ -408,6 +408,14 @@ resolve_baseline(benchmark_id, dataset_version):
 > 拿"PR 自己分支上恰好 PASS 的 run"当基线，回归判定失去意义。现按 §4.2 过滤
 > （`main` / `master` 及 `origin/*`、`refs/heads/main` 写法）；`git_branch` 未知
 > 按**不匹配**处理，宁可退化成 NO_BASELINE，也不拿来源不明的 run 当基准。
+>
+> **实现修正（2026-09-29，ROADMAP 发现的 2）**：候选还要求 `suites_covered` 与
+> 当前 run **全等**。run 级均值（tool_calls / tokens / latency）定义在"该 run 选中的
+> case 集合"上——`--suite smoke`（3 条）对 `--suite golden`（24 条）的历史 run 比
+> 回归，是拿两个不同总体的均值作差，判定结果是噪声（实测：smoke run 曾解析到
+> security run 当基线）。**全等**而不是"覆盖"：超集的均值同样不可比。旧 run
+> （未记录套件，空字典）只与同为空字典的候选匹配；显式 / release pin 是人的决定，
+> 不在解析期拦，但比较期按 §4.3 的同一原则判 invalid（原因可见）。
 
 ## 4.3 NO_BASELINE 降级语义
 
@@ -426,7 +434,9 @@ resolve_baseline(benchmark_id, dataset_version):
 5. exit code 仍按 §6 正常输出（Gate PASS → 0）
 ```
 
-禁止：静默跨 dataset_version 比较；因缺 baseline 直接阻塞 PR。
+禁止：静默跨 dataset_version 比较；静默跨**套件组成**比较（两侧 `suites_covered`
+不全等时比较判 invalid，原因写入 report——均值定义在各自的 case 集合上，集合不同
+则数值不可比）；因缺 baseline 直接阻塞 PR。
 
 ## 4.4 baselines 表 Schema（扩展 PRD §80）
 
@@ -2146,5 +2156,68 @@ tag-only 套件的 `case_ids` 恒为空，于是 Web 上**每个套件的 case �
 dataset（case 数上千时再议缓存）；junit `skipped` 分支仍只有单测覆盖，没有真实
 fixture 能让一条 case 的全部 metric 都 skipped——补 fixture 要动套件组成，不应
 顺手做。
+
+---
+
+# 23. Challenge Set 与 Nightly Profile（V2.4，缺口回填）
+
+PRD §19 与 §40 只给了名字，这里把口径定死——两者共同的准入问题与 §11 相同：
+没有判定口径的名字只是占位。
+
+## 23.1 Challenge Set：七类各一条，断言必须落在观测面
+
+七类与各自动言（`evals/datasets/database-core/cases/challenge.*.yaml`）：
+
+| 类别 | case | 断言对象（观测面） |
+| --- | --- | --- |
+| 长链路 | `challenge.long_chain` | 四工具全调用 + `step_efficiency` 基线 4（步数=理想值，绕路即退步） |
+| 模糊意图 | `challenge.ambiguous_intent` | 输出自述口径 + `tool_arguments`：SQL 带时间下界、天数显式 —— "说了/查了/参数绑了"三条缺一不可 |
+| 多 Tool 协作 | `challenge.multi_tool_collab` | 下游参数引用上游产物（schema 发现的表名进 SQL 与导出源） |
+| Tool Error | `challenge.tool_error_recovery` | `sql_result` 判**重试调用** tool.result 里的真实行数据，不是输出自述 |
+| 上下文冲突 | `challenge.context_conflict` | 后轮更正后的口径必须落进 SQL 参数（session 挂载点的 `tool_arguments`） |
+| 超长上下文 | `challenge.long_context` | `context_compaction` 恰好 1 次（不是压缩循环）+ 压缩后约束仍出现在输出 |
+| 多 SubAgent | `challenge.multi_subagent` | `subagent_routing` 路由集合 == 声明 + 容器内工具真的被调用 |
+
+两条硬规则：
+
+1. **默认不作为任何 Gate 的必跑套件**（PRD §19 原文）。pr / main / release 三个
+   gate 的 `suites` 都不含 `challenge`，由
+   `tests/test_challenge_set.py::test_challenge_is_not_a_hard_gate_suite` 钉住。
+   它是能力探测：失败说明上限没到，不阻塞 PR。
+2. **断言必须可红**。`test_challenge_assertions_can_go_red` 拿掉行为标记后
+   断言必须变红——这是"不是'输出里出现某个词'假覆盖"的直接证明（与 §11
+   准入门槛同源：给不出"怎么红"的断言不算词汇）。
+
+观测面的两处加法（mock agent，`adapters/fake.py`，加法式不改动既有脚本）：
+
+```text
+tool_error_calls: 前 N 次 tool.result 报错、其后成功。
+  tool_error 是"全错"，表达不了"自愈"；恢复类断言需要逐调用粒度。
+  结果载荷只挂成功调用——出错的那次没有"查到了什么"，
+  带上载荷会让 sql_result 把失败调用也当成候选（§19.5 口径）。
+subagents: [(名称, 容器内工具)] 列表。单数形式保留兼容；
+  "多 SubAgent"的观测面是多个 subagent span，单个容器表达不了。
+```
+
+词汇表没有的新断言**不发明**：`tools.required` 只判"调没调"，顺序敏感的约束用
+"步数 = 理想值"表达（§11.1），顺序断言的缺口仍在 §17.3 记账。
+
+## 23.2 Nightly Profile：六个 judge 指标全开，不带 fallback
+
+PRD §40 清单中的七个，实现六个（`evals/profiles/nightly.yaml`）：
+
+```text
+task_completion / step_efficiency / tool_correctness /
+argument_correctness / plan_quality / plan_adherence   ← 全部 agent.*，threshold 0.70/0.80
+GEval                                                   ← custom.* 未实现（§22.7），缺位记账
+```
+
+与 smoke / strict 的两个语义差别：
+
+- **不带 native fallback**：夜间跑的目的是拿语义判定的全量信号，降级成确定性
+  规则等于白跑；judge 不可用按 §6.1 记 exit 2。smoke 的 fallback 是"PR 速度优先"
+  的取舍，不是 nightly 该继承的。
+- **GEval 缺位是记账不是遗漏**：把 `custom.*` 写进 profile 会让所有 nightly run
+  启动期 exit 3（§22.7 的 fail-fast）。PRD §42 实现后在 profile 内补列。
 
 ---

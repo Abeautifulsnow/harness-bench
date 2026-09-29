@@ -88,3 +88,61 @@ class TestMainLatestBranchFilter:
 
         resolved = store.resolve("b1", "v1", BaselineMode.main_latest)
         assert resolved is not None and resolved.pinned_run_id == "run_main"
+
+
+class TestMainLatestSuiteComposition:
+    """ROADMAP「发现的 2」：main-latest 的候选必须与当前 run 的套件组成全等。
+
+    run 级均值（tool_calls / tokens / latency）定义在"该 run 选中的 case 集合"上；
+    `--suite smoke`（3 条）对 `--suite golden`（24 条）的历史 run 比回归，是拿两个
+    不同总体的均值作差——判定结果是噪声。全等而不是"覆盖"：超集的均值同样不可比。
+    """
+
+    def test_mismatched_composition_is_not_a_candidate(self, tmp_path: Path) -> None:
+        store, runs_root = _store(tmp_path)
+        _seed_run(runs_root, _meta("run_golden", git_branch="main", suites_covered={"golden": 24}))
+
+        resolved = store.resolve("b1", "v1", BaselineMode.main_latest, suites_covered={"smoke": 3})
+        assert resolved is None
+
+    def test_matching_composition_beats_newer_mismatched_run(self, tmp_path: Path) -> None:
+        """宁可取更早但可比的 main run，也不取更新但集合不同的。"""
+        store, runs_root = _store(tmp_path)
+        now = datetime.now(UTC)
+        _seed_run(
+            runs_root,
+            _meta(
+                "run_smoke_old",
+                git_branch="main",
+                started_at=now - timedelta(hours=2),
+                suites_covered={"smoke": 3},
+            ),
+        )
+        _seed_run(
+            runs_root,
+            _meta(
+                "run_golden_new",
+                git_branch="main",
+                started_at=now,
+                suites_covered={"golden": 24},
+            ),
+        )
+
+        resolved = store.resolve("b1", "v1", BaselineMode.main_latest, suites_covered={"smoke": 3})
+        assert resolved is not None and resolved.pinned_run_id == "run_smoke_old"
+
+    def test_old_runs_without_composition_still_match_each_other(self, tmp_path: Path) -> None:
+        """空字典 = 未记录套件的旧 run：彼此之间仍可比，不被新约束误伤。"""
+        store, runs_root = _store(tmp_path)
+        _seed_run(runs_root, _meta("run_old", git_branch="main", suites_covered={}))
+
+        resolved = store.resolve("b1", "v1", BaselineMode.main_latest, suites_covered={})
+        assert resolved is not None and resolved.pinned_run_id == "run_old"
+
+    def test_no_constraint_when_composition_unknown(self, tmp_path: Path) -> None:
+        """诊断命令（baseline resolve）没有"当前 run"，不传即不做该约束。"""
+        store, runs_root = _store(tmp_path)
+        _seed_run(runs_root, _meta("run_golden", git_branch="main", suites_covered={"golden": 24}))
+
+        resolved = store.resolve("b1", "v1", BaselineMode.main_latest)
+        assert resolved is not None and resolved.pinned_run_id == "run_golden"

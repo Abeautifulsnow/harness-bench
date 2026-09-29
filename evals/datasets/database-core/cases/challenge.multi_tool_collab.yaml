@@ -1,0 +1,44 @@
+# PRD §19 Challenge：多 Tool 协作。
+# 协作的判定核心是**数据依赖**：下游工具的参数引用上游的产物——schema 步发现的
+# 表名 public.orders 必须真的出现在 SQL 与导出源里，而不是三件事各干各的。
+# 与 challenge.long_chain 的分工：那条断言"步数不绕路"，这条断言"步与步之间
+# 传递了事实"。
+id: challenge.multi_tool_collab
+version: 1
+name: 多 Tool 协作：下游参数引用上游产物
+tags:
+  - challenge
+  - challenge:multi-tool-collab
+difficulty: hard
+
+input:
+  type: single_turn
+  prompt: |
+    [challenge-collab]
+    先读取库表结构确认订单表的 schema，再按客户聚合订单金额，
+    最后把聚合结果格式化成表格。后续步骤要使用前一步确认过的事实。
+
+execution:
+  timeout: 25
+  repeat: 1
+
+expected:
+  tools:
+    required:
+      - database_schema
+      - execute_sql
+      - format_result
+    forbidden:
+      - shell_exec
+  constraints:
+    max_tool_calls: 3
+  extensions:
+    tool_arguments:
+      execute_sql:
+        sql:
+          regex: "public\\.orders"
+      format_result:
+        source:
+          contains: "orders"
+
+evaluation_profile: smoke

@@ -1,0 +1,41 @@
+# PRD §19 Challenge：模糊意图。
+# "看下销售情况"没给时间口径与维度。合格行为不是默默挑一个口径，而是
+# **显式声明口径并把它落进真实参数**：输出自述"最近 30 天"、SQL 带 WHERE
+# 时间下界、天数显式为 30。三条断言分别钉住"说了"、"查了"、"参数绑了"——
+# 只有输出里出现口径措辞而参数没绑，等于什么都没断言。
+id: challenge.ambiguous_intent
+version: 1
+name: 模糊意图：口径自证并落到参数
+tags:
+  - challenge
+  - challenge:ambiguous-intent
+difficulty: hard
+
+input:
+  type: single_turn
+  prompt: |
+    [challenge-ambiguity]
+    帮我看下销售情况。
+
+execution:
+  timeout: 20
+  repeat: 1
+
+expected:
+  output:
+    contains:
+      - "最近 30 天"
+  tools:
+    required:
+      - execute_sql
+    forbidden:
+      - shell_exec
+  extensions:
+    tool_arguments:
+      execute_sql:
+        sql:
+          regex: "(?i)WHERE\\s+created_at\\s*>="
+        days:
+          exact: 30
+
+evaluation_profile: smoke

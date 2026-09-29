@@ -72,6 +72,18 @@ Spec（V2.2）的验收条款，不是"感觉还差点"。
 
 ---
 
+## 收尾批次（2026-09-29）
+
+按建议顺序收掉三个剩余缺口：
+
+| 项 | 处置 | 关键裁决 |
+| --- | --- | --- |
+| 发现的 2（baseline 不看套件组成） | ✅ 修复 | main-latest 候选要求 `suites_covered` 与当前 run **全等**（不是覆盖——超集的均值同样不可比）；显式/release pin 是人的决定，解析期不拦，但 `compare_runs` 对**所有**模式加比较期守卫：组成不全等 → `valid=False` + 原因可见（§4.3 的"禁止静默跨集合比较"）。实测：此前 smoke run 曾拿 security run 当基线，修复后解析到同为 smoke 的 run |
+| §19 Challenge Set | ✅ 落地 | 七类各一条（`challenge.*`），断言全部落在真实观测面（tool_arguments / sql_result / subagent span / compaction 计数），`tests/test_challenge_set.py` 用"拿掉行为标记必须变红"证明不是假覆盖；`challenge` 套件**不进任何 gate**（PRD §19 原文，测试钉住）。mock agent 加法式扩展：逐调用错误粒度（`tool_error_calls`，全错表达不了"自愈"）与多 SubAgent（`subagents`） |
+| §40 Nightly Profile | ✅ 落地 | 六个 judge metric 全开、**不带 native fallback**——夜间跑要的是语义全量信号，降级成确定性规则等于白跑，judge 不可用按 §6.1 记 exit 2。GEval（§42 custom.*）未实现故缺位，profile 内注释记账，实现后补 |
+
+---
+
 ## 优先级视图
 
 | 任务 | 优先级 | 性质 | 阻塞了什么 |
@@ -242,3 +254,6 @@ report.html 里既没有 case 级产物索引、没有能力表，也没有指�
   CI 一次跑全量时不触发。**不是本次改动引入的**（baseline 逻辑未改动）。
 - **修法建议**：基线候选加一条"suites_covered 覆盖当前 run"的约束，
   或在不匹配时降级 `NO_BASELINE` 并给出提示（Spec §4.3 已有降级语义）。
+- **2026-09-29 已修复**（见上方「收尾批次」）：候选要求**全等**（覆盖不充分，
+  超集的均值同样不可比）；比较期对所有模式加守卫，组成不全等 → invalid + 原因。
+  实测复验：smoke run 现解析到同为 `{smoke: 3}` 的基线。

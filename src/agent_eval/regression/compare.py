@@ -237,6 +237,17 @@ def compare_runs(
             f"benchmark mismatch: baseline={baseline_meta.benchmark_id} "
             f"candidate={candidate_meta.benchmark_id}"
         )
+    if baseline_meta.suites_covered != candidate_meta.suites_covered:
+        # ROADMAP「发现的 2」：run 级均值是"该 run 选中的 case 集合"上的均值，
+        # 集合不同则数值不可比——`--suite smoke`（3 条）对 `--suite golden`（24 条）
+        # 比平均工具调用数只会产出噪声回归。与"禁止跨 dataset_version 比较"同一条
+        # 原则：没有可比性就明说（valid=False → Gate 退化绝对阈值），不静默给方向。
+        comparison.valid = False
+        comparison.invalid_reason = (
+            f"suites_covered mismatch: baseline={baseline_meta.suites_covered or '{}'} "
+            f"candidate={candidate_meta.suites_covered or '{}'}"
+            "（不同 case 集合的均值不可比，Spec §4.3 禁止静默跨集合比较）"
+        )
 
     shared = sorted(set(by_baseline) & set(by_candidate))
     for case_id in sorted(set(by_baseline) | set(by_candidate)):

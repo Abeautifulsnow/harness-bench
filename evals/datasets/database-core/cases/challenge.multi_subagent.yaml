@@ -1,0 +1,41 @@
+# PRD §19 Challenge：多 SubAgent。
+# 路由断言（harness.subagent_routing）判"路由到了谁"：两个容器 researcher /
+# analyst 都要出现，且不得出现未声明的子 Agent。容器内的工具调用出现在
+# span 树里（父 span 是 subagent），因此 tools.required 能钉住"每个子 Agent
+# 真的干了自己的活"，而不是空壳容器。
+id: challenge.multi_subagent
+version: 1
+name: 多 SubAgent：检索与分析双容器协作
+tags:
+  - challenge
+  - challenge:multi-subagent
+difficulty: hard
+
+input:
+  type: single_turn
+  prompt: |
+    [challenge-multi-subagent]
+    需要两条线并行：一条检索外部行业基准数据，一条分析库内订单明细。
+    请分别派出合适的子 Agent 完成，最后汇总结论。
+
+execution:
+  timeout: 30
+  repeat: 1
+
+expected:
+  tools:
+    required:
+      - web_search
+      - execute_sql
+    forbidden:
+      - shell_exec
+  constraints:
+    max_tool_calls: 4
+
+metric_params:
+  harness.subagent_routing:
+    expected:
+      - researcher
+      - analyst
+
+evaluation_profile: smoke

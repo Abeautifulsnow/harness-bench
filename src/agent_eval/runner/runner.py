@@ -254,7 +254,7 @@ class Runner:
                 "case metric_params target metrics the profile does not run: "
                 + "; ".join(unknown_params)
             )
-        baseline = self._resolve_baseline(benchmark, info, rules)
+        baseline = self._resolve_baseline(benchmark, info, rules, suites_covered)
 
         health = await self.adapter.health_check()
         if not health.ok:
@@ -309,7 +309,11 @@ class Runner:
     # ------------------------------------------------------------- baseline
 
     def _resolve_baseline(
-        self, benchmark: BenchmarkDef, info: DatasetInfo, rules: GateRules
+        self,
+        benchmark: BenchmarkDef,
+        info: DatasetInfo,
+        rules: GateRules,
+        suites_covered: dict[str, int] | None = None,
     ) -> Baseline | None:
         """Spec §4.1 默认策略 + §4.5 运行时覆盖；未命中 → NO_BASELINE（§4.3）。"""
         cfg = self.cfg
@@ -346,7 +350,12 @@ class Runner:
                 f"unknown baseline policy '{policy}' "
                 f"(expected explicit | release | main-latest | NO_BASELINE)"
             ) from exc
-        resolved = self.baselines.resolve(benchmark.name, info.version, mode)
+        # ROADMAP「发现的 2」：main-latest 的候选必须与本次 run 的套件组成全等，
+        # 否则 run 级均值在两个不同 case 集合之间作差。显式/release pin 是人的决定，
+        # 不在解析期拦——但 compare_runs 仍会按同一原则判为 invalid（原因可见）。
+        resolved = self.baselines.resolve(
+            benchmark.name, info.version, mode, suites_covered=suites_covered
+        )
         if resolved is None and rules.gate == "release":
             # Spec §4.1: Release Gate 缺省时 fail-fast，不得退化为绝对阈值静默通过
             raise InvalidCallError(

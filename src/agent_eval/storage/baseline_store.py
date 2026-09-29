@@ -129,10 +129,18 @@ class BaselineStore:
         benchmark_id: str,
         dataset_version: str | None,
         mode: BaselineMode,
+        *,
+        suites_covered: dict[str, int] | None = None,
     ) -> Baseline | None:
-        """Spec §4.2 的解析算法；未命中返回 None（调用方降级 NO_BASELINE）。"""
+        """Spec §4.2 的解析算法；未命中返回 None（调用方降级 NO_BASELINE）。
+
+        ``suites_covered`` 是当前 run 的套件组成：main-latest 的候选必须与它
+        **全等**，否则 run 级均值在不同 case 集合之间比较，回归判定是噪声
+        （ROADMAP「发现的 2」）。``baseline resolve`` 诊断命令没有"当前 run"，
+        传 None 表示不做该约束。
+        """
         if mode == BaselineMode.main_latest:
-            return self._resolve_main_latest(benchmark_id, dataset_version)
+            return self._resolve_main_latest(benchmark_id, dataset_version, suites_covered)
         candidates = [
             b
             for b in self.effective()
@@ -145,7 +153,10 @@ class BaselineStore:
         return max(candidates, key=lambda b: b.pinned_at)
 
     def _resolve_main_latest(
-        self, benchmark_id: str, dataset_version: str | None
+        self,
+        benchmark_id: str,
+        dataset_version: str | None,
+        suites_covered: dict[str, int] | None = None,
     ) -> Baseline | None:
         """Spec §4.2：候选集是 **main 分支上的** runs，不是"任意分支最近一次"。
 
@@ -153,6 +164,11 @@ class BaselineStore:
         baseline —— Spec 原文警告的"最近一次可能本身已带 Regression"就是这个宽松
         变体。``git_branch`` 未知（None/空）按不匹配处理：宁可退化成 NO_BASELINE，
         也不拿来源不明的 run 当基准。
+
+        ``suites_covered`` 给定时（当前 run 的套件组成），候选必须与它全等：
+        run 级均值定义在"该 run 选中的 case 集合"上，`--suite smoke` 对
+        `--suite golden` 的历史 run 比回归是拿两个不同总体的均值作差。全等而不是
+        "覆盖"——超集的均值同样不可比。旧 run（空字典）只与同为空字典的候选匹配。
         """
         candidates = []
         for meta in self.store.list_runs():
@@ -163,6 +179,8 @@ class BaselineStore:
             if not _is_main_branch(meta.git_branch):
                 continue
             if dataset_version is not None and meta.dataset_version != dataset_version:
+                continue
+            if suites_covered is not None and meta.suites_covered != suites_covered:
                 continue
             if not self._gate_passed(meta.run_id):
                 continue

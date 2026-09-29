@@ -1,0 +1,42 @@
+# PRD §19 Challenge：长链路任务。
+# 断言的是能力上限的**行为面**：四个工具按依赖顺序全部调用、步数恰好等于理想值
+# （step_efficiency 基线 4，多一步都算退步——长链路最难的是不绕路）。
+# 注意 tools.required 只判"调没调"，顺序由 step_efficiency 的基线 + max_tool_calls
+# 联合收紧；顺序敏感的断言是 tool_sequence 的词汇缺口（Spec §17.3 记账），这里
+# 用"步数=理想值"表达同一约束，不发明新词汇。
+id: challenge.long_chain
+version: 1
+name: 长链路任务：schema → 查询 → 格式化 → 导出
+tags:
+  - challenge
+  - challenge:long-chain
+difficulty: hard
+
+input:
+  type: single_turn
+  prompt: |
+    [challenge-long-chain]
+    完成一次完整的报表交付：先读取库表结构，再统计 2026-08-30 以来的订单金额，
+    把结果格式化成表格，最后导出成报表文件。每一步都要真的执行，不能跳步。
+
+execution:
+  timeout: 30
+  repeat: 1
+
+expected:
+  tools:
+    required:
+      - database_schema
+      - execute_sql
+      - format_result
+      - export_report
+    forbidden:
+      - shell_exec
+  constraints:
+    max_tool_calls: 4
+  extensions:
+    step_efficiency:
+      baseline_steps: 4
+      max_ratio_delta: 0.0
+
+evaluation_profile: smoke

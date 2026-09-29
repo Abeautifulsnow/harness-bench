@@ -1,0 +1,57 @@
+# PRD §19 Challenge：超长上下文。
+# 场景形状是"上下文长到触发压缩"；能力断言是**压缩后约束仍被遵守**：
+# 压缩恰好发生 1 次（不是压不完的循环，context_compaction expected/max 都是 1），
+# 且"最近 30 天"这条绑定约束在压缩后仍出现在最终输出里。
+# 压缩"保留了什么"在事件流里不可观测（Spec §17.3），保留事实的验证只能
+# 走 output——这里是该口径的正当用法，不是拿关键词凑覆盖。
+id: challenge.long_context
+version: 1
+name: 超长上下文：压缩恰好一次且约束保留
+tags:
+  - challenge
+  - challenge:long-context
+difficulty: hard
+
+input:
+  type: single_turn
+  prompt: |
+    [compact-retain] 以下是历史会话的完整摘要，请通读后回答最后的问题。
+
+    --- 历史摘要开始 ---
+    第 1 轮：客户 acmeCorp 查询了 6 月订单，合计 12000。
+    第 2 轮：客户 globex 反馈了发票抬头变更，新抬头为 GLOBAL-NEW。
+    第 3 轮：运营确认了 8 月的促销范围：仅限华东区。
+    第 4 轮：数据团队重建了 orders 表索引，查询计划有变。
+    第 5 轮：客户 initech 要求导出格式改为 CSV。
+    第 6 轮：客服记录了 3 起延迟工单，均已关闭。
+    第 7 轮：财务确认 8 月对账完成，无坏账。
+    第 8 轮：法务更新了数据保留策略：明细保留 180 天。
+    第 9 轮：ETL 作业迁移至凌晨 2 点，无业务影响。
+    第 10 轮：报表平台升级，旧版 /reports 下线。
+    第 11 轮：华东区新增两名销售，权限已开通。
+    第 12 轮：客户 acmeCorp 升级为企业版，配额提升。
+    --- 历史摘要结束 ---
+
+    任务：按最近 30 天口径汇总订单金额。无论上下文如何压缩，
+    这个时间口径是绑定约束，最终答复必须明确按该口径执行。
+
+execution:
+  timeout: 30
+  repeat: 1
+
+expected:
+  output:
+    contains:
+      - "最近 30 天"
+  tools:
+    forbidden:
+      - shell_exec
+  constraints:
+    max_tool_calls: 3
+
+metric_params:
+  harness.context_compaction:
+    expected_compactions: 1
+    max_compactions: 1
+
+evaluation_profile: smoke

@@ -97,3 +97,24 @@ class TestComparisonValidity:
         )
         assert comparison.valid is True
         assert comparison.invalid_reason is None
+
+    def test_suite_composition_mismatch_is_invalid(self) -> None:
+        """ROADMAP 发现的 2：均值定义在各自的 case 集合上，集合不同不可比。"""
+        comparison = compare_runs(
+            _meta("base", suites_covered={"golden": 24}),
+            [_result("base", "c1")],
+            _meta("cand", suites_covered={"smoke": 3}),
+            [_result("cand", "c1")],
+        )
+        assert comparison.valid is False
+        assert "suites_covered" in (comparison.invalid_reason or "")
+
+    def test_empty_composition_on_both_sides_is_valid(self) -> None:
+        """旧 run（未记录 suites_covered）相互比较仍有效，不受新约束影响。"""
+        comparison = compare_runs(
+            _meta("base", suites_covered={}),
+            [_result("base", "c1")],
+            _meta("cand", suites_covered={}),
+            [_result("cand", "c1")],
+        )
+        assert comparison.valid is True

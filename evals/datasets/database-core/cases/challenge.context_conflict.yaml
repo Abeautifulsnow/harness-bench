@@ -1,0 +1,47 @@
+# PRD §19 Challenge：上下文冲突。
+# 前轮陈述旧口径（customer_id 是唯一标识），后轮显式更正（email 才是）。
+# 冲突裁决的正确行为是**按更正后的口径绑定真实参数**：第二轮的 SQL 必须以
+# email 为键。断言放在 expected.final 的 tool_arguments（session 挂载点，Spec §2.2
+# extensions 不进轮级）——第一轮脚本不调工具，session 里的 execute_sql 调用
+# 只可能来自第二轮，"全部 occurrence 必须命中"于是等价于"第二轮按新口径查了"。
+id: challenge.context_conflict
+version: 1
+name: 上下文冲突：后轮更正必须覆盖前轮口径
+tags:
+  - challenge
+  - challenge:context-conflict
+difficulty: hard
+
+input:
+  type: multi_turn
+  turns:
+    - user: |
+        [challenge-idle] 背景：这批客户的唯一标识是 customer_id（数字）。
+        请先确认你了解这个口径。
+    - user: |
+        [challenge-conflict] 更正：刚刚确认唯一标识已切换为 email（customer_id
+        字段已废弃）。请按最新口径查询上个月有下单的客户，并明确说明你用的是哪个字段。
+      expect:
+        tools:
+          required:
+            - execute_sql
+
+execution:
+  timeout: 30
+  repeat: 1
+
+expected:
+  final:
+    output:
+      contains:
+        - "email"
+    tools:
+      forbidden:
+        - shell_exec
+    extensions:
+      tool_arguments:
+        execute_sql:
+          sql:
+            regex: "(?i)\\bemail\\b"
+
+evaluation_profile: smoke

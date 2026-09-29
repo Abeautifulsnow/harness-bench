@@ -1,0 +1,9 @@
+# Challenge Set（PRD §19）：能力上限测试集。
+# 默认不作为任何 Gate 的必跑套件（PRD §19 原文）——pr.yaml / main.yaml /
+# release.yaml 的 suites 都不包含 challenge。它是"能力探测"，不是"底线拦截"：
+# 失败说明能力上限没到，不阻塞 PR。按需 `--suite challenge` 运行。
+# 七类各至少一条：long-chain / ambiguous-intent / multi-tool-collab /
+# tool-error / context-conflict / long-context / multi-subagent。
+name: challenge
+tags:
+  - challenge

@@ -51,10 +51,14 @@ class ScriptTurn:
     # `sql_result` 眼里不进候选集（没有"查到了什么"可判）；带了形状不认识的
     # 载荷（例如字符串）则进候选集但判 skipped（Spec §19.5）。
     # 注意：真的返回 `None` 的载荷与"没给"在事件层不可区分，两者都落 skipped。
+    # 结果载荷只挂在**成功**的调用上：出错的那次没有"查到了什么"可言。
     tool_result: object = None
     # 子 Agent 容器：容器内调用 subagent_tools（PRD §10 span tree）
     subagent: str | None = None
     subagent_tools: list[str] = field(default_factory=list)
+    # 多子 Agent（PRD §19 Challenge 的"多 SubAgent"）：(名称, 容器内工具) 列表。
+    # 与单数形式的 subagent 并存——单数保持旧脚本兼容，复数是挑战集的观测面。
+    subagents: list[tuple[str, list[str]]] = field(default_factory=list)
     # retry 事件次数（PRD §8 协议事件；harness.retry 的唯一判定依据）
     retries: int = 0
     # skill.discovered / skill.loaded 事件（PRD §8 协议事件；harness.skill_load 的观测面）
@@ -64,6 +68,10 @@ class ScriptTurn:
     tokens: int = 200
     fail: bool = False
     tool_error: bool = False  # tool.result status=error
+    # 前 N 次 tool.result 报错、其后成功（Tool Error 恢复的观测面）。
+    # tool_error 是"全错"，这里是"错几次后自愈"——恢复类断言（重试调用带回
+    # 结果）需要逐调用粒度，全错/全对表达不了"自愈"。
+    tool_error_calls: int = 0
     sleep_s: float = 0.0
 
 
@@ -173,6 +181,67 @@ def default_rules() -> dict[str, ScriptTurn]:
         # 命令退出码：`exit_code` 断言的观测面（command.finished 的 exit_code 字段）
         "[cmd-ok]": ScriptTurn(commands=["ls"], command_exit_code=0),
         "[cmd-fail]": ScriptTurn(commands=["ls"], command_exit_code=1),
+        # --- Challenge Set（PRD §19 能力上限）的行为脚本 ----------------------
+        # 长链路：四个工具按依赖顺序串联
+        "[challenge-long-chain]": ScriptTurn(
+            tools=["database_schema", "execute_sql", "format_result", "export_report"],
+            tool_arguments={
+                "execute_sql": {
+                    "sql": "SELECT id, total FROM public.orders WHERE created_at >= '2026-08-30'"
+                },
+                "export_report": {"format": "csv", "source": "orders_summary"},
+            },
+        ),
+        # 模糊意图："看下销售情况"不给口径——正确行为是**显式声明口径并落到参数**，
+        # 不是默默挑一个。输出自述口径 + SQL 带 WHERE 时间下界 + 天数显式。
+        "[challenge-ambiguity]": ScriptTurn(
+            tools=["execute_sql"],
+            output=BASE_OUTPUT + "（口径：最近 30 天）",
+            tool_arguments={
+                "execute_sql": {
+                    "sql": "SELECT region, SUM(amount) FROM public.orders "
+                    "WHERE created_at >= '2026-08-30' GROUP BY region",
+                    "days": 30,
+                }
+            },
+        ),
+        # 多 Tool 协作：下游参数引用上游产物（schema 发现的表名进 SQL 与导出源）
+        "[challenge-collab]": ScriptTurn(
+            tools=["database_schema", "execute_sql", "format_result"],
+            tool_arguments={
+                "execute_sql": {
+                    "sql": "SELECT customer_id, SUM(amount) FROM public.orders GROUP BY customer_id"
+                },
+                "format_result": {"source": "public.orders", "style": "table"},
+            },
+        ),
+        # Tool Error 恢复：第一次调用报错、重试成功并带回结果（逐调用错误粒度）
+        "[challenge-tool-recovery]": ScriptTurn(
+            tools=["execute_sql", "execute_sql"],
+            tool_error_calls=1,
+            tool_result=[
+                {"customer_id": 1, "name": "acmeCorp", "total": 20000.0},
+                {"customer_id": 2, "name": "globex", "total": 9500.0},
+                {"customer_id": 3, "name": "initech", "total": 4300.0},
+            ],
+        ),
+        # 上下文冲突·前轮：只陈述旧口径，不调工具（后轮的更正才是裁决对象）
+        "[challenge-idle]": ScriptTurn(tools=[], output=BASE_OUTPUT + "（已知口径：customer_id）"),
+        # 上下文冲突·后轮：更正与旧口径冲突——正确行为是**按更正后的口径**绑定参数
+        "[challenge-conflict]": ScriptTurn(
+            tools=["execute_sql"],
+            output=BASE_OUTPUT + "（已按更正后的口径：以 email 为唯一标识查询）",
+            tool_arguments={
+                "execute_sql": {
+                    "sql": "SELECT email, SUM(amount) FROM public.orders "
+                    "WHERE email IS NOT NULL GROUP BY email"
+                }
+            },
+        ),
+        # 多 SubAgent：两个容器各司其职（researcher 检索 / analyst 分析）
+        "[challenge-multi-subagent]": ScriptTurn(
+            subagents=[("researcher", ["web_search"]), ("analyst", ["execute_sql"])],
+        ),
         # 自然语言触发词放最后：显式标记必须能覆盖它
         "30 天": ScriptTurn(output=BASE_OUTPUT + "（已按最近 30 天过滤）"),
         **SECURITY_RULES,
@@ -199,7 +268,11 @@ def turn_events(message: str, script: ScriptTurn, trace_id: str) -> list[TraceEv
     ]
     agent_span = events[-1].event_id
 
+    made = 0
+
     def add_tool(name: str, parent: str) -> None:
+        nonlocal made
+        made += 1
         call = _event(
             trace_id,
             parent,
@@ -207,11 +280,21 @@ def turn_events(message: str, script: ScriptTurn, trace_id: str) -> list[TraceEv
             {"name": name, "arguments": script.tool_arguments.get(name) or {"query": message[:32]}},
         )
         events.append(call)
-        payload: dict = {"status": "error" if script.tool_error else "ok"}
-        if script.tool_result is not None:
+        errored = script.tool_error or made <= script.tool_error_calls
+        payload: dict = {"status": "error" if errored else "ok"}
+        # 结果载荷只挂成功调用：出错的那次没有"查到了什么"，
+        # 带上载荷会让 sql_result 把失败调用也当成候选（Spec §19.5 的口径）。
+        if script.tool_result is not None and not errored:
             payload["result"] = script.tool_result
         events.append(_event(trace_id, call.event_id, "tool.result", payload))
 
+    if script.subagents:
+        for sub_name, sub_tools in script.subagents:
+            sub = _event(trace_id, agent_span, "subagent.started", {"name": sub_name})
+            events.append(sub)
+            for tool in sub_tools:
+                add_tool(tool, sub.event_id)
+            events.append(_event(trace_id, sub.event_id, "subagent.finished", {"status": "ok"}))
     if script.subagent is not None:
         sub = _event(trace_id, agent_span, "subagent.started", {"name": script.subagent})
         events.append(sub)
