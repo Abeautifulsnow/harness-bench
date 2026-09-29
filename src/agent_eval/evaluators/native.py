@@ -88,6 +88,12 @@ class EvalScope:
     command_calls: list[ToolCallRecord] = field(default_factory=list)
     latency_ms: int = 0
     tokens: int = 0
+    # A3（用量观测标志，分量粒度）：None = 该分量未观测。``tokens`` 是合成后的
+    # 总量，表达不了"输入有、输出无"——而那正是外部 SUT 的常见形态（半缺）。
+    # ``max_tokens`` 约束依赖输出侧：输出侧未观测时判 skipped（与 max_cost 的
+    # cost=None 同一处置），缺失坍缩为 0 会让 `0 > limit` 恒假 → 恒 pass 假绿。
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     # PRD §59：无定价时 cost 为 None，不是 0.0。max_cost 因此只在 cost is not None
     # 时可判；缺定价的 run 判 skipped（而不是"0 <= max_cost → pass"）。
     cost: float | None = None
@@ -184,8 +190,19 @@ def _check_constraints(assertion: Assertion, scope: EvalScope) -> list[str]:
         )
     if limits.max_latency_ms is not None and scope.latency_ms > limits.max_latency_ms:
         problems.append(f"latency {scope.latency_ms}ms > max_latency_ms {limits.max_latency_ms}")
-    if limits.max_tokens is not None and scope.tokens > limits.max_tokens:
-        problems.append(f"tokens {scope.tokens} > max_tokens {limits.max_tokens}")
+    if limits.max_tokens is not None:
+        # A3：max_tokens 约束的是**输出侧**用量。依赖的分量未观测 → skipped，
+        # 与紧邻的 max_cost 分支完全同向（Spec §19.1.1 的三结局通则）——
+        # `tokens` 缺失坍缩为 0 后 `0 > limit` 恒假，那是 native 侧的 0 假绿。
+        if scope.output_tokens is None:
+            detail = "constraints.max_tokens 无法评测：输出侧用量未观测"
+            if scope.input_tokens is None:
+                detail += "（输入侧同样未观测）"
+            else:
+                detail += f"（仅输入侧可观测：{scope.input_tokens}）"
+            raise ObservationUnavailable(detail)
+        if scope.tokens > limits.max_tokens:
+            problems.append(f"tokens {scope.tokens} > max_tokens {limits.max_tokens}")
     return problems
 
 

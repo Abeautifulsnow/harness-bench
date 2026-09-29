@@ -9,6 +9,10 @@ description: >
 
 judge_concurrency: 2
 
+# E1：收尾档常开协议词汇 strict（未知事件类型 → exit 2）。
+# 不复用 Gate 的 strict 字段（那是 blocking FAIL 阻断语义，Spec §15）。
+strict_protocol: true
+
 metrics:
   - id: agent.task_completion
     provider: deepeval

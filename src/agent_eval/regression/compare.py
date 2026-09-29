@@ -301,6 +301,28 @@ def compare_runs(
             f"candidate={candidate_meta.suites_covered or '{}'}"
             "（不同 case 集合的均值不可比，Spec §4.3 禁止静默跨集合比较）"
         )
+    if (baseline_meta.agent_model or None) != (candidate_meta.agent_model or None):
+        # A4：模型漂移让 token / 延迟 / 通过率全变，报告却会归因为"回归"——
+        # 这直接打在回归平台的核心主张上。agent_model 从此是受校验字段
+        # （值来自 health 阶段 SUT 自报的实际生效模型），不是自由标签。
+        # 双侧均为空（旧 run 未记录）无法证伪可比性，不拦。
+        comparison.valid = False
+        comparison.invalid_reason = (
+            f"agent model mismatch: baseline={baseline_meta.agent_model or '-'} "
+            f"candidate={candidate_meta.agent_model or '-'}"
+            "（跨模型的 token/延迟/通过率不可比，Spec §4.3 禁止静默跨模型比较）"
+        )
+    if (baseline_meta.token_usage_scope or None) != (candidate_meta.token_usage_scope or None):
+        # A3 修订五的同批守卫：只校输入侧的 run 与校全部用量的 run，
+        # `tokens.max_regression_percent` 比出来的差值里混着口径变化——
+        # "口径漂移被伪装成回归"正是 §4.3 要禁的"不可比"。双侧均空（旧 run
+        # 未记录口径）与 suites_covered 同理放行。
+        comparison.valid = False
+        comparison.invalid_reason = (
+            f"token usage scope mismatch: baseline={baseline_meta.token_usage_scope or '-'} "
+            f"candidate={candidate_meta.token_usage_scope or '-'}"
+            "（用量口径不同的 run 不可比：单侧观测的总量是被低估的，Spec §4.3）"
+        )
 
     shared = sorted(set(by_baseline) & set(by_candidate))
     for case_id in sorted(set(by_baseline) | set(by_candidate)):

@@ -40,6 +40,10 @@ class RetryEvaluator(EvaluatorPlugin):
     name = "harness.retry"
     description = "重试次数不超过声明上限（params.max_retries）"
     default_params = {"max_retries": 0}
+    # 观测面依赖（A2）：retry 事件是本条的唯一判定输入。SUT 只写日志不发事件时
+    # （重试发生在 provider 内部、不上协议流），0 次观测与"没有重试"同形——
+    # 不声明这条依赖，`0 <= 0` 的恒 pass 就是假信号。
+    required_events = ("retry",)
 
     async def evaluate(self, context: EvaluationContext) -> MetricResultModel:
         limit = float(context.param("max_retries", 0) or 0)
@@ -85,6 +89,9 @@ class LoopEvaluator(EvaluatorPlugin):
     name = "harness.loop"
     description = "同一工具的连续重复调用不超过声明上限（params.max_repeats）"
     default_params = {"max_repeats": 3}
+    # tool_sequence 由 tool.call 事件派生（A2）：事件面不存在时序列恒空、
+    # 最长重复恒 0——与 retry 同病的另一处，必须一起声明。
+    required_events = ("tool.call",)
 
     async def evaluate(self, context: EvaluationContext) -> MetricResultModel:
         limit = float(context.param("max_repeats", 3) or 3)
@@ -119,6 +126,10 @@ class MCPPermissionEvaluator(EvaluatorPlugin):
     # 缺省 None 而不是 []：`allowed: []` 是一个真断言（"任何 MCP 调用都算越权"），
     # 与"没声明"必须可区分——两者都写成 [] 会让前者退化成 skipped（静默不判）。
     default_params = {"allowed": None}
+    # mcp span 由 mcp.call 事件派生（trace/builder.py 配对表）：SUT 把 MCP 调用
+    # 折叠进普通工具流时 span 恒空、越权集合恒空 → 判 pass。声明依赖后该形态
+    # 判 skipped（B2：方言必须拆流，这条是漏拆时的安全网）。
+    required_events = ("mcp.call",)
 
     async def evaluate(self, context: EvaluationContext) -> MetricResultModel:
         declared = context.param("allowed")
@@ -160,6 +171,7 @@ class SubAgentRoutingEvaluator(EvaluatorPlugin):
     description = "实际路由的子 Agent 集合等于声明集合（params.expected）"
     # 同 mcp_permission：`expected: []`（不得路由任何子 Agent）是真断言，缺省须为 None
     default_params = {"expected": None, "allow_extra": False}
+    required_events = ("subagent.started", "subagent.finished")
 
     async def evaluate(self, context: EvaluationContext) -> MetricResultModel:
         declared = context.param("expected")
@@ -212,6 +224,7 @@ class SkillLoadEvaluator(EvaluatorPlugin):
     # 三个参数缺省 None：`expected_loaded: []`（不得加载任何 skill）与"没声明"必须
     # 可区分，否则前者会退化成 skipped——那正是"该红的时候不红"。
     default_params = {"expected_loaded": None, "expected_first": None, "max_loaded": None}
+    required_events = ("skill.loaded",)
 
     async def evaluate(self, context: EvaluationContext) -> MetricResultModel:
         declared_loaded = context.param("expected_loaded")
@@ -270,6 +283,8 @@ class ContextCompactionEvaluator(EvaluatorPlugin):
     name = "harness.context_compaction"
     description = "上下文压缩次数在声明区间内（params.expected_compactions/max_compactions）"
     default_params = {"expected_compactions": None, "max_compactions": 3}
+    # started/finished 必须成对观测（只认配对关闭的压缩）：任一侧缺失即整条不可判。
+    required_events = ("context.compaction.started", "context.compaction.finished")
 
     async def evaluate(self, context: EvaluationContext) -> MetricResultModel:
         expected = context.param("expected_compactions")

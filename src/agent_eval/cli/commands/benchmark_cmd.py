@@ -44,6 +44,11 @@ def benchmark_run(
     ),
     run_id_file: Path | None = typer.Option(None, "--run-id-file"),
     no_judge: bool = typer.Option(False, "--no-judge"),
+    strict_protocol: bool = typer.Option(
+        False,
+        "--strict-protocol",
+        help="E1：未知事件类型升级为 exit 2（默认 warn 只计数进报告 warnings；profile 亦可声明）",
+    ),
     judge_skip_policy: str = typer.Option(
         "none",
         "--judge-skip-policy",
@@ -83,6 +88,7 @@ def benchmark_run(
         gate=gate,
         suites=list(suite),
         no_judge=no_judge,
+        strict_protocol=strict_protocol,
         judge_skip_policy=judge_skip_policy,
         save_artifacts=not no_save_artifacts,
         timeout=timeout,

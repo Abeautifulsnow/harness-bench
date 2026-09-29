@@ -19,6 +19,10 @@ def scope(**kw) -> EvalScope:
         tool_calls=[ToolCallRecord(name="database_schema"), ToolCallRecord(name="execute_sql")],
         latency_ms=1000,
         tokens=500,
+        # A3：默认模拟"两侧用量都已观测"（FakeAgent 的 model.response 带 usage）。
+        # 用量未观测的形态由专门用例构造（output_tokens=None → max_tokens skipped）。
+        input_tokens=250,
+        output_tokens=250,
     )
     defaults.update(kw)
     return EvalScope(**defaults)
@@ -451,3 +455,44 @@ class TestSemanticArgumentChecks:
             tool_calls=[ToolCallRecord(name="execute_sql", arguments={"payload": {"a": 2}})]
         )
         assert self._verdict(a, miss) == "fail"
+
+
+def test_max_tokens_skips_when_output_side_unobserved() -> None:
+    """A3：max_tokens 依赖输出侧用量——未观测判 skipped，不坍缩为 0 假绿。
+
+    旧路径 `0 > limit` 恒假 → 恒 pass，是 native 侧与 harness.retry `0<=0`
+    同病的另一处（Spec §19.1.1 三结局的 native 落点）。
+    """
+    a = Assertion.model_validate({"constraints": {"max_tokens": 10}})
+    results = evaluate_assertions(a, scope(output_tokens=None), "cr1")
+    assert results[0].verdict == "skipped"
+    assert results[0].blocking is False
+    assert results[0].metadata["skipped_reason"] == "observation_unavailable"
+    assert "输出侧" in results[0].reason
+
+
+def test_max_tokens_skips_on_partial_usage() -> None:
+    """半缺（有输入无输出）同样 skipped——外部 SUT 的常见实况。
+
+    int 的总量表达不了"输入有、输出无"，所以判定挂在分量上；
+    reason 要写明缺哪一侧、已有哪一侧，让"下一步动作"指向观测面。
+    """
+    a = Assertion.model_validate({"constraints": {"max_tokens": 10}})
+    results = evaluate_assertions(a, scope(input_tokens=100, output_tokens=None), "cr1")
+    assert results[0].verdict == "skipped"
+    assert "100" in results[0].reason
+
+
+def test_max_tokens_still_fails_when_output_observed() -> None:
+    """两侧都已观测时判定照旧：超限 FAIL（防止修成恒 skipped）。"""
+    a = Assertion.model_validate({"constraints": {"max_tokens": 10}})
+    results = evaluate_assertions(a, scope(), "cr1")  # tokens=500，双侧已观测
+    assert results[0].verdict == "fail"
+    assert "max_tokens" in results[0].reason
+
+
+def test_max_cost_unaffected_by_token_flags() -> None:
+    """同函数里 max_cost 的既有语义不动：无定价仍 skipped（PRD §59）。"""
+    a = Assertion.model_validate({"constraints": {"max_cost": 0.01}})
+    results = evaluate_assertions(a, scope(), "cr1")
+    assert results[0].verdict == "skipped"

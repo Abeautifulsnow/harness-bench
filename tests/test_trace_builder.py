@@ -81,3 +81,20 @@ def test_error_marks_owner_span() -> None:
     tree = b.build()
     root = tree.spans[0]
     assert root.status == "error"
+
+
+def test_usage_observed_distinguishes_zero_from_absent() -> None:
+    """A3：0 值与"协议没给"必须可区分——后者才是 max_tokens 判 skipped 的依据。"""
+    b = TraceBuilder()
+    b.feed(evt("r1", None, "run.started"))
+    b.feed(evt("m1", "r1", "model.request", {"model": "m"}))
+    # 只带 input_tokens（=0 也是观测）：output/cache 两侧未观测
+    b.feed(evt("m2", "m1", "model.response", {"usage": {"input_tokens": 0}}))
+    b.feed(evt("end", None, "run.finished", {"status": "success"}))
+    tree = b.build()
+    assert tree.usage_observed() == {
+        "input_tokens": True,
+        "output_tokens": False,
+        "cache_tokens": False,
+    }
+    assert tree.usage_totals()["input_tokens"] == 0  # 观测到 0 与没观测是两件事

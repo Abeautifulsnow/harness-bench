@@ -9,9 +9,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from agent_eval.adapters.base import AgentRequest, AgentSession
+from agent_eval.adapters.base import AgentRequest, AgentSession, HealthStatus, SessionContext
 from agent_eval.adapters.fake import FakeAgentAdapter, ScriptTurn
 from agent_eval.errors import EXIT_INFRA, InfraError
+from agent_eval.ids import new_id
+from agent_eval.models.events import TraceEvent
 from agent_eval.models.results import CaseStatus, Stability
 from agent_eval.models.run import FailureSemantics, RunStatus
 from agent_eval.runner.runner import RunConfig, Runner
@@ -279,6 +281,212 @@ async def test_multi_turn_session_lifecycle(evals_tree, fixtures_root) -> None:
     _, results = runner.store.load_run(outcome.run_id)
     multi = [r for r in results if r.case_id == "database.query.multi_turn_refine"]
     assert all(len(r.turn_results) == 2 for r in multi)
+
+
+# ---------------------------------------------------------- A1/A3/A4/E1 端到端
+
+
+class InstrumentedAgent(FakeAgentAdapter):
+    """探针适配器：health 观测面/模型、create_session 回执、方言事件、用量裁剪。
+
+    其余行为与 FakeAgent 完全一致——每条测试只改变被验证的那一个变量。
+    """
+
+    def __init__(
+        self,
+        *,
+        surface: dict[str, bool] | None = None,
+        agent_model: str | None = None,
+        receipt: bool | None = None,
+        dialect_event: str | None = None,
+        drop_output_tokens: bool = False,
+    ) -> None:
+        super().__init__()
+        self.surface = surface
+        self.agent_model = agent_model
+        self.receipt = receipt
+        self.dialect_event = dialect_event
+        self.drop_output_tokens = drop_output_tokens
+        self.created: list[SessionContext] = []
+
+    async def health_check(self) -> HealthStatus:
+        return HealthStatus(
+            ok=True,
+            detail="fake",
+            observation_surface=dict(self.surface or {}),
+            agent_model=self.agent_model,
+        )
+
+    async def create_session(self, context: SessionContext) -> AgentSession:
+        self.created.append(context)
+        session = await super().create_session(context)
+        if self.receipt is not None:
+            session.workdir_accessible = self.receipt
+        return session
+
+    async def _run(self, session, request) -> AsyncIterator[TraceEvent]:
+        async for event in super()._run(session, request):
+            if self.drop_output_tokens and event.type == "model.response":
+                usage = event.data.get("usage")
+                if isinstance(usage, dict):
+                    # A3 半缺形态：协议只给输入侧（ai-chatbot 的 data-context-usage）
+                    event.data["usage"] = {k: v for k, v in usage.items() if k != "output_tokens"}
+            yield event
+            if event.type == "run.started" and self.dialect_event:
+                yield TraceEvent(
+                    event_id=new_id("evt"),
+                    trace_id=event.trace_id,
+                    type=self.dialect_event,
+                    data={},
+                )
+
+
+async def _run_instrumented(cfg: RunConfig, adapter: FakeAgentAdapter):
+    runner = Runner(cfg)
+    runner.adapter = adapter
+    outcome = await runner.run()
+    meta, results = runner.store.load_run(outcome.run_id)
+    return outcome, meta, results
+
+
+async def test_workdir_reaches_agent_per_iteration(evals_tree, fixtures_root) -> None:
+    """A1 去程：fixture 沙箱 handle 经 SessionContext.extra 交给被测方，逐迭代独立。"""
+    evals_root, data_root = evals_tree
+    cfg = make_cfg(evals_root, data_root, fixtures_root, tag_filter=["smoke"], repeat=1)
+    adapter = InstrumentedAgent(receipt=True)
+    outcome, meta, _ = await _run_instrumented(cfg, adapter)
+    assert adapter.created
+    assert all("workdir" in ctx.extra for ctx in adapter.created)
+    assert len({ctx.extra["workdir"] for ctx in adapter.created}) == len(adapter.created)
+    assert outcome.exit_code == 0
+    assert meta.warnings == []  # 明确回执可达 → 无告警
+
+
+async def test_workdir_receipt_false_is_infra(evals_tree, fixtures_root) -> None:
+    """A1 回程：SUT 回执不可达 → InfraError（exit 2），把配置错与 agent 失败分开。"""
+    evals_root, data_root = evals_tree
+    cfg = make_cfg(evals_root, data_root, fixtures_root, tag_filter=["smoke"], repeat=1)
+    outcome, _, results = await _run_instrumented(cfg, InstrumentedAgent(receipt=False))
+    assert outcome.status == RunStatus.partial.value
+    assert outcome.exit_code == EXIT_INFRA
+    assert results
+    assert all(r.status == CaseStatus.ERROR for r in results)
+    assert all(r.failure_semantics == FailureSemantics.INFRA for r in results)
+
+
+async def test_missing_workdir_receipt_is_visible_warning(evals_tree, fixtures_root) -> None:
+    """A1：回执缺失 = 未知——不默认视为可达，记账可见但不阻断。"""
+    evals_root, data_root = evals_tree
+    cfg = make_cfg(evals_root, data_root, fixtures_root, tag_filter=["smoke"], repeat=1)
+    outcome, meta, _ = await _run_instrumented(cfg, InstrumentedAgent(receipt=None))
+    assert outcome.exit_code == 0  # 未知不改变判定
+    assert any("WORKDIR RECEIPT MISSING" in w for w in outcome.aggregate.warnings)
+    assert any("WORKDIR RECEIPT MISSING" in w for w in meta.warnings)
+
+
+async def test_workdir_writer_makes_file_state_judgeable(evals_tree, fixtures_root) -> None:
+    """A1 端到端：agent 侧读 workdir 写文件，file_state 判 pass/fail 而非 skipped。"""
+
+    class WorkdirWriter(InstrumentedAgent):
+        async def create_session(self, context: SessionContext) -> AgentSession:
+            from pathlib import Path
+
+            workdir = context.extra.get("workdir")
+            if workdir:
+                Path(workdir).mkdir(parents=True, exist_ok=True)
+                (Path(workdir) / "agent_output.txt").write_text("agent was here", encoding="utf-8")
+            return await super().create_session(context)
+
+    evals_root, data_root = evals_tree
+    case = {
+        "id": "wd.file_state",
+        "name": "workdir 透传端到端",
+        "version": 1,
+        "tags": ["scripted"],
+        "input": {"type": "single_turn", "prompt": "write the file"},
+        "environment": {"fixture": "sales_v2", "database": "sqlite"},
+        "execution": {"timeout": 30, "repeat": 1},
+        "expected": {
+            "file_state": {"files": {"agent_output.txt": {"contains": ["agent was here"]}}}
+        },
+    }
+    benchmark = add_scripted_dataset(evals_root, [case])
+    cfg = scripted_cfg(
+        evals_root, data_root, fixtures_root, benchmark, baseline_policy="NO_BASELINE"
+    )
+    outcome, _, results = await _run_instrumented(cfg, WorkdirWriter(receipt=True))
+    metrics = {m.metric: m.verdict for r in results for m in r.all_metric_results}
+    assert metrics["native.file_state"] == "pass"  # agent 写进沙箱的文件被断言看到
+
+    # 负向：同一行为，断言"文件必须不存在" → 真 FAIL（断言面双向可红）
+    case["id"] = "wd.file_state.negative"
+    case["expected"] = {"file_state": {"absent": ["agent_output.txt"]}}
+    benchmark = add_scripted_dataset(evals_root, [case])
+    cfg = scripted_cfg(
+        evals_root, data_root, fixtures_root, benchmark, baseline_policy="NO_BASELINE"
+    )
+    outcome, _, results = await _run_instrumented(cfg, WorkdirWriter(receipt=True))
+    metrics = {m.metric: m.verdict for r in results for m in r.all_metric_results}
+    assert metrics["native.file_state"] == "fail"
+    assert outcome.exit_code == 1
+
+
+async def test_usage_scope_full_when_both_sides_observed(evals_tree, fixtures_root) -> None:
+    evals_root, data_root = evals_tree
+    cfg = make_cfg(evals_root, data_root, fixtures_root, tag_filter=["smoke"], repeat=1)
+    _, meta, _ = await _run_instrumented(cfg, InstrumentedAgent())
+    assert meta.token_usage_scope == "full"  # FakeAgent 的 model.response 带双侧 usage
+
+
+async def test_usage_scope_partial_when_output_side_missing(evals_tree, fixtures_root) -> None:
+    """A3 修订五：单侧观测的 run 记 partial 口径——它是基线守卫的比较依据。"""
+    evals_root, data_root = evals_tree
+    cfg = make_cfg(evals_root, data_root, fixtures_root, tag_filter=["smoke"], repeat=1)
+    _, meta, _ = await _run_instrumented(cfg, InstrumentedAgent(drop_output_tokens=True))
+    assert meta.token_usage_scope == "partial"
+
+
+async def test_health_reported_model_lands_in_meta(evals_tree, fixtures_root) -> None:
+    """A4：SUT 自报的实际生效模型回填 agent_model，权威于 CLI 标签。"""
+    evals_root, data_root = evals_tree
+    cfg = make_cfg(
+        evals_root,
+        data_root,
+        fixtures_root,
+        tag_filter=["smoke"],
+        repeat=1,
+        agent_model="cli-label",
+    )
+    _, meta, _ = await _run_instrumented(cfg, InstrumentedAgent(agent_model="sut-effective-model"))
+    assert meta.agent_model == "sut-effective-model"
+
+
+async def test_unknown_event_type_warns_without_changing_verdict(evals_tree, fixtures_root) -> None:
+    """E1 默认档：协议违约可见（计数 + warnings），verdict 与 exit code 不动。"""
+    evals_root, data_root = evals_tree
+    cfg = make_cfg(evals_root, data_root, fixtures_root, tag_filter=["smoke"], repeat=1)
+    adapter = InstrumentedAgent(dialect_event="mcp_call")
+    outcome, meta, _ = await _run_instrumented(cfg, adapter)
+    assert meta.protocol_violations.get("mcp_call", 0) >= 1
+    assert any("mcp_call" in w for w in outcome.aggregate.warnings)
+    assert outcome.verdict == "pass"
+    assert outcome.exit_code == 0
+
+
+async def test_strict_protocol_infra_fails_the_run(evals_tree, fixtures_root) -> None:
+    """E1 升级档：strict_protocol 下未知事件类型 → INFRA（exit 2，run partial）。"""
+    evals_root, data_root = evals_tree
+    cfg = make_cfg(
+        evals_root, data_root, fixtures_root, tag_filter=["smoke"], repeat=1, strict_protocol=True
+    )
+    outcome, meta, results = await _run_instrumented(
+        cfg, InstrumentedAgent(dialect_event="mcp_call")
+    )
+    assert outcome.status == RunStatus.partial.value
+    assert outcome.exit_code == EXIT_INFRA
+    assert results
+    assert all(r.failure_semantics == FailureSemantics.INFRA for r in results)
+    assert meta.protocol_violations.get("mcp_call", 0) >= 1
 
 
 def test_invalid_benchmark_exits_3(evals_tree, fixtures_root) -> None:

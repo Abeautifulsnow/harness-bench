@@ -291,6 +291,14 @@ def build_aggregate(
             f"（Spec §19.1.1，全部 skipped）——它们的 PASS/FAIL 无依据："
             f"{', '.join(sorted(unjudged))}"
         )
+    # E1：协议词汇违约（PRD §8 闭合词汇表之外的事件类型）默认档只加可见性，
+    # 不动判定——但"CI 里不红的东西会烂掉"，所以至少要让它在报告里喊出来。
+    for event_type, count in sorted(meta.protocol_violations.items()):
+        warnings.append(
+            f"PROTOCOL VIOLATION：未知事件类型 '{event_type}' 出现 {count} 次"
+            f"（PRD §8 闭合词汇表；strict_protocol 档升级为 exit 2）"
+        )
+    warnings.extend(meta.warnings)
     return RunAggregate(
         run=meta,
         cases=cases,

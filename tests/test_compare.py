@@ -141,3 +141,45 @@ class TestComparisonValidity:
             [_result("cand", "c1")],
         )
         assert comparison.valid is True
+
+    def test_agent_model_mismatch_is_invalid(self) -> None:
+        """A4：模型漂移静默污染基线——token/延迟/通过率全变却归因为"回归"。"""
+        comparison = compare_runs(
+            _meta("base", agent_model="model-a"),
+            [_result("base", "c1")],
+            _meta("cand", agent_model="model-b"),
+            [_result("cand", "c1")],
+        )
+        assert comparison.valid is False
+        assert "agent model" in (comparison.invalid_reason or "")
+
+    def test_agent_model_unset_on_both_sides_is_valid(self) -> None:
+        """双侧均未记录（旧 run）无法证伪可比性，不拦——与 suites_covered 同理。"""
+        comparison = compare_runs(
+            _meta("base"),
+            [_result("base", "c1")],
+            _meta("cand"),
+            [_result("cand", "c1")],
+        )
+        assert comparison.valid is True
+
+    def test_token_usage_scope_mismatch_is_invalid(self) -> None:
+        """A3 修订五：口径不同的用量不可比——"只看到输入"的 run 与"看到全部"
+        的 run 作差，差值里混着口径变化，正是 §4.3 要禁的静默不可比。"""
+        comparison = compare_runs(
+            _meta("base", token_usage_scope="full"),
+            [_result("base", "c1")],
+            _meta("cand", token_usage_scope="partial"),
+            [_result("cand", "c1")],
+        )
+        assert comparison.valid is False
+        assert "usage scope" in (comparison.invalid_reason or "")
+
+    def test_token_usage_scope_unset_on_both_sides_is_valid(self) -> None:
+        comparison = compare_runs(
+            _meta("base"),
+            [_result("base", "c1")],
+            _meta("cand"),
+            [_result("cand", "c1")],
+        )
+        assert comparison.valid is True

@@ -53,13 +53,27 @@ class HttpAgentAdapter(AgentAdapter):
             resp = await self._client_for().get("/health", timeout=self._health_timeout)
             resp.raise_for_status()
             body = resp.json()
-            return HealthStatus(ok=body.get("status") == "ok", detail=str(body))
+            return HealthStatus(
+                ok=body.get("status") == "ok",
+                detail=str(body),
+                # A2/E2 + A4：观测面能力表（事件名 → bool）与实际生效模型在 health
+                # 阶段整份上报；形状不对时按"未声明"处理（空表 = 按具备，不猜）。
+                observation_surface=(
+                    {str(k): bool(v) for k, v in body["observation_surface"].items()}
+                    if isinstance(body.get("observation_surface"), dict)
+                    else {}
+                ),
+                agent_model=(str(body["agent_model"]) if body.get("agent_model") else None),
+            )
         except (httpx.HTTPError, OSError, ValueError) as exc:
             return HealthStatus(ok=False, detail=str(exc))
 
     async def create_session(self, context: SessionContext) -> AgentSession:
+        # A1：SessionContext.extra 原样透传进 metadata（扩展键，E4 不透明）——
+        # 协议面（PRD §7.2）允许 metadata 携带扩展键，workdir 语义由接入方定义。
         payload = {
             "metadata": {
+                **context.extra,
                 "eval_run_id": context.eval_run_id,
                 "case_id": context.case_id,
                 "variant_id": context.variant_id,
@@ -75,7 +89,15 @@ class HttpAgentAdapter(AgentAdapter):
         session_id = body.get("session_id")
         if not session_id:
             raise InfraError("create_session response missing 'session_id'")
-        return AgentSession(session_id=str(session_id), metadata=payload["metadata"])
+        # A1 修订四：workdir 可达性回执在**响应体**（AgentSession.metadata 只是
+        # 请求回显，SUT 塞不进去）。缺失/非布尔 = 未回执（None），由 runner 按
+        # "未知"记账——不默认视为可达。
+        receipt = body.get("workdir_accessible")
+        return AgentSession(
+            session_id=str(session_id),
+            metadata=payload["metadata"],
+            workdir_accessible=receipt if isinstance(receipt, bool) else None,
+        )
 
     def _stream_turn(self, session: AgentSession, request: AgentRequest) -> AsyncIterator[bytes]:
         async def gen() -> AsyncIterator[bytes]:

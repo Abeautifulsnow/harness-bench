@@ -68,7 +68,9 @@ class MockAgentHandler(BaseHTTPRequestHandler):
         if self.path == "/api/agent/sessions":
             session_id = f"sess_{uuid.uuid4().hex[:12]}"
             self.sessions[session_id] = body.get("metadata", {})
-            self._json(200, {"session_id": session_id})
+            # A1 修订四：workdir 可达性回执（响应侧字段）。mock server 与 harness
+            # 同机共享文件系统，恒可达——真实 SUT 必须自行探测后回执。
+            self._json(200, {"session_id": session_id, "workdir_accessible": True})
             return
         if self.path.endswith("/run"):
             session_id = self.path.split("/")[-2]

@@ -57,7 +57,7 @@ from agent_eval.loading.loader import (
 from agent_eval.models.artifacts import SnapshotUnavailable
 from agent_eval.models.benchmark import BenchmarkDef, DatasetInfo
 from agent_eval.models.case import Case
-from agent_eval.models.events import TraceEvent
+from agent_eval.models.events import EVENT_TYPES, TraceEvent
 from agent_eval.models.profile import MetricProfile, MetricSpec
 from agent_eval.models.regression import Baseline, BaselineMode, GateReport
 from agent_eval.models.results import (
@@ -126,6 +126,10 @@ class RunConfig:
     # 的 /health 只约定 ``status``，平台无法自行探测，因此由调用方显式声明；
     # 未声明时保持 None（记录"未知"比编一个值诚实）。
     agent_version: str | None = None
+    # E1：协议词汇校验升级开关（未知事件类型 → exit 2）。缺省 warn（只计数留痕）；
+    # profile 的 strict_protocol 与它取或——CLI 是开发期显式开 strict 的入口，
+    # 收尾档（nightly/strict profile）在 YAML 里常开。
+    strict_protocol: bool = False
 
     @property
     def state_root(self) -> Path:
@@ -164,6 +168,9 @@ class _CaseContext:
     judge_sem: asyncio.Semaphore
     capabilities: dict[str, bool]
     degradations: dict[str, str]
+    # A2/E2：SUT 观测面能力表（事件名 → bool，health 阶段整份上报），随
+    # EvaluationContext 进插件求值；留痕由 run() 并入 metric_capability_snapshot。
+    observation_surface: dict[str, bool] = field(default_factory=dict)
     # PRD §91：Judge Model 与 Agent Model 分离。仅落账是不够的——必须真的传进
     # SDK，否则 ``--judge-model`` 只是一个标签，judge 仍走 SDK 默认模型。
     judge_model: str | None = None
@@ -210,6 +217,13 @@ class Runner:
         self.baselines = BaselineStore(cfg.state_root, cfg.runs_root)
         self.pricing = PricingTable.load(cfg.evals_root)
         self.adapter: AgentAdapter = open_adapter(cfg.agent_endpoint)
+        # run 级执行期状态（E1/A1/A3）：并发 TaskGroup 内只做事件级累加，
+        # 无跨 await 的读改写，asyncio 单线程语义下无需加锁。
+        self._protocol_violations: dict[str, int] = {}
+        self._run_warnings: list[str] = []
+        self._usage_scopes: list[str] = []
+        self._sut_agent_model: str | None = None
+        self._strict_protocol = False
 
     # ------------------------------------------------------------------ entry
 
@@ -243,7 +257,21 @@ class Runner:
         profiles = {
             name: load_profile(cfg.evals_root, name) for name in sorted(set(case_profile.values()))
         }
-        ctx = self._resolve_profiles(profiles, case_profile, selected)
+        # A2 修订（阶段顺序）：health（含能力探测）先于 metric 解析——观测面表是
+        # run 级事实，必须整份一次拿到、且在 per-case 执行前到位；放 create_session
+        # 意味着每个 case 各报一次、会话创建失败的 case 干脆没有声明。
+        # 与 DeepEvalCapabilityAdapter.probe() 的时机同构。顺带修正一处旧时序：
+        # 一次注定失败的 run 不再先解析基线。
+        health = await self.adapter.health_check()
+        if not health.ok:
+            raise InfraError(f"agent endpoint unhealthy: {health.detail}")
+        self._sut_agent_model = health.agent_model  # A4：SUT 自报的实际生效模型
+        self._strict_protocol = self.cfg.strict_protocol or any(
+            p.strict_protocol for p in profiles.values()
+        )
+        ctx = self._resolve_profiles(
+            profiles, case_profile, selected, observation_surface=health.observation_surface
+        )
         # Spec §17.2：case 级 metric_params 必须有落点——写了个 profile 里不存在的
         # metric id，它不会报错，只会静默不生效，与"永不失败的断言"同类。
         unknown_params = sorted(
@@ -260,13 +288,14 @@ class Runner:
             )
         baseline = self._resolve_baseline(benchmark, info, rules, suites_covered)
 
-        health = await self.adapter.health_check()
-        if not health.ok:
-            raise InfraError(f"agent endpoint unhealthy: {health.detail}")
-
         meta = self._build_meta(benchmark, info, baseline, suites_covered)
         run_dir = self.store.create_run(meta)
-        meta.metric_capability_snapshot = ctx.capabilities
+        meta.metric_capability_snapshot = {
+            **ctx.capabilities,
+            # A2 留痕段：观测面表与 probe() 共用字段，`event:` 前缀区分键空间
+            # （裸键 = metric id 能力，event: 键 = PRD §8 事件观测面）。
+            **{f"event:{name}": flag for name, flag in health.observation_surface.items()},
+        }
         meta.metric_degradations = ctx.degradations
         meta.status = RunStatus.running
         self.store.save_meta(meta)
@@ -292,6 +321,11 @@ class Runner:
         any_error = any(r.status == CaseStatus.ERROR for r in results)
         meta.status = RunStatus.partial if any_error else RunStatus.completed
         meta.finished_at = _now()
+        # E1/A1/A3 的执行期账目在收尾时并入元数据（计数器活在 Runner 实例上，
+        # 聚合阶段从 meta 读取——RunAggregate 是 run 结束后拼的，执行期必须先落账）。
+        meta.protocol_violations = dict(self._protocol_violations)
+        meta.token_usage_scope = self._run_usage_scope()
+        meta.warnings = list(self._run_warnings)
         self.store.save_meta(meta)
 
         comparison = self._compare_with_baseline(meta, results, baseline, rules)
@@ -425,6 +459,7 @@ class Runner:
         profiles: dict[str, MetricProfile],
         case_profile: dict[str, str],
         selected: list[Case],
+        observation_surface: dict[str, bool] | None = None,
     ) -> _CaseContext:
         needs_judge = any(
             provider_for(spec) == "deepeval"
@@ -477,6 +512,7 @@ class Runner:
             ),
             capabilities=capabilities,
             degradations=degradations,
+            observation_surface=dict(observation_surface or {}),
             judge_model=self.cfg.judge_model,
         )
 
@@ -522,7 +558,7 @@ class Runner:
                     completed=False,
                 )
 
-            session = await self._open_session(case, iteration, result)
+            session = await self._open_session(case, iteration, result, workdir=workdir)
             if session is None:
                 return _AgentPhase(
                     _error(
@@ -535,6 +571,28 @@ class Runner:
                     resolved,
                     completed=False,
                 )
+            if session.workdir_accessible is False:
+                # A1 修订二/四：同位性回执为"不可达"（如容器路径与宿主不共享）。
+                # 静默失效是最坏结局——SUT 拿到访问不了的路径会退化为"环境轴不存在"
+                # 且无任何报错；按 InfraError（exit 2）把"配置错"与"agent 失败"分开。
+                return _AgentPhase(
+                    _error(
+                        result,
+                        FailureSemantics.INFRA,
+                        f"agent reported fixture workdir not accessible: {workdir}",
+                    ),
+                    None,
+                    None,
+                    resolved,
+                    completed=False,
+                )
+            if workdir is not None and session.workdir_accessible is None:
+                # 回执缺失 = 未知：记账可见，但**不得默认视为可达**——默认可达会把
+                # 配置错误伪装成"环境轴不存在"的假信号（A1 验收口径）。
+                self._run_warnings.append(
+                    f"WORKDIR RECEIPT MISSING: {case.id} iter{iteration} 未回执 workdir "
+                    f"可达性（A1：未知 != 可达，环境类断言结论存疑）"
+                )
 
             turn_results, session_events, run_status = await self._drive_session(
                 session, case, result
@@ -542,6 +600,7 @@ class Runner:
             builder = TraceBuilder()
             builder.feed_all(session_events)
             span_tree = builder.build()
+            self._record_usage_scope(span_tree)
             if self.cfg.save_trace and session_events:
                 key = f"{_safe(case.id)}.iter{iteration}"
                 self.store.append_events(key, session_events)
@@ -551,11 +610,21 @@ class Runner:
             # 库文件与工作目录）。它服务 database_state / file_state 两类断言——
             # 那两条判的是"环境变成了什么样"，不是 agent 说了什么。
             # Spec §20.3：database 一并带上，它是 SQL 语义比对的方言来源。
+            session_usage = span_tree.usage_totals()
+            session_observed = span_tree.usage_observed()
             scope = _session_scope(
                 run_status,
                 turn_results,
                 environment=snapshot_from_handle(handle) if handle is not None else None,
                 database=case.environment.database,
+                # A3：分量级观测标志——半缺（有输入无输出）时对应分量为 None，
+                # 让 max_tokens 判 skipped 而不是拿被低估的总量比阈值。
+                input_tokens=(
+                    session_usage["input_tokens"] if session_observed["input_tokens"] else None
+                ),
+                output_tokens=(
+                    session_usage["output_tokens"] if session_observed["output_tokens"] else None
+                ),
             )
             self._evaluate_session(case, scope, turn_results, result)
             if run_status != "success":
@@ -591,7 +660,7 @@ class Runner:
                 await provider.cleanup(handle)
 
     async def _open_session(
-        self, case: Case, iteration: int, result: CaseRunResult
+        self, case: Case, iteration: int, result: CaseRunResult, workdir: Path | None = None
     ) -> AgentSession | None:
         last_error: InfraError | None = None
         for attempt in range(INFRA_RETRIES + 1):
@@ -602,6 +671,10 @@ class Runner:
                         case_id=case.id,
                         variant_id=self.cfg.variant_id,
                         iteration=iteration,
+                        # A1：fixture 沙箱 handle 在 prepare（本 case 之前执行）时
+                        # 就已就绪，这里补上断掉的一环——把环境交给被测方。
+                        # E4：extra 保持不透明透传，框架只约定键名、不解释语义。
+                        extra={"workdir": str(workdir)} if workdir is not None else {},
                     )
                 )
             except InfraError as exc:
@@ -760,7 +833,7 @@ class Runner:
         result = phase.result
         if not phase.completed:
             return result
-        plugin_error = await self._run_harness_plugins(case, phase, result)
+        plugin_error = await self._run_harness_plugins(case, phase, result, ctx)
         if plugin_error:
             return _error(result, FailureSemantics.EVALUATION, plugin_error)
         judge_error = await self._run_judge_metrics(
@@ -778,7 +851,7 @@ class Runner:
         return result
 
     async def _run_harness_plugins(
-        self, case: Case, phase: _AgentPhase, result: CaseRunResult
+        self, case: Case, phase: _AgentPhase, result: CaseRunResult, ctx: _CaseContext
     ) -> str:
         """PRD §43/§44：harness 插件是过程内确定性判定，与 judge 阶段并列。
 
@@ -803,6 +876,9 @@ class Runner:
             events=list(phase.events),
             latency_ms=scope.latency_ms if scope else 0,
             tokens=scope.tokens if scope else 0,
+            # A2 判定段：观测面表进插件上下文，required_events 缺失的插件由
+            # run_plugin 判 skipped（不走 resolve_metric——它的语义是 fallback/exit 3）
+            observation_surface=dict(ctx.observation_surface),
         )
         for spec in specs:
             plugin = plugin_for(spec.id)
@@ -877,6 +953,19 @@ class Runner:
                 async for event in self.adapter.run(session, AgentRequest(message=message)):
                     builder.feed(event)
                     events.append(event)
+                    if event.type not in EVENT_TYPES:
+                        # E1：PRD §8 是闭合词汇表。未知事件类型默认 warn——执行期
+                        # 计数、聚合期进 aggregate.warnings（可见不阻断，判不动
+                        # verdict）；strict_protocol 档升级 InfraError（exit 2）：
+                        # 协议违约让观测面失效，与"基础设施不可靠"同一语义归属。
+                        self._protocol_violations[event.type] = (
+                            self._protocol_violations.get(event.type, 0) + 1
+                        )
+                        if self._strict_protocol:
+                            raise InfraError(
+                                f"protocol violation: unknown event type {event.type!r} "
+                                "(PRD §8 闭合词汇表，strict_protocol)"
+                            )
                     if event.type == "error":
                         agent_failed = True
                         error = str(event.data.get("message", "agent error"))
@@ -946,6 +1035,7 @@ class Runner:
             turn.status = "error"
         # turn 级 expect：仅由 Native Evaluator 消费（Spec §2.5）
         if turn_spec is not None and turn_spec.expect is not None and status == "ok":
+            turn_observed = tree.usage_observed()
             scope = EvalScope(
                 run_status=finished_status or ("error" if agent_failed else "success"),
                 final_output=output,
@@ -954,6 +1044,9 @@ class Runner:
                 command_calls=command_calls,
                 latency_ms=turn.latency_ms,
                 tokens=turn.tokens,
+                # A3：turn 级同样带分量观测标志（半缺 → None → max_tokens skipped）
+                input_tokens=usage["input_tokens"] if turn_observed["input_tokens"] else None,
+                output_tokens=usage["output_tokens"] if turn_observed["output_tokens"] else None,
                 # turn 级也带方言：`tool_arguments` 的 semantic 比对在 turn 级同样可用
                 database=case.environment.database,
             )
@@ -1056,7 +1149,10 @@ class Runner:
             git_commit=commit,
             git_branch=branch,
             git_dirty=dirty,
-            agent_model=self.cfg.agent_model,
+            # A4：SUT 在 health 上报的"实际生效模型"权威于 CLI 标签（前者是
+            # 被测方自己承认在跑的模型）。字段从此是受基线守卫校验的字段，
+            # 不是自由标签（compare.py 对两侧不一致判 INVALID）。
+            agent_model=self._sut_agent_model or self.cfg.agent_model,
             agent_version=self.cfg.agent_version,
             judge_model=self.cfg.judge_model,
             deepeval_version=DeepEvalCapabilityAdapter().version(),
@@ -1105,6 +1201,28 @@ class Runner:
         except Exception:  # noqa: BLE001 — 分析层不可用时不掩盖运行结果
             return
 
+    def _record_usage_scope(self, tree: SpanTree) -> None:
+        """A3 修订五：按 case 记录用量口径，收尾聚合成 run 级 token_usage_scope。
+
+        conservative 口径：只要有一个 case 是单侧观测（外部流上只报输入侧的 SUT），
+        整个 run 的 token 数字就是被低估的，跨 run 比较必须先过口径守卫。
+        """
+        observed = tree.usage_observed()
+        if observed["input_tokens"] and observed["output_tokens"]:
+            self._usage_scopes.append("full")
+        elif observed["input_tokens"] or observed["output_tokens"]:
+            self._usage_scopes.append("partial")
+        else:
+            self._usage_scopes.append("none")
+
+    def _run_usage_scope(self) -> str | None:
+        """run 级口径：full（全部双侧）/ partial（存在单侧或无观测的 case）/ None（全程无观测）。"""
+        if not self._usage_scopes:
+            return None
+        if all(scope == "full" for scope in self._usage_scopes):
+            return "full"
+        return "partial"
+
 
 def _new_case_run(case: Case, iteration: int, run_id: str) -> CaseRunResult:
     return CaseRunResult(
@@ -1127,8 +1245,14 @@ def _session_scope(
     *,
     environment: EnvironmentSnapshot | None = None,
     database: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
 ) -> EvalScope:
-    """session 聚合口径（Spec §2.4）：output=最终轮，其余按 session 总量。"""
+    """session 聚合口径（Spec §2.4）：output=最终轮，其余按 session 总量。
+
+    ``input_tokens`` / ``output_tokens`` 是 A3 的分量观测值：None = 该分量未观测
+    （半缺），由 `max_tokens` 等依赖方判 skipped——聚合层不做"缺了就补 0"。
+    """
     costs = [turn.cost for turn in turn_results if turn.cost is not None]
     return EvalScope(
         run_status=run_status,
@@ -1143,6 +1267,8 @@ def _session_scope(
         cost=round(sum(costs), 10) if costs else None,
         environment=environment,
         database=database,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )
 
 

@@ -23,3 +23,9 @@ class MetricProfile(BaseModel):
     name: str
     metrics: list[MetricSpec] = Field(default_factory=list)
     judge_concurrency: int = 2  # PRD §86: separate from agent concurrency
+    # E1：协议词汇校验的升级开关（未知事件类型 → exit 2）。**独立于 Gate 的
+    # strict 字段**——那个字段的语义是"任何 blocking FAIL 都阻断"（Spec §15），
+    # 把协议严格性塞进去会让 Release Gate 的行为取决于一个与门禁无关的维度。
+    # 收尾档（nightly/strict）开，PR 档保持 warn——PR 上不红是为了不打断，
+    # 夜间档红是为了别让"CI 里不红的东西烂掉"。
+    strict_protocol: bool = False

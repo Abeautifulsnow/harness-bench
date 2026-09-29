@@ -54,6 +54,11 @@ class EvaluationContext:
     events: list[TraceEvent] = field(default_factory=list)
     latency_ms: int = 0
     tokens: int = 0
+    # A2/E2 观测面能力表（事件名 → bool，health 阶段由 SUT 上报）。
+    # 插件据此判 skipped：表里显式 False 的事件 = 该观测面不存在。
+    # 判定落插件侧而非 resolve_metric——后者对"能力为假"的既有语义是
+    # fallback 或 exit 3，承接不了 skipped（change-plan A2 修订四）。
+    observation_surface: dict[str, bool] = field(default_factory=dict)
     params: dict[str, Any] = field(default_factory=dict)
     threshold: float | None = None
     # 平台铸造返回值的依据：metric id 由平台决定，插件不得自行改写
@@ -73,6 +78,16 @@ class EvaluationContext:
 
     def param(self, key: str, default: Any = None) -> Any:
         return self.params.get(key, default)
+
+    def missing_observation(self, event_types: tuple[str, ...]) -> list[str]:
+        """声明依赖的事件里，哪些被能力表明确声明为"观测面不存在"。
+
+        只有**表里显式 False** 才算缺失；不在表里（含整表为空）按"具备"处理——
+        这是既有测试与 FakeAgent 路径行为不变的保证：能力声明是外部接入侧的义务，
+        没有声明就没有否决权。绝不允许从"事件没出现"反推"观测不到"（E2 反模式 2）：
+        `retry` 事件 0 次与"根本不发 retry 事件"在数据上同形。
+        """
+        return [event for event in event_types if self.observation_surface.get(event) is False]
 
     def result(
         self,
@@ -115,6 +130,12 @@ class EvaluatorPlugin(ABC):
     name: str = ""
     description: str = ""
     default_params: dict[str, Any] = {}
+    # 本插件依赖的观测面（PRD §8 事件名）。声明表是**框架侧的静态事实**，与 SUT 无关；
+    # 能力表（EvaluationContext.observation_surface）把某项声明为 False 时，插件统一判
+    # skipped（metadata.skipped_reason="observation_unavailable"，由 run_plugin 执行）。
+    # 这是 Spec §19.1.1 三结局（满足/不满足/观测不到）从扩展键升级为所有 metric 通则
+    # 的插件侧落点：不声明就等于放弃"观测不到 → skipped"的保护。
+    required_events: tuple[str, ...] = ()
 
     @abstractmethod
     async def evaluate(self, context: EvaluationContext) -> MetricResultModel:

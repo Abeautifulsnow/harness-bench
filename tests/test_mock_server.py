@@ -26,3 +26,27 @@ async def test_mock_server_end_to_end() -> None:
         assert "30 天" in finished.data["output"]
     finally:
         server.shutdown()
+
+
+async def test_mock_server_records_metadata_and_receipts_workdir() -> None:
+    """A1：create_session 的 metadata（含 workdir）被 server 记录；响应带回执。"""
+    from agent_eval.dev.mock_server import MockAgentHandler
+
+    server = serve("127.0.0.1", 0)
+    port = server.server_address[1]
+    adapter = HttpAgentAdapter(f"http://127.0.0.1:{port}")
+    try:
+        session = await adapter.create_session(
+            SessionContext(
+                eval_run_id="r",
+                case_id="c",
+                iteration=1,
+                extra={"workdir": "E:/sandbox/iter1"},
+            )
+        )
+        assert session.workdir_accessible is True
+        recorded = list(MockAgentHandler.sessions.values())
+        assert any(m.get("workdir") == "E:/sandbox/iter1" for m in recorded)
+    finally:
+        server.shutdown()
+        MockAgentHandler.sessions.clear()

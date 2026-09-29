@@ -75,6 +75,20 @@ class SpanTree:
                 totals[key] += int(usage.get(key) or 0)
         return totals
 
+    def usage_observed(self) -> dict[str, bool]:
+        """哪些用量**分量**在本次 trace 里被观测到过（至少一个 span 带了该键）。
+
+        A3 的观测标志来源：``usage_totals`` 里的 0 分不出"真的用了 0"与
+        "协议根本没给"——后者才是 `max_tokens` 判 skipped 的依据。
+        """
+        observed = {"input_tokens": False, "output_tokens": False, "cache_tokens": False}
+        for s in self.spans:
+            usage = s.attributes.get("usage") or {}
+            for key in observed:
+                if usage.get(key) is not None:
+                    observed[key] = True
+        return observed
+
     def model_names(self) -> list[str]:
         return sorted(
             {str(s.attributes.get("model")) for s in self.spans if s.attributes.get("model")}

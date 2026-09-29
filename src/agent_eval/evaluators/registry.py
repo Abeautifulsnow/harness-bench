@@ -200,6 +200,23 @@ async def run_plugin(plugin: EvaluatorPlugin, context: EvaluationContext) -> Met
     插件返回值必须自报为它注册的 metric：改名会让报告与 Gate 认到不存在的指标，
     静默改名比报错危险得多，因此不一致时判 ``error``（§46 EVALUATION_FAILURE 语义）。
     """
+    missing = context.missing_observation(plugin.required_events)
+    if missing:
+        # A2/E2：观测面不存在 → skipped（Spec §19.1.1 第三结局），绝不落 pass。
+        # 判定集中在这里而不是各插件体内：required_events 是声明，执行点是唯一
+        # 仲裁处——散在插件里会让"忘了写前导检查"的插件退回恒 pass。
+        return context.result(
+            "skipped",
+            blocking=False,
+            reason=(
+                f"观测面不可用：SUT 未上报 {'、'.join(missing)} 事件，本条不判"
+                "（Spec §19.1.1 observation_unavailable）"
+            ),
+            metadata={
+                "skipped_reason": "observation_unavailable",
+                "missing_events": list(missing),
+            },
+        )
     result = await plugin.evaluate(context)
     if result.metric != plugin.name:
         return context.result(
