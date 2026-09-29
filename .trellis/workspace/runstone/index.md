@@ -29,7 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
-| 10 | 2026-09-29 | §22.12 两项建议项收口：定义层解析开销与 junit skipped 覆盖 | - | `main` |
+| 10 | 2026-09-29 | §22.12 两项建议项收口：定义层解析开销与 junit skipped 覆盖 | `d1b3f4b` | `main` |
 | 9 | 2026-09-29 | 剩余缺口收口——发现 1、发现 4、§92 | `d20d28a` | `main` |
 | 8 | 2026-09-29 | 收尾批次——发现 2 修复、§19 Challenge Set、§40 Nightly Profile | `badfb76` | `main` |
 | 7 | 2026-09-28 | ebf408c 评审复核与修复（review-workflow） | `830d191` | `main` |
