@@ -501,7 +501,7 @@ Mimosa deep 扫描 `scan-2026-09-28T07-40-40.862Z-fce672ff8910`：0 findings，
 
 | Hash | Message |
 |------|---------|
-| (pending) | fix(review): 评审修复——目录式声明漏判、多轮判官参照与 reason 脱敏 |
+| `830d191` | (see git log) |
 
 ### Testing
 
