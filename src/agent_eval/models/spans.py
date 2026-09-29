@@ -60,8 +60,8 @@ class SpanTree:
 
     def token_count(self) -> int:
         total = 0
-        for s in self.spans:
-            usage = s.attributes.get("usage") or {}
+        for span in self.spans:
+            usage = span.attributes.get("usage") or {}
             total += int(usage.get("input_tokens") or 0)
             total += int(usage.get("output_tokens") or 0)
         return total
@@ -69,8 +69,8 @@ class SpanTree:
     def usage_totals(self) -> dict[str, int]:
         """PRD §59 的成本输入：分项累计 input / output / cache tokens。"""
         totals = {"input_tokens": 0, "output_tokens": 0, "cache_tokens": 0}
-        for s in self.spans:
-            usage = s.attributes.get("usage") or {}
+        for span in self.spans:
+            usage = span.attributes.get("usage") or {}
             for key in totals:
                 totals[key] += int(usage.get(key) or 0)
         return totals
@@ -82,8 +82,8 @@ class SpanTree:
         "协议根本没给"——后者才是 `max_tokens` 判 skipped 的依据。
         """
         observed = {"input_tokens": False, "output_tokens": False, "cache_tokens": False}
-        for s in self.spans:
-            usage = s.attributes.get("usage") or {}
+        for span in self.spans:
+            usage = span.attributes.get("usage") or {}
             for key in observed:
                 if usage.get(key) is not None:
                     observed[key] = True

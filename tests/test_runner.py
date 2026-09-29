@@ -389,8 +389,6 @@ async def test_workdir_writer_makes_file_state_judgeable(evals_tree, fixtures_ro
 
     class WorkdirWriter(InstrumentedAgent):
         async def create_session(self, context: SessionContext) -> AgentSession:
-            from pathlib import Path
-
             workdir = context.extra.get("workdir")
             if workdir:
                 Path(workdir).mkdir(parents=True, exist_ok=True)
@@ -415,10 +413,14 @@ async def test_workdir_writer_makes_file_state_judgeable(evals_tree, fixtures_ro
         evals_root, data_root, fixtures_root, benchmark, baseline_policy="NO_BASELINE"
     )
     outcome, _, results = await _run_instrumented(cfg, WorkdirWriter(receipt=True))
-    metrics = {m.metric: m.verdict for r in results for m in r.all_metric_results}
-    assert metrics["native.file_state"] == "pass"  # agent 写进沙箱的文件被断言看到
+    positive = next(r for r in results if r.case_id == "wd.file_state")
+    verdict = next(m for m in positive.all_metric_results if m.metric == "native.file_state")
+    assert verdict.verdict == "pass"  # agent 写进沙箱的文件被断言看到
 
-    # 负向：同一行为，断言"文件必须不存在" → 真 FAIL（断言面双向可红）
+    # 负向：同一行为，断言"文件必须不存在" → 真 FAIL（断言面双向可红）。
+    # 注意 add_scripted_dataset 是追加式：第二次调用后 dataset 含两个 case，
+    # 断言必须按 case_id 收窄——按 metric id 合并（dict last-wins）会让结论
+    # 依赖两 case 的并发完成顺序。
     case["id"] = "wd.file_state.negative"
     case["expected"] = {"file_state": {"absent": ["agent_output.txt"]}}
     benchmark = add_scripted_dataset(evals_root, [case])
@@ -426,8 +428,11 @@ async def test_workdir_writer_makes_file_state_judgeable(evals_tree, fixtures_ro
         evals_root, data_root, fixtures_root, benchmark, baseline_policy="NO_BASELINE"
     )
     outcome, _, results = await _run_instrumented(cfg, WorkdirWriter(receipt=True))
-    metrics = {m.metric: m.verdict for r in results for m in r.all_metric_results}
-    assert metrics["native.file_state"] == "fail"
+    negative = next(r for r in results if r.case_id == "wd.file_state.negative")
+    verdict = next(m for m in negative.all_metric_results if m.metric == "native.file_state")
+    assert verdict.verdict == "fail"
+    positive = next(r for r in results if r.case_id == "wd.file_state")
+    assert positive.status == CaseStatus.PASS  # 正向 case 在同一 run 中照常成立
     assert outcome.exit_code == 1
 
 
