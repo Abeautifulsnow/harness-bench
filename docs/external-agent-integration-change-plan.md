@@ -980,11 +980,14 @@ D 类文档变更与第 1/2 步同批提交 —— 条款先落地，后续实�
 D16（模型钉住 + 用量口径）不晚于第 3 步：第一次 pin 基线之前 `agent_model` 与口径
 必须已是受校验字段，否则第一批基线就是可被模型漂移与口径漂移污染的。
 
-**第 0 步的性质（第四轮校准后重述）**：它至今仍未执行（全仓库除本文档外
-没有任何东西引用 `/api/chat`，也没有 shim 或冒烟脚本）。ai-chatbot 侧的
-**静态事实**已由第四轮校准升级为"源码级已核实"（附录 §8），
-但**运行时行为仍零实跑**——所以第 0 步依然是本方案的第一优先动作，
-只是它的验收清单从"确认全部事实"收窄为"钉死五条运行时行为"（见本节末）。
+**第 0 步的性质（第五轮更新，2026-09-29）**：冒烟脚本**已就位**——
+ai-chatbot 仓 `scripts/smoke-agent-protocol.py`（标准库实现；五个场景分别钉死
+五条运行时行为，`--dump-dir` 留原始 chunk 证据；自带安全边界：默认仅回环/私网、
+请求钉定已校验 IP、不跟随重定向、dump 目录防穿越）。ai-chatbot 侧的
+**静态事实**已由第四轮校准升级为"源码级已核实"（附录 §8），且本轮复核时
+在最新工作树（desktop 分支）上抽查仍全部成立；**运行时行为仍零实跑**——
+本机 3000 端口无监听，脚本待服务可用时执行（`pnpm start:agent` + license
+激活后运行，把输出的 `[验收N]` 行与 dump JSON 回填 B2 映射表）。
 反过来，harness-bench 侧的 A/B/C/D/E 五类判断在这 5 天里**没有一条被推翻**，
 且其中四条（A3 的修法、A4 的落点、E3 的干净基线、A1 无时序障碍）现在有了
 比初版更强的证据 —— 这些校准写在各自的章节里，不改变任何一条结论。
@@ -1017,7 +1020,7 @@ D16（模型钉住 + 用量口径）不晚于第 3 步：第一次 pin 基线之
 | --- | --- |
 | `POST /api/chat`：UIMessage 流 + `X-Conversation-Id` 响应头 | `apps/sime-agent/app/api/chat/route.ts:33-52`（`createUIMessageStreamResponse`） |
 | `conversationId` **必填**（缺失 400 `Missing conversationId`），值由调用方自选 | `apps/sime-agent/lib/ai/chat/chat-service.ts`（`handleChatMessage` 开头） |
-| license 门禁：`/api/*` 无效/过期 → `402 {error:'LICENSE_INVALID'}`；豁免 `/api/license/*`、`/nest`、`/sime`、`/.well-known/*` | `apps/sime-agent/proxy.ts:55-72` |
+| license 门禁：`/api/*` 无效/过期 → `402 {error:'LICENSE_INVALID'}`；豁免 `/api/license/*`、`/nest`、`/sime`、`/.well-known/*` | `apps/sime-agent/proxy.ts:55-72`（第五轮复核：402 响应体实为三键 `{ok:false, error:'LICENSE_INVALID', message}`，判废请匹配 `error` 键） |
 | `data-context-usage`：`actualInputTokens` / `cachedTokens` / `contextLimit` / `lastCompactionFreed`，**无 output token** | `packages/core/src/runtime/chat-session/run-session.ts:266-285` |
 | 重试只打日志（指数退避），不发任何流事件 | `packages/core/src/foundation/model/retry-middleware.ts:125-150` |
 | 子 Agent 事件 `data-sub-open` / `data-sub-done`（done 载荷含 `tokenUsage{input,output,total}` / `status`）；另有 `data-sub-async`（父流无 done，终态查 `subagent_sessions`） | `packages/core/src/extensions/subagents/event-broadcaster.ts:49-145` |
