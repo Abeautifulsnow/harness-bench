@@ -567,7 +567,7 @@ Mimosa deep 扫描 `scan-2026-09-28T07-40-40.862Z-fce672ff8910`：0 findings，
 
 | Hash | Message |
 |------|---------|
-| (pending) | feat(challenge): 收尾批次——baseline 套件组成约束、Challenge Set、Nightly Profile |
+| `badfb76` | (see git log) |
 
 ### Testing
 
