@@ -8,7 +8,13 @@ from __future__ import annotations
 
 from agent_eval.models.results import CaseRunResult, CaseStatus
 from agent_eval.models.run import RunMetadata, RunStatus
-from agent_eval.regression.compare import _lower_is_better, _metric_diffs, compare_runs
+from agent_eval.regression.compare import (
+    DEFAULT_PERFORMANCE_THRESHOLDS,
+    _case_performance,
+    _lower_is_better,
+    _metric_diffs,
+    compare_runs,
+)
 
 
 def _meta(run_id: str, **overrides) -> RunMetadata:
@@ -77,6 +83,46 @@ class TestDirectionSemantics:
             diffs = _metric_diffs({"latency_ms": base}, {"latency_ms": cand})
             assert [d.verdict for d in diffs] == ["unchanged"], (base, cand)
 
+    def test_wall_clock_floor_covers_both_noise_shapes(self) -> None:
+        """两种噪声形状都要拦（回归断言：联调实测的间歇 flake）。
+
+        实测 flake：`test_api.py::test_regression_between_two_runs` 间歇断言失败
+        （``{'improved','unchanged'}``）。机理是 5 个 case 全 1ms 的那一侧均值恰好
+        1.0ms，而旧判据 ``max(base, cand) < 1.0`` 的等号不成立——转去比相对阈值，
+        1.0 ↔ 0.6 于是判 ``improved``（-40% > 20%）。时间戳的量化步长就是 1ms，
+        所以"差值 ≤ 分辨率"无信号（形状一）、"任一侧低于分辨率"也无信号
+        （形状二：0.4 ↔ 5ms 的相对变化是 ±1000%，近 0 基线只会放大它）。
+        """
+        for base, cand in ((1.0, 0.6), (1.0, 0.0), (0.0, 1.0), (1.0, 2.0), (2.0, 1.0)):
+            diffs = _metric_diffs({"latency_ms": base}, {"latency_ms": cand})
+            assert [d.verdict for d in diffs] == ["unchanged"], (base, cand)
+        for base, cand in ((0.4, 5.0), (5.0, 0.4), (0.0, 8.0)):
+            diffs = _metric_diffs({"latency_ms": base}, {"latency_ms": cand})
+            assert [d.verdict for d in diffs] == ["unchanged"], (base, cand)
+        # 两侧都可测、差值远超分辨率：照判方向（否则这个下限会把真回归也吃掉）
+        for base, cand, verdict in ((300.0, 400.0, "regressed"), (400.0, 300.0, "improved")):
+            diffs = _metric_diffs({"latency_ms": base}, {"latency_ms": cand})
+            assert [d.verdict for d in diffs] == [verdict], (base, cand)
+
+    def test_case_performance_latency_has_the_same_absolute_floor(self) -> None:
+        """case 级性能回归此前**完全没有**绝对下限：1ms ↔ 2ms 判退步并进 Gate。
+
+        这条 diff 会进 ``comparison.performance_regressions``（Gate 输入），
+        所以同一份墙钟噪声在 metric 段被降噪、在 case 段却触发 Gate，是同一种
+        错误的两种表现。真实量级（300 → 400ms）不受影响。
+        """
+        near = _case_performance(
+            [_result("b", "c1", latency_ms=1)],
+            [_result("c", "c1", latency_ms=2)],
+            DEFAULT_PERFORMANCE_THRESHOLDS,
+        )
+        assert not any(p.regressed for p in near), [(p.metric, p.delta_percent) for p in near]
+        real = _case_performance(
+            [_result("b", "c1", latency_ms=300)],
+            [_result("c", "c1", latency_ms=400)],
+            DEFAULT_PERFORMANCE_THRESHOLDS,
+        )
+        assert next(p for p in real if p.metric == "latency_ms").regressed is True
     def test_quality_direction_has_no_noise_floor(self) -> None:
         """质量类 metric 的方向不需要下限：得分是确定性的，任何变化都是信号。"""
         diffs = _metric_diffs({"task_success": 0.5}, {"task_success": 0.75})
@@ -183,3 +229,57 @@ class TestComparisonValidity:
             [_result("cand", "c1")],
         )
         assert comparison.valid is True
+
+    def test_endpoint_kind_mismatch_is_invalid(self) -> None:
+        """联调实测（2026-09-30）：内置 mock 的 run 不能给真实 SUT 的 run 当基线。
+
+        本机先跑 `fake://` 冒烟再第一次接真实 SUT 是常见顺序，两个 run 在 dataset /
+        套件 / 模型上都可以一致，唯一不成立的是"同一个被测对象"——于是"native.output_checks
+        回归 -100%"这种纯由换 SUT 造成的数字被当成回归信号摆上台面。
+        """
+        comparison = compare_runs(
+            _meta("base", agent_endpoint="fake://"),
+            [_result("base", "c1")],
+            _meta("cand", agent_endpoint="http://127.0.0.1:8901"),
+            [_result("cand", "c1")],
+        )
+        assert comparison.valid is False
+        assert "endpoint kind" in (comparison.invalid_reason or "")
+
+    def test_same_endpoint_kind_on_different_hosts_is_valid(self) -> None:
+        """粒度是接入类型而非整条 URL：同一个 SUT 在开发机与 CI 上 host/port 必然不同，
+        钉死 URL 会让跨机基线永远不可比（模型漂移另有 agent_model 守卫覆盖）。"""
+        comparison = compare_runs(
+            _meta("base", agent_endpoint="http://127.0.0.1:8901"),
+            [_result("base", "c1")],
+            _meta("cand", agent_endpoint="http://ci-runner.internal:9999"),
+            [_result("cand", "c1")],
+        )
+        assert comparison.valid is True
+
+    def test_endpoint_unset_on_both_sides_is_valid(self) -> None:
+        """旧 run（未记录 endpoint，空串）相互比较仍有效——与 suites_covered 同理。"""
+        comparison = compare_runs(
+            _meta("base"),
+            [_result("base", "c1")],
+            _meta("cand"),
+            [_result("cand", "c1")],
+        )
+        assert comparison.valid is True
+
+    def test_multiple_incomparable_reasons_are_all_reported(self) -> None:
+        """一次 run 同时踩中两条时两条都要在——早先是 last-wins 赋值，前一条会消失。
+
+        两条原因指向不同的修法（换 dataset / 换套件 / 换模型 / 换基线来源），
+        只报一条等于把另一条排查线索藏起来。
+        """
+        comparison = compare_runs(
+            _meta("base", dataset_version="v1", suites_covered={"golden": 24}),
+            [_result("base", "c1")],
+            _meta("cand", dataset_version="v2", suites_covered={"smoke": 3}),
+            [_result("cand", "c1")],
+        )
+        assert comparison.valid is False
+        reason = comparison.invalid_reason or ""
+        assert "dataset_version" in reason
+        assert "suites_covered" in reason

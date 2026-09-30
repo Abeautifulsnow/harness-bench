@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -300,6 +301,7 @@ class InstrumentedAgent(FakeAgentAdapter):
         receipt: bool | None = None,
         dialect_event: str | None = None,
         drop_output_tokens: bool = False,
+        drop_all_usage: bool = False,
     ) -> None:
         super().__init__()
         self.surface = surface
@@ -307,6 +309,7 @@ class InstrumentedAgent(FakeAgentAdapter):
         self.receipt = receipt
         self.dialect_event = dialect_event
         self.drop_output_tokens = drop_output_tokens
+        self.drop_all_usage = drop_all_usage
         self.created: list[SessionContext] = []
 
     async def health_check(self) -> HealthStatus:
@@ -326,7 +329,9 @@ class InstrumentedAgent(FakeAgentAdapter):
 
     async def _run(self, session, request) -> AsyncIterator[TraceEvent]:
         async for event in super()._run(session, request):
-            if self.drop_output_tokens and event.type == "model.response":
+            if self.drop_all_usage and event.type == "model.response":
+                event.data.pop("usage", None)  # 协议里连 usage 字段都没有
+            elif self.drop_output_tokens and event.type == "model.response":
                 usage = event.data.get("usage")
                 if isinstance(usage, dict):
                     # A3 半缺形态：协议只给输入侧（ai-chatbot 的 data-context-usage）
@@ -347,6 +352,67 @@ async def _run_instrumented(cfg: RunConfig, adapter: FakeAgentAdapter):
     outcome = await runner.run()
     meta, results = runner.store.load_run(outcome.run_id)
     return outcome, meta, results
+
+
+class SlowTailAgent(FakeAgentAdapter):
+    """先把一轮的事件全部发完，再挂着不结束——「超时发生在流中途」。
+
+    与 `[slow]` 脚本的区别是**时序**：那个脚本在发任何事件之前先 sleep，超时时
+    手里什么都没有；真实 SUT 超时是"已经跑了十几分钟、发了一堆 tool.call 与
+    usage，只是这轮没等到 run.finished"（联调实测）。后者才检验得出"超时也要
+    留下现场"。
+    """
+
+    def __init__(self, hold_s: float) -> None:
+        super().__init__()
+        self.hold_s = hold_s
+
+    async def _run(self, session, request) -> AsyncIterator[TraceEvent]:
+        async for event in super()._run(session, request):
+            yield event
+        await asyncio.sleep(self.hold_s)  # 事件已发完，但这一轮永不结束
+
+
+async def test_timeout_preserves_the_evidence_collected_so_far(
+    evals_tree, fixtures_root
+) -> None:
+    """超时（Spec §2.4）不得把已经跑掉的证据清零。
+
+    联调实测缺陷：单轮 case 的 per-turn 预算 ≡ session 预算，外层 `asyncio.timeout`
+    必然先到期，把在飞的 `_run_turn` 连同它局部的 events 一起取消——报告上
+    `total_tokens=0 / avg_tool_calls=0 / avg_latency_ms=0`，"超时"读起来像"什么都没做"。
+    而超时恰恰是最该看清"它到底打了多少转"的时刻。修法是让 session 预算成为
+    per-turn 的上限（`min(per-turn, remaining)`），到期发生在 turn 层、由它自己收场。
+    """
+    evals_root, data_root = evals_tree
+    case = {
+        "id": "slow.tail",
+        "version": 1,
+        "name": "慢尾",
+        "tags": ["scripted"],
+        "input": {"type": "single_turn", "prompt": "ping"},
+        "environment": {"fixture": "sales_v2"},
+        "execution": {"timeout": 2, "repeat": 1},
+        "expected": {"output": {"contains": ["QUERY COMPLETE"]}},
+    }
+    benchmark = add_scripted_dataset(evals_root, [case])
+    cfg = scripted_cfg(
+        evals_root, data_root, fixtures_root, benchmark, baseline_policy="NO_BASELINE"
+    )
+    outcome, _, results = await _run_instrumented(cfg, SlowTailAgent(hold_s=30.0))
+    result = next(r for r in results if r.case_id == "slow.tail")
+    assert result.turn_results[0].status == "timeout"
+    # 现场必须留下：token 用量、工具调用、耗时都不为零
+    assert result.input_tokens > 0, "超时前已观测到的输入用量必须落账"
+    assert result.tool_calls, "超时前已观测到的工具调用必须落账"
+    assert result.latency_ms > 0, "超时轮的耗时必须落账"
+    assert outcome.aggregate is not None
+    totals = outcome.report["totals"]
+    assert totals["total_tokens"] > 0
+    assert totals["avg_tool_calls"] > 0
+    # 超时仍按 agent 失败归类（口径不变），只是不再"看起来什么都没做"
+    assert result.failure_semantics == FailureSemantics.AGENT
+    assert outcome.exit_code == 1
 
 
 async def test_workdir_reaches_agent_per_iteration(evals_tree, fixtures_root) -> None:
@@ -451,6 +517,20 @@ async def test_usage_scope_partial_when_output_side_missing(evals_tree, fixtures
     cfg = make_cfg(evals_root, data_root, fixtures_root, tag_filter=["smoke"], repeat=1)
     _, meta, _ = await _run_instrumented(cfg, InstrumentedAgent(drop_output_tokens=True))
     assert meta.token_usage_scope == "partial"
+
+
+async def test_usage_scope_none_when_nothing_observed(evals_tree, fixtures_root) -> None:
+    """全程无任何用量观测 → 口径记 None（未观测），不是 partial。
+
+    联调实测缺陷：两者都能让口径守卫拦下比较，但含义不同——partial 是"SUT 只报
+    输入侧"（协议形态问题），None 是"这次 run 一个 usage 都没拿到"（run 本身没跑
+    起来）。并成一个值，报告上就分不出这两件事。契约在
+    `RunMetadata.token_usage_scope` 的字段注释里。
+    """
+    evals_root, data_root = evals_tree
+    cfg = make_cfg(evals_root, data_root, fixtures_root, tag_filter=["smoke"], repeat=1)
+    _, meta, _ = await _run_instrumented(cfg, InstrumentedAgent(drop_all_usage=True))
+    assert meta.token_usage_scope is None
 
 
 async def test_health_reported_model_lands_in_meta(evals_tree, fixtures_root) -> None:

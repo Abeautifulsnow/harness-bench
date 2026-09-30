@@ -12,7 +12,7 @@ from pathlib import Path
 
 from agent_eval.errors import InvalidCallError
 from agent_eval.models.regression import Baseline, BaselineMode
-from agent_eval.models.run import RunStatus
+from agent_eval.models.run import RunStatus, endpoint_kind
 from agent_eval.storage.run_store import RunStore
 
 # main-latest 候选集的分支判据（Spec §4.2）：main / master 的本地与远程写法。
@@ -131,16 +131,21 @@ class BaselineStore:
         mode: BaselineMode,
         *,
         suites_covered: dict[str, int] | None = None,
+        agent_endpoint: str | None = None,
     ) -> Baseline | None:
         """Spec §4.2 的解析算法；未命中返回 None（调用方降级 NO_BASELINE）。
 
         ``suites_covered`` 是当前 run 的套件组成：main-latest 的候选必须与它
         **全等**，否则 run 级均值在不同 case 集合之间比较，回归判定是噪声
-        （ROADMAP「发现的 2」）。``baseline resolve`` 诊断命令没有"当前 run"，
+        （ROADMAP「发现的 2」）。``agent_endpoint`` 是当前 run 的接入点：候选必须与它
+        **同类**（fake / http），否则是拿"内置 mock 的 run"给"真实 SUT 的 run"当基线
+        （联调实测 2026-09-30）。``baseline resolve`` 诊断命令没有"当前 run"，
         传 None 表示不做该约束。
         """
         if mode == BaselineMode.main_latest:
-            return self._resolve_main_latest(benchmark_id, dataset_version, suites_covered)
+            return self._resolve_main_latest(
+                benchmark_id, dataset_version, suites_covered, agent_endpoint
+            )
         candidates = [
             b
             for b in self.effective()
@@ -157,6 +162,7 @@ class BaselineStore:
         benchmark_id: str,
         dataset_version: str | None,
         suites_covered: dict[str, int] | None = None,
+        agent_endpoint: str | None = None,
     ) -> Baseline | None:
         """Spec §4.2：候选集是 **main 分支上的** runs，不是"任意分支最近一次"。
 
@@ -169,7 +175,15 @@ class BaselineStore:
         run 级均值定义在"该 run 选中的 case 集合"上，`--suite smoke` 对
         `--suite golden` 的历史 run 比回归是拿两个不同总体的均值作差。全等而不是
         "覆盖"——超集的均值同样不可比。旧 run（空字典）只与同为空字典的候选匹配。
+
+        ``agent_endpoint`` 给定时（当前 run 的接入点），候选必须与它**同类**：
+        "先在本机跑几次 `fake://` 冒烟、再第一次接真实 SUT"是常见顺序，那些 run
+        在 main 上、Gate PASS、case 集合也可能全等——唯一不成立的是"同一个被测
+        对象"。它们被选成基线后，真实 SUT 的首个 run 会收到一批纯由换 SUT 造成的
+        "回归"（联调实测）。粒度是接入类型而非整条 URL，理由见
+        ``models/run.endpoint_kind``。未给定时不做该约束。
         """
+        kind = endpoint_kind(agent_endpoint) if agent_endpoint is not None else None
         candidates = []
         for meta in self.store.list_runs():
             if meta.benchmark_id != benchmark_id:
@@ -181,6 +195,8 @@ class BaselineStore:
             if dataset_version is not None and meta.dataset_version != dataset_version:
                 continue
             if suites_covered is not None and meta.suites_covered != suites_covered:
+                continue
+            if kind is not None and endpoint_kind(meta.agent_endpoint) != kind:
                 continue
             if not self._gate_passed(meta.run_id):
                 continue

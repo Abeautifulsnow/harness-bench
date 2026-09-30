@@ -25,7 +25,7 @@ from agent_eval.models.results import (
     RegressionState,
     Stability,
 )
-from agent_eval.models.run import RunMetadata
+from agent_eval.models.run import RunMetadata, endpoint_kind
 from agent_eval.regression.stability import compute_stability, regression_state
 
 # PRD §55 的默认性能阈值（%），可被 Gate 规则覆盖
@@ -72,8 +72,13 @@ _NOISE_FLOOR_SOURCES: tuple[tuple[str, str], ...] = (
     (".latency_ms", "latency_ms"),
     (".duration_ms", "latency_ms"),
 )
-# wall-clock 时长在毫秒量级以下没有信号：均值 0 ↔ 0.4ms 的相对变化是 ±100%，
-# 相对阈值拦不住（基线为 0 或近 0 时分母失义），只能用绝对判据。
+# wall-clock 时长的信号门限（毫秒）：差值在时钟分辨率以内 = 抖动，任一侧低于分辨率
+# = 那一侧根本不可测。两种都没有信号，两个都拦。
+# 只按"两侧都在下限以下"拦会漏掉一半：0.4ms 的基线配上 5ms 的候选（最小值低于
+# 分辨率，相对变化 ±1000%），以及恰好等于 1.0ms 的一侧（严格小于不成立，掉进相对
+# 阈值分支）。后者是联调实测的间歇 flake —— 5 个 case 全 1ms 的那一侧均值正好
+# 1.0ms，与 0.6ms 比出 ``improved``（-40% > 20% 阈值），
+# ``test_api.py::test_regression_between_two_runs`` 于是断言失败。
 _WALL_CLOCK_FLOOR = 1.0  # ms
 _WALL_CLOCK_METRICS = frozenset({"latency_ms", ".latency_ms", ".duration_ms"})
 
@@ -92,10 +97,28 @@ def _is_wall_clock(metric_id: str) -> bool:
     return any(metric_id == name or metric_id.endswith(name) for name in _WALL_CLOCK_METRICS)
 
 
+def _below_wall_clock_floor(metric_id: str, base: float, candidate: float) -> bool:
+    """这一对 wall-clock 数值之间没有可判读的差异（PRD §55 性能维度不给方向）。
+
+    两个条件任一成立即无信号：
+    1. 差值在时钟分辨率以内 —— 时间戳的量化步长就是 1ms，1ms ↔ 2ms 的"翻倍"
+       是量化不是耗时；
+    2. 任一侧低于分辨率 —— 那一侧本来就不可测。基线 0.4ms 对候选 5ms 的相对
+       变化是 ±1000%，相对阈值在近 0 基线上只会放大噪声（分母失义）。
+    真实量级不受影响：300ms ↔ 400ms 两侧都可测、差值远超分辨率，照判退步。
+    """
+    if not _is_wall_clock(metric_id):
+        return False
+    return (
+        abs(candidate - base) <= _WALL_CLOCK_FLOOR
+        or min(base, candidate) < _WALL_CLOCK_FLOOR
+    )
+
+
 def _within_noise(
     metric_id: str, base: float, candidate: float, floor_percent: float | None
 ) -> bool:
-    if _is_wall_clock(metric_id) and max(base, candidate) < _WALL_CLOCK_FLOOR:
+    if _below_wall_clock_floor(metric_id, base, candidate):
         return True
     if base <= 0:
         return False  # 相对阈值需要正基线；0 基线的抖动交给绝对判据（上行）
@@ -119,6 +142,18 @@ def _performance_diff(
     delta_percent: float | None = None
     regressed = False
     both = baseline_value is not None and candidate_value is not None
+    if both and _below_wall_clock_floor(metric, baseline_value, candidate_value):
+        # 毫秒以内的耗时差是时钟分辨率，不是退步：这一条会进
+        # ``comparison.performance_regressions``（Gate 的输入），此前 case 级完全没有
+        # 绝对下限——1ms ↔ 2ms 的抖动就足以判退步（-100%/+100%）。
+        return PerformanceDiff(
+            metric=metric,
+            baseline=baseline_value,
+            candidate=candidate_value,
+            delta_percent=delta_percent,
+            regressed=False,
+            threshold_percent=threshold,
+        )
     if both and baseline_value > 0:
         delta_percent = round((candidate_value - baseline_value) / baseline_value * 100, 4)
         regressed = threshold is not None and delta_percent > threshold
@@ -277,16 +312,18 @@ def compare_runs(
         baseline_dataset_version=baseline_meta.dataset_version,
         baseline_mode=baseline_meta.baseline_mode or BaselineMode.no_baseline.value,
     )
+    # 守卫链：每条"两侧不可比"的事实各追加一条原因。**不覆盖**（早先是 last-wins
+    # 赋值）——一次 run 里同时踩中两条时，只报最后一条会让前一条原因彻底消失，
+    # 而每条原因指向不同的修法（换 dataset / 换套件 / 换模型 / 换基线来源）。
+    reasons: list[str] = []
     if baseline_meta.dataset_version != candidate_meta.dataset_version:
         # Spec §4.3：禁止静默跨 dataset_version 比较
-        comparison.valid = False
-        comparison.invalid_reason = (
+        reasons.append(
             f"dataset_version mismatch: baseline={baseline_meta.dataset_version} "
             f"candidate={candidate_meta.dataset_version}（Spec §1.2-3 禁止跨版本比较）"
         )
     if baseline_meta.benchmark_id != candidate_meta.benchmark_id:
-        comparison.valid = False
-        comparison.invalid_reason = (
+        reasons.append(
             f"benchmark mismatch: baseline={baseline_meta.benchmark_id} "
             f"candidate={candidate_meta.benchmark_id}"
         )
@@ -295,19 +332,30 @@ def compare_runs(
         # 集合不同则数值不可比——`--suite smoke`（3 条）对 `--suite golden`（24 条）
         # 比平均工具调用数只会产出噪声回归。与"禁止跨 dataset_version 比较"同一条
         # 原则：没有可比性就明说（valid=False → Gate 退化绝对阈值），不静默给方向。
-        comparison.valid = False
-        comparison.invalid_reason = (
+        reasons.append(
             f"suites_covered mismatch: baseline={baseline_meta.suites_covered or '{}'} "
             f"candidate={candidate_meta.suites_covered or '{}'}"
             "（不同 case 集合的均值不可比，Spec §4.3 禁止静默跨集合比较）"
+        )
+    if endpoint_kind(baseline_meta.agent_endpoint) != endpoint_kind(candidate_meta.agent_endpoint):
+        # 联调实测（2026-09-30）：本机连续跑 fake 冒烟后，第一次接真实 SUT 的 run
+        # 解析到 `fake://` 的 run 当基线，于是"native.output_checks 回归 -100%"这种
+        # 纯由换 SUT 造成的数字被当成回归信号摆上台面。换 SUT 与换 dataset 同类：
+        # 两次 run 的共同前提（同一个被测对象）不成立，比较没有价值前提。
+        # 粒度是**接入类型**（fake / http(s)）而不是整条 URL：同一个 SUT 在开发机与
+        # CI 上必然 host/port 不同，钉死 URL 会让跨机基线永远不可比；模型漂移由
+        # agent_model 守卫覆盖。双侧都为空（旧 run 未记录 endpoint）不拦。
+        reasons.append(
+            f"agent endpoint kind mismatch: baseline={baseline_meta.agent_endpoint or '-'} "
+            f"candidate={candidate_meta.agent_endpoint or '-'}"
+            "（fake 内置 mock 与真实 SUT 之间没有可比性，Spec §4.3 禁止静默跨接入类型比较）"
         )
     if (baseline_meta.agent_model or None) != (candidate_meta.agent_model or None):
         # A4：模型漂移让 token / 延迟 / 通过率全变，报告却会归因为"回归"——
         # 这直接打在回归平台的核心主张上。agent_model 从此是受校验字段
         # （值来自 health 阶段 SUT 自报的实际生效模型），不是自由标签。
         # 双侧均为空（旧 run 未记录）无法证伪可比性，不拦。
-        comparison.valid = False
-        comparison.invalid_reason = (
+        reasons.append(
             f"agent model mismatch: baseline={baseline_meta.agent_model or '-'} "
             f"candidate={candidate_meta.agent_model or '-'}"
             "（跨模型的 token/延迟/通过率不可比，Spec §4.3 禁止静默跨模型比较）"
@@ -317,12 +365,14 @@ def compare_runs(
         # `tokens.max_regression_percent` 比出来的差值里混着口径变化——
         # "口径漂移被伪装成回归"正是 §4.3 要禁的"不可比"。双侧均空（旧 run
         # 未记录口径）与 suites_covered 同理放行。
-        comparison.valid = False
-        comparison.invalid_reason = (
+        reasons.append(
             f"token usage scope mismatch: baseline={baseline_meta.token_usage_scope or '-'} "
             f"candidate={candidate_meta.token_usage_scope or '-'}"
             "（用量口径不同的 run 不可比：单侧观测的总量是被低估的，Spec §4.3）"
         )
+    if reasons:
+        comparison.valid = False
+        comparison.invalid_reason = "；".join(reasons)
 
     shared = sorted(set(by_baseline) & set(by_candidate))
     for case_id in sorted(set(by_baseline) | set(by_candidate)):

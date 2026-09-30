@@ -15,6 +15,7 @@ import asyncio
 import dataclasses
 import json
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -90,6 +91,9 @@ from agent_eval.trace.builder import TraceBuilder
 
 INFRA_RETRIES = 2  # PRD §87 Infrastructure Retry（会话建立阶段）
 DEFAULT_GATE = "pr"
+# session 级兜底超时相对预算的余量（秒）：正常路径下每一轮都按剩余预算自行收场，
+# 这一层只防病理情况，余量留给超时后的 cancel 与收尾落盘。
+_SESSION_TIMEOUT_GRACE = 30.0
 
 
 @dataclass
@@ -391,8 +395,14 @@ class Runner:
         # ROADMAP「发现的 2」：main-latest 的候选必须与本次 run 的套件组成全等，
         # 否则 run 级均值在两个不同 case 集合之间作差。显式/release pin 是人的决定，
         # 不在解析期拦——但 compare_runs 仍会按同一原则判为 invalid（原因可见）。
+        # agent_endpoint 同理：候选必须与本次 run 接入类型相同（联调实测 2026-09-30
+        # ——本机 `fake://` 冒烟的历史 run 曾被选成真实 SUT 首个 run 的基线）。
         resolved = self.baselines.resolve(
-            benchmark.name, info.version, mode, suites_covered=suites_covered
+            benchmark.name,
+            info.version,
+            mode,
+            suites_covered=suites_covered,
+            agent_endpoint=self.cfg.agent_endpoint,
         )
         if resolved is None and rules.gate == "release":
             # Spec §4.1: Release Gate 缺省时 fail-fast，不得退化为绝对阈值静默通过
@@ -689,16 +699,39 @@ class Runner:
     async def _drive_session(
         self, session: AgentSession, case: Case, result: CaseRunResult
     ) -> tuple[list[TurnResult], list[TraceEvent], str]:
-        """逐轮驱动一次 session，返回 (轮结果, 事件流, run 状态)。"""
+        """逐轮驱动一次 session，返回 (轮结果, 事件流, run 状态)。
+
+        两层超时预算（Spec §2.4）的实现方式是**把剩余 session 预算交给每一轮**——
+        `min(per-turn, remaining)`，让到期发生在 turn 层、由 `_run_turn` 自己收场。
+        它手里已经有这一轮的 builder、事件与用量，所以"超时"能如实产出"跑掉了多少
+        token / 调了多少工具 / 花了多久"；外层 `asyncio.timeout` 只留作兜底。
+
+        此前两层预算取同一个值（单轮 case 下 per-turn 就是 session 超时），外层必然
+        先到期：在飞的 `_run_turn` 被取消，它局部的 events 随协程一起消失。后果是
+        报告上 `total_tokens=0 / avg_tool_calls=0 / avg_latency_ms=0`——**"超时"读起来
+        像"什么都没做"**，而回归平台最该看清现场的时刻恰恰是超时（它为什么没跑完？
+        在打转吗？）。联调实测：真实 SUT 首跑，超时那条 case 的 token 与工具调用
+        全部归零，只有未超时的几条进了 run 级均值。
+        """
         total_timeout = self.cfg.timeout or case.execution.timeout
+        deadline = time.monotonic() + total_timeout
         turn_results: list[TurnResult] = []
         session_events: list[TraceEvent] = []
         run_status = "success"
         try:
-            async with asyncio.timeout(total_timeout):
+            # 兜底：正常路径下每一轮都在 deadline 内自行收场，这里只防"轮次极多"或
+            # 某轮不遵守 deadline 的病理情况；留一点余量让 cancel 与收尾跑完。
+            async with asyncio.timeout(total_timeout + _SESSION_TIMEOUT_GRACE):
                 for index, message in enumerate(case.input.messages(), start=1):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        # 预算已在上一轮耗尽：不再起新一轮（起一个必然立刻超时的轮
+                        # 只会多出一条空 turn）。
+                        run_status = "timeout"
+                        await self.adapter.cancel(session)
+                        break
                     turn, events, failed = await self._run_turn(
-                        session, case, index, message, result.id
+                        session, case, index, message, result.id, remaining
                     )
                     turn_results.append(turn)
                     session_events.extend(events)
@@ -709,7 +742,7 @@ class Runner:
                         run_status = "timeout"
                         await self.adapter.cancel(session)
                         break
-        except TimeoutError:
+        except TimeoutError:  # 兜底到期：此处拿不到在飞那一轮的局部证据
             run_status = "timeout"
             await self.adapter.cancel(session)
         return turn_results, session_events, run_status
@@ -937,12 +970,23 @@ class Runner:
             )
 
     async def _run_turn(
-        self, session: AgentSession, case: Case, index: int, message: str, case_run_id: str
+        self,
+        session: AgentSession,
+        case: Case,
+        index: int,
+        message: str,
+        case_run_id: str,
+        session_remaining: float | None = None,
     ) -> tuple[TurnResult, list[TraceEvent], bool]:
         turn_spec = case.input.turns[index - 1] if case.input.type == "multi_turn" else None
         per_turn_timeout = (
             turn_spec.timeout if turn_spec is not None and turn_spec.timeout else None
         ) or case.execution.timeout
+        if session_remaining is not None:
+            # session 总预算是硬上限：这一轮最多花掉"还剩下的那些"（Spec §2.4 的两层
+            # 超时都要真的生效，而不是靠外层兜底抢先取消）。
+            per_turn_timeout = min(per_turn_timeout, session_remaining)
+        started = time.monotonic()
         builder = TraceBuilder()
         events: list[TraceEvent] = []
         output: str | None = None
@@ -984,9 +1028,17 @@ class Runner:
 
         tree = builder.build()
         root = next((span for span in tree.spans if span.parent_span_id is None), None)
-        latency_ms = 0
-        if root is not None and root.finished_at is not None:
-            latency_ms = int((root.finished_at - root.started_at).total_seconds() * 1000)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        if status == "timeout":
+            # 超时轮没有 run.finished：builder 会给未收尾的 span 补一个 finish 时刻
+            # （它补的是"最后一条事件的时间"，对本轮而言是假的），所以这里不能信
+            # span 的时长——用真实墙钟。记 0 或记假值都会让"超时"这个最该看清耗时
+            # 的场景反而看不出它打了多久（联调实测）。
+            latency_ms = elapsed_ms
+        else:
+            latency_ms = 0
+            if root is not None and root.finished_at is not None:
+                latency_ms = int((root.finished_at - root.started_at).total_seconds() * 1000)
         tool_calls = [
             ToolCallRecord(
                 name=span.name,
@@ -1218,11 +1270,21 @@ class Runner:
             self._usage_scopes.append("none")
 
     def _run_usage_scope(self) -> str | None:
-        """run 级口径：full（全部双侧）/ partial（存在单侧或无观测的 case）/ None（全程无观测）。"""
+        """run 级口径：full（全部双侧）/ partial（存在单侧观测的 case）/ None（全程无观测）。
+
+        "全程无观测"必须是 None 而不是 partial（联调实测缺陷）：两者都让口径守卫
+        拦下比较，但**含义不同**——partial 说"总量被低估，是观察不全"，None 说
+        "这次 run 根本没有任何用量事实"。把它们并成一个值，报告上就分不出
+        "SUT 只上报输入侧"（协议形态问题）与"这次 run 一个 usage 都没拿到"
+        （run 本身没跑起来）。本函数与 `RunMetadata.token_usage_scope` 的字段注释
+        是同一份契约，此前实现把全 none 归进 partial，与注释相矛盾。
+        """
         if not self._usage_scopes:
             return None
         if all(scope == "full" for scope in self._usage_scopes):
             return "full"
+        if all(scope == "none" for scope in self._usage_scopes):
+            return None
         return "partial"
 
 

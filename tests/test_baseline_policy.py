@@ -146,3 +146,45 @@ class TestMainLatestSuiteComposition:
 
         resolved = store.resolve("b1", "v1", BaselineMode.main_latest)
         assert resolved is not None and resolved.pinned_run_id == "run_golden"
+
+
+class TestMainLatestEndpointKind:
+    """联调实测（2026-09-30）：候选必须与当前 run **接入类型**相同。
+
+    "先在本机跑几次 `fake://` 冒烟、再第一次接真实 SUT"是常见顺序。那些 fake run
+    在 main 上、Gate PASS、套件组成也可能全等——于是它们会被选成真实 SUT 首个 run
+    的基线，报告里出现一批纯由换 SUT 造成的"回归"。
+    """
+
+    def test_fake_run_is_not_a_candidate_for_a_real_sut(self, tmp_path: Path) -> None:
+        store, runs_root = _store(tmp_path)
+        _seed_run(runs_root, _meta("run_fake", git_branch="main", agent_endpoint="fake://"))
+
+        assert (
+            store.resolve(
+                "b1", "v1", BaselineMode.main_latest, agent_endpoint="http://127.0.0.1:8901"
+            )
+            is None
+        )
+
+    def test_real_sut_run_is_not_a_candidate_for_fake(self, tmp_path: Path) -> None:
+        store, runs_root = _store(tmp_path)
+        _seed_run(
+            runs_root,
+            _meta("run_http", git_branch="main", agent_endpoint="http://127.0.0.1:8901"),
+        )
+
+        assert store.resolve("b1", "v1", BaselineMode.main_latest, agent_endpoint="fake://") is None
+
+    def test_same_kind_on_different_hosts_still_matches(self, tmp_path: Path) -> None:
+        """粒度是接入类型而非整条 URL：同一个 SUT 在开发机与 CI 上 host 不同。"""
+        store, runs_root = _store(tmp_path)
+        _seed_run(
+            runs_root,
+            _meta("run_dev", git_branch="main", agent_endpoint="http://127.0.0.1:8901"),
+        )
+
+        resolved = store.resolve(
+            "b1", "v1", BaselineMode.main_latest, agent_endpoint="http://ci-host:9999"
+        )
+        assert resolved is not None and resolved.pinned_run_id == "run_dev"

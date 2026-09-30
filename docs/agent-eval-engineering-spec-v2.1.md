@@ -252,6 +252,20 @@ per-turn timeout 触发 → 取消该 session，记 INFRA/AGENT failure 语义�
 session 总超时（execution.timeout）独立生效
 ```
 
+**两层预算的优先级（实现修正，2026-09-30 联调实测）**：session 预算（`execution.timeout`）
+是**硬上限**，每一轮拿到的实际预算是 `min(per-turn, session 剩余)`。到期必须发生在
+**turn 层**——那里手里有这一轮的 builder、事件与用量，能如实落账"超时前跑掉了多少"。
+
+反例（修前的行为）：单轮 case 的两层预算数值相同，外层 `asyncio.timeout` 必然先
+到期，把在飞的 `_run_turn` 连同它局部的 events 一起取消。后果是报告上
+`total_tokens=0 / avg_tool_calls=0 / avg_latency_ms=0`——**"超时"读起来像"什么都没做"**；
+而超时恰恰是最该看清"它到底打了多少转、为什么没跑完"的时刻。外层超时只留作兜底
+（病理情况），余量 `_SESSION_TIMEOUT_GRACE`。
+
+超时轮的 `latency_ms` 取**真实墙钟**而不是 span 时长：没有 `run.finished` 时
+TraceBuilder 会给未收尾的 span 补一个 finish 时刻（"最后一条事件的时间"），
+对超时轮而言那是假值。
+
 session 级断言（expected.final）的聚合口径：
 
 ```text
@@ -368,9 +382,10 @@ fixture/数据集损坏           INVALID
 
 `UNDETERMINED` 不允许被实现静默映射为其他状态。
 
-`INVALID` 的触发面（外部接入修订，2026-09-29）不止"fixture/数据集损坏"一类。
-基线比对的价值前提是"两次 run 之间只有被测变更在变"，所以**任何"两侧不可比"
-的事实**都必须判 INVALID 并写明 `invalid_reason`，禁止静默产出回归数字：
+`INVALID` 的触发面（外部接入修订，2026-09-29；2026-09-30 补接入类型）不止
+"fixture/数据集损坏"一类。基线比对的价值前提是"两次 run 之间只有被测变更在变"，
+所以**任何"两侧不可比"的事实**都必须判 INVALID 并写明 `invalid_reason`，禁止静默
+产出回归数字：
 
 ```text
 dataset_version 不一致        → INVALID（§1.2-3）
@@ -382,12 +397,17 @@ token_usage_scope 口径不一致  → INVALID（只校输入侧的 run 与校�
                                 run，tokens.max_regression_percent 的差值里
                                 混着口径变化——"口径漂移被伪装成回归"与
                                 模型漂移同罪）
+接入类型不一致（fake ↔ http） → INVALID（换了被测对象本身；联调实测：fake 冒烟
+                                的历史 run 给真实 SUT 首个 run 当基线，
+                                native.output_checks 显示 -100% "回归"）
 ```
 
 双侧均为空（旧 run 未记录该字段）不触发——无法证伪可比性时不拦。
+多条同时成立时**全部列出**（`；` 连接），不是只留最后一条：每条原因指向不同的
+修法（换 dataset / 换套件 / 换模型 / 换基线来源），只报一条等于把另一条线索藏起来。
 实现落点是 `regression/compare.py` 的守卫链（`dataset_version` / `benchmark_id`
-/ `suites_covered` 之后），`valid=False` 天然继承"Gate 对应规则落
-`undetermined`"的既有链路。
+/ `suites_covered` / 接入类型 / `agent_model` / `token_usage_scope`），`valid=False`
+天然继承"Gate 对应规则落 `undetermined`"的既有链路。
 
 ---
 
@@ -421,6 +441,7 @@ resolve_baseline(benchmark_id, dataset_version):
      满足 status == completed
      且 对应 Gate 结果为 PASS（PR/Main Gate）
      且 benchmark_id 一致
+     且 与当前 run 接入类型相同（fake / http，见 §4.2 实现修正三）
   2. 过滤 dataset_version == candidate.dataset_version
   3. 取 started_at 最近的一个
   4. 命中   → baseline resolved
@@ -440,6 +461,15 @@ resolve_baseline(benchmark_id, dataset_version):
 > security run 当基线）。**全等**而不是"覆盖"：超集的均值同样不可比。旧 run
 > （未记录套件，空字典）只与同为空字典的候选匹配；显式 / release pin 是人的决定，
 > 不在解析期拦，但比较期按 §4.3 的同一原则判 invalid（原因可见）。
+>
+> **实现修正（2026-09-30，联调实测）**：候选还要求**接入类型**与当前 run 相同
+> （`fake` ↔ `http`）。"先在本机跑几次 `fake://` 冒烟、再第一次接真实 SUT"是接入
+> 新 SUT 时的自然顺序；那些 fake run 在 main 上、Gate PASS、套件组成也可以全等，
+> 唯一不成立的是"同一个被测对象"，于是真实 SUT 的首个 run 收到一批纯由换 SUT
+> 造成的"回归"（实测：`native.output_checks` 显示 -100% 回归，`fake://` 基线 ×
+> `http://localhost:8901` 候选）。粒度取接入类型而非整条 URL：同一个 SUT 在开发机
+> 与 CI 上 host/port 必然不同，钉死 URL 会让跨机基线永远不可比；模型漂移另由
+> `agent_model` 守卫覆盖。实现落点 `models/run.endpoint_kind()`。
 
 ## 4.3 NO_BASELINE 降级语义
 
@@ -462,8 +492,24 @@ resolve_baseline(benchmark_id, dataset_version):
 不全等时比较判 invalid，原因写入 report——均值定义在各自的 case 集合上，集合不同
 则数值不可比）；静默跨 **agent 模型**比较（`agent_model` 不一致 → invalid，见
 §3.3）；静默跨**用量口径**比较（`token_usage_scope` 不一致 → invalid：只观测到
-输入侧的 run，token 总量是被低估的，与全量观测的 run 作差混入口径变化）；因缺
-baseline 直接阻塞 PR。
+输入侧的 run，token 总量是被低估的，与全量观测的 run 作差混入口径变化）；静默跨
+**接入类型**比较（`fake` ↔ `http` → invalid：换了被测对象本身，见 §4.2 实现修正三）；
+因缺 baseline 直接阻塞 PR。
+
+`token_usage_scope` 的取值与含义（三态，`RunMetadata` 字段注释是同一份契约）：
+
+```text
+full     全部 case 双侧观测（输入 + 输出）→ 总量可信
+partial  存在单侧观测的 case（典型：外部流上只报输入侧的 SUT）
+         → 总量被低估，跨 run 比较必须先过口径守卫
+None     全程没有任何用量观测（可能一个 case 都没跑到，或 SUT 完全不报 usage）
+         → 不是"口径为 partial"，是"这次 run 没有任何用量事实"
+```
+
+**partial 与 None 不可合并**：两者都让口径守卫拦下比较，但报告上必须分得出
+"SUT 只上报输入侧"（协议形态问题，接入方改协议）与"这次 run 一个 usage 都没拿到"
+（run 本身没跑起来，先查基础设施）。实现一度把全 none 归进 partial，与字段注释
+自相矛盾（联调实测修正）。
 
 ## 4.4 baselines 表 Schema（扩展 PRD §80）
 
@@ -2347,14 +2393,30 @@ GEval                                                   ← custom.* 未实现�
   |Δ%| ≤ 阈值（20% / 25% / 20%）        → unchanged
   超出阈值                               → 按方向给 improved / regressed
 wall-clock 类（latency_ms / .duration_ms）：
-  max(两侧均值) < 1ms                    → unchanged（绝对判据）
+  |两侧差值| ≤ 1ms                       → unchanged（量化步长）
+  min(两侧) < 1ms                        → unchanged（那一侧不可测）
 cost / task_failure / 质量类             → 无下限，保持逐字方向
 ```
 
-绝对判据是必需的：基线为 0 或近 0 时相对阈值的分母失义，`0 ↔ 0.4ms` 的 ±100%
-只有"都在毫秒以下"这一个诚实的结论。质量类 metric 不设下限——得分是确定性的，
-任何变化都是信号。此前的 `test_api` latency 例外随之摘除：摘除本身就是修复的
-回归断言。
+绝对判据的两条都必需，且**必须挂在"任一侧不可测或差值是量化误差"上**，而不是
+"两侧都在毫秒以下"：
+
+- 基线为 0 或近 0 时相对阈值的分母失义，`0 ↔ 0.4ms` 的 ±100% 只有"无信号"
+  这一个诚实的结论；
+- 时间戳的量化步长就是 1ms，`1.0 ↔ 2.0ms` 的"翻倍"是量化不是耗时——**且
+  `1.0ms` 恰好等于下限时，`max(两侧) < 1ms` 的严格不等号不成立**，比较会掉进
+  相对阈值分支：`1.0 ↔ 0.6ms` 于是被判 `improved`（-40% > 20%）。这就是
+  `test_api.py::test_regression_between_two_runs` 的间歇失败（联调实测的
+  ``{'improved','unchanged'}`` 断言）；5 个 case 全 1ms 的那一侧均值正好落在
+  边界上。
+
+同一份墙钟噪声在 case 级 `_performance_diff` 上此前**没有任何绝对下限**
+（1ms ↔ 2ms 判退步），而那条 diff 进 `comparison.performance_regressions`
+（Gate 的输入）——"metric 段被降噪、case 段却触发 Gate"是同一种错误的两种表现，
+两处共用 `_below_wall_clock_floor()`。
+
+质量类 metric 不设下限——得分是确定性的，任何变化都是信号。此前的 `test_api`
+latency 例外随之摘除：摘除本身就是修复的回归断言。
 
 ## 24.2 报告携带 case 级产物指针（ROADMAP 发现的 4，§21.1 更新的实现面）
 

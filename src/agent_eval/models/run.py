@@ -16,6 +16,27 @@ class RunStatus(StrEnum):
     cancelled = "cancelled"
 
 
+def endpoint_kind(endpoint: str | None) -> str:
+    """接入类型（可比性粒度）：``fake``（内置 mock）/ ``http``（真实 SUT）/ 其它原样。
+
+    "两次 run 之间只有被测变更在变"的前提里包含"还是同一个被测对象"。换掉 SUT 本身
+    时（内置 mock ↔ 真实平台）通过率/工具调用/延迟全变，回归数字纯属噪声——这与
+    跨 dataset 比较同类。粒度取**接入类型**而不是整条 URL：同一个 SUT 在开发机与 CI
+    上的 host/port 必然不同，钉死 URL 会让跨机基线永远不可比；模型漂移另有
+    ``agent_model`` 守卫负责（Spec §3.3 / §4.3）。
+
+    空串（旧 run 未记录 endpoint）返回空串，两侧都空即相等——无法证伪可比性时不拦。
+    """
+    if not endpoint:
+        return ""
+    head = endpoint.split("://", 1)[0].strip().lower()
+    if head == "fake":
+        return "fake"
+    if head in ("http", "https"):
+        return "http"
+    return head or endpoint
+
+
 class FailureSemantics(StrEnum):
     """PRD §46: judge failure != agent failure."""
 
