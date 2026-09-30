@@ -44,3 +44,6 @@ outputs/
 
 # trellis
 .trellis/
+
+# tmp
+tmp/

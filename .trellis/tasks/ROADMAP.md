@@ -81,7 +81,7 @@ Spec（V2.2）的验收条款，不是"感觉还差点"。
 | 发现的 2（baseline 不看套件组成） | ✅ 修复 | main-latest 候选要求 `suites_covered` 与当前 run **全等**（不是覆盖——超集的均值同样不可比）；显式/release pin 是人的决定，解析期不拦，但 `compare_runs` 对**所有**模式加比较期守卫：组成不全等 → `valid=False` + 原因可见（§4.3 的"禁止静默跨集合比较"）。实测：此前 smoke run 曾拿 security run 当基线，修复后解析到同为 smoke 的 run |
 | §19 Challenge Set | ✅ 落地 | 七类各一条（`challenge.*`），断言全部落在真实观测面（tool_arguments / sql_result / subagent span / compaction 计数），`tests/test_challenge_set.py` 用"拿掉行为标记必须变红"证明不是假覆盖；`challenge` 套件**不进任何 gate**（PRD §19 原文，测试钉住）。mock agent 加法式扩展：逐调用错误粒度（`tool_error_calls`，全错表达不了"自愈"）与多 SubAgent（`subagents`） |
 | §40 Nightly Profile | ✅ 落地 | 六个 judge metric 全开、**不带 native fallback**——夜间跑要的是语义全量信号，降级成确定性规则等于白跑，judge 不可用按 §6.1 记 exit 2。GEval（§42 custom.*）未实现故缺位，profile 内注释记账，实现后补 |
-| 发现的 1（run 级 diff 无噪声下限） | ✅ 修复 | `MetricDiff` 的方向只在变化幅度超出与 case 级性能回归**同源**的阈值时给出；wall-clock 类加绝对判据（两侧均值 < 1ms 判 unchanged——基线近 0 时相对阈值分母失义，实测 flake 0.4↔0ms）。`test_api` 的 latency 例外随之摘除，摘除即回归断言 |
+| 发现的 1（run 级 diff 无噪声下限） | ✅ 修复（2026-09-30 补全边界） | `MetricDiff` 的方向只在变化幅度超出与 case 级性能回归**同源**的阈值时给出；wall-clock 类加绝对判据（两侧均值 < 1ms 判 unchanged——基线近 0 时相对阈值分母失义，实测 flake 0.4↔0ms）。`test_api` 的 latency 例外随之摘除，摘除即回归断言。**边界补全**：该判据写的是 `max(两侧) < 1ms`，恰好 ``== 1.0ms`` 的一侧（5 个 case 全 1ms）不满足严格不等号，掉进相对阈值分支 → `1.0 ↔ 0.6ms` 判 `improved`。这就是那条"摘除例外"的断言仍在间歇失败的机理（实测：负载下 5 case 均值分布确有 `0.6 / 6.0 / 7.4 / 8.0` 等整毫秒值，见下）。改为两条绝对判据（`|Δ| ≤ 1ms` 量化步长 / `min(两侧) < 1ms` 单侧不可测），并**同源下沉到 case 级** `_performance_diff`——那条 diff 进 `performance_regressions`（Gate 输入），此前 1ms ↔ 2ms 的抖动就能让 Gate 变红 |
 | 发现的 4（报告不带产物指针） | ✅ 修复 | `CaseAggregate.artifacts` 指针（iteration/name/kind/path/bytes，不塞内容）进 report.json / REST Cases 行 / summary.md「现场」小节 / report.html「现场」列；测试断言指针与落盘文件可互解。能力表仍只有 Web——指针回答"现场在哪"，能力表回答"什么本来就采不到"（Spec §21.1 已回写） |
 | §92 按策略跳过 judge | ✅ 落地 | `--judge-skip-policy skip_blocked`：case 已被阻断判死时跳过其**非阻断** judge（保守双条件：blocking 的 judge 参与判定不跳；判定未定不跳），跳过留痕为 skipped metric result（§19.1.1 独立结局）。缺省 none，行为不变 |
 
@@ -128,6 +128,17 @@ workdir 透传、基线守卫、文档条款）；接入侧两块不在本仓：
 | B 转译 shim | ai-chatbot 侧测试组件（四端点契约 + §8 词汇归一化 + 审批策略 + 观测面声明）——**首版已落地本仓 `shims/ai-chatbot/`**（translator 零依赖可测 + 纯标准库四端点；12 条转译器测试以冒烟 dump 同形 chunks 驱动）；**联调期待验证**：审批续跑 POST 形状（change-plan 未覆盖清单第 1 项）、父级直连 bash output | 🔶 首版落地 |
 | C 专用评测集 | ai-chatbot 工具面/fixture 形态的 dataset + profile/gate/suite，在 ai-chatbot 仓（`evals/` 数据随本仓走，具体用例依赖 shim 先行） | ⬜ 接入侧 |
 | 第 0 步冒烟 | 直连 `POST /api/chat` 的运行时行为验证（chunk 时序 / 402 时点 / 审批收尾 / `id===toolCallId` / usage 时机），shim 写码前的第一优先动作 | ⬜ 接入侧 |
+
+### 联调首轮实测（2026-09-30，见下方「执行中的发现」5）
+
+shim 起在 8901、harness 指向它开跑之后，暴露的三个缺陷两个在 shim、一个在框架：
+
+| 项 | 归属 | 处置 |
+| --- | --- | --- |
+| `/run` 恒返回 200 + 空流（`SETTINGS["timeout"]` 只有读点没有写点 → KeyError 在头发出后才抛） | shim | ✅ 修：补 `--timeout` 写点；首事件前失败→5xx+原因、之后失败→流内 `error` + `run.finished(status=error)`、上游 200 无 finish chunk 同样补终局事件；`tests/test_shim_server.py` 真 TCP 端到端护栏（转译单测全绿而两个进程拼起来恒空流，是这一层的盲区） |
+| `token_usage_scope` 全未观测被记成 `partial`（与字段注释/PRD §7.2 的 full/partial/未观测三态矛盾） | 框架 | ✅ 修：全 `none` → `None`；Spec §4.3 补三态口径与"partial 与 None 不可合并"的理由 |
+| `fake://` 的历史 run 被选成真实 SUT 首个 run 的基线 | 框架 | ✅ 修：`models/run.endpoint_kind()` + 解析期候选过滤（§4.2 实现修正三）+ 比较期守卫（§3.3）；compare 的守卫链改**并列列出**全部不可比原因（原先 last-wins，同时踩两条时前一条消失） |
+| `test_api.py::test_regression_between_two_runs` 间歇失败（此前记为"发现的 1 的残余、14 轮探针未复现"） | 框架 | ✅ 定位并修：wall-clock 绝对下限是 `max(两侧) < 1ms`，**恰好 1.0ms 的一侧**不满足严格不等号 → 掉进相对阈值分支，`1.0 ↔ 0.6ms` 判 `improved`（-40% > 20%）。负载下实测的 5-case 均值分布确有整毫秒值（`0.6 / 6.0 / 7.4 / 8.0`），不是不可复现的"随机"——是边界。改为 `|Δ| ≤ 1ms` 或 `min(两侧) < 1ms` 两条判据，并同源下沉到 case 级 `_performance_diff`（那条进 Gate）。见 Spec §24.1 |
 
 ---
 
@@ -309,3 +320,50 @@ report.html 里既没有 case 级产物索引、没有能力表，也没有指�
 - **2026-09-29 已修复**（见上方「收尾批次」）：候选要求**全等**（覆盖不充分，
   超集的均值同样不可比）；比较期对所有模式加守卫，组成不全等 → invalid + 原因。
   实测复验：smoke run 现解析到同为 `{smoke: 3}` 的基线。
+
+### 发现的 5：接入口自身的 bug 会被完整伪装成"被测对象失败"
+
+首轮真实联调（shim 8901 → ai-chatbot 3003）时，harness 报 `status=partial`
+`verdict=fail`，五个 case 全是 `AGENT_FAILURE`、`total_tokens=0`、`avg_tool_calls=0`。
+真相是 shim 每次 `/run` 都在 `SETTINGS["timeout"]`（只有读点、没有写点）上抛
+`KeyError`——而 HTTP 头已经发出去了，于是 harness 收到"**200 + 空流**"，判
+`agent stream ended without run.finished`，**被测平台一次都没被调用**。
+
+- **为什么单测全绿**：`tests/test_shim_translator.py` 只测转译状态机（12 条全绿），
+  缺陷出在 `server.py` 与 translator 拼起来的那一层——没有任何测试跨过两个进程。
+  这与 Spec §22.11 记的"judge 路径整套测试不执行"是同一类盲区：**覆盖面按模块算，
+  而不是按真实链路算**。
+- **为什么危险**：报告上写着被测平台的名字，结论是"agent 失败"。接入口的 bug 与
+  被测对象的缺陷在这里**完全同形**——不假绿纪律（PRD §6.2.1 义务 5）要求 shim
+  一侧任何非终局收场都必须响亮（5xx + 原因 或 流内 `error`+`run.finished`）。
+- **同轮暴露的框架侧两项**（都已修）：
+  - `_run_usage_scope` 把"全未观测"记成 `partial`，与字段注释/PRD §7.2 的三态矛盾
+    ——partial 是"SUT 只报输入侧"，None 是"这次 run 一个 usage 都没拿到"，
+    报告上必须分得出来（Spec §4.3 已补三态表）。
+  - `fake://` 的历史 run 被选成真实 SUT 首个 run 的基线（main-latest 候选不看接入
+    类型），报告出现 `native.output_checks -100% regressed`——纯由换 SUT 造成。
+    解析期过滤 + 比较期守卫双修，粒度取接入类型而非整条 URL（Spec §4.2/§3.3）。
+- **顺带**：compare 的守卫链原先是 last-wins 赋值，同时踩中两条时只报最后一条，
+  前一条排查线索消失；改为并列列出全部原因。
+
+### 发现的 6：超时会掩盖它自己的现场（token / 工具调用 / 耗时全归零）
+
+同一轮联调暴露：真实 SUT 上 `database.query.top_customers` 超时（`execution.timeout: 30`），
+报告里那条 case 是 `total_tokens=0`、`tool_calls=[]`、`latency_ms=0`——
+从报告上看，超时与"agent 一行都没跑"完全同形。
+
+- **根因**：`_drive_session` 用外层 `asyncio.timeout(execution.timeout)`，而
+  `_run_turn` 自己也有一个 per-turn 预算、取值相同（单轮 case 下 per-turn 就是
+  session 超时）。外层必然先到期 → 在飞的 `_run_turn` 被取消 → 它局部的
+  `builder` / `events` / usage 随协程一起消失。**两层预算的优先级从未被规定**，
+  实现选了外层优先。
+- **为什么值得单记**：超时是回归平台最需要现场的时刻（它为什么没跑完？在打转吗？
+  还是 SUT 侧卡住了？）。把现场清零，等于把最需要证据的那条 case 变成了唯一
+  没有证据的那条。
+- **修法**：session 预算成为 per-turn 的**上限**（`min(per-turn, remaining)`），
+  到期发生在 turn 层、由它自己收场（`status="timeout"`），外层只留兜底 +
+  `_SESSION_TIMEOUT_GRACE` 余量。超时轮的 `latency_ms` 取真实墙钟（没有
+  `run.finished` 时 TraceBuilder 补的 finish 时刻对超时轮是假值）。
+- **护栏**：`test_timeout_preserves_the_evidence_collected_so_far`，用
+  "先把事件发完再挂着不结束"的适配器复现——与 `[slow]` 脚本的关键区别是**时序**
+  （那个脚本在发任何事件之前先 sleep，超时时手里本来就没有证据）。
