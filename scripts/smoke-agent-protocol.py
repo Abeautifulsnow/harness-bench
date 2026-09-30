@@ -58,6 +58,15 @@ SCENARIOS: dict[str, dict] = {
         "title": "子代理事件关联（验收 4）",
         "prompt": "请用 agent 工具委托一个子任务：让子代理报告当前目录的文件数量。",
     },
+    "mcp": {
+        "title": "MCP 工具流上形状（扩展：mcp__ 前缀与拆流依据）",
+        "prompt": "请用 arxiv 的 MCP 工具搜索一篇关于大模型 agent 评测的论文，给出论文标题即可。",
+    },
+    "skill": {
+        "title": "skill 加载流上形状（扩展：skill.loaded 映射来源）",
+        "prompt": "请用 use_skill 工具加载 archify 技能（skillName 填 archify），"
+        "加载后用一句话说明该技能的用途即可，不要实际展开技能的工作流。",
+    },
 }
 
 
@@ -182,6 +191,9 @@ def run_scenario(
         return report
 
     tool_call_ids: list[str] = []  # tool part 的 toolCallId（tool-input-available）
+    tool_names: list[
+        tuple[str, str]
+    ] = []  # (toolCallId, toolName)——MCP 前缀 / use_skill 形状的证据
     sub_event_ids: list[tuple[str, str]] = []  # data-sub-open/done 的 (类型, id)
     usage_positions: list[int] = []
     types: list[str] = []
@@ -203,6 +215,7 @@ def run_scenario(
 
         if ctype == "tool-input-available":
             tool_call_ids.append(str(chunk.get("toolCallId", "")))
+            tool_names.append((str(chunk.get("toolCallId", "")), str(chunk.get("toolName", ""))))
         if ctype.startswith("data-sub-"):
             sub_event_ids.append((ctype, str(chunk.get("id", ""))))
         if ctype == "data-context-usage":
@@ -219,6 +232,7 @@ def run_scenario(
     elapsed = time.time() - started
     report["types"] = types
     report["tool_call_ids"] = tool_call_ids
+    report["tool_names"] = tool_names
     report["sub_event_ids"] = sub_event_ids
     report["usage_positions"] = usage_positions
     report["elapsed_s"] = round(elapsed, 1)
@@ -275,6 +289,23 @@ def run_scenario(
         )
     else:
         print("[验收5] 未观测到 data-context-usage（被测平台源码默认每步注入，缺失即异常）")
+
+    # ---- 扩展项：工具名清单（MCP 前缀 / use_skill 形状的直接证据）----
+    if tool_names:
+        print(f"[扩展] 本次调用的工具名: {[tool_name for _, tool_name in tool_names]}")
+        mcp_called = [tool_name for _, tool_name in tool_names if tool_name.startswith("mcp__")]
+        if mcp_called:
+            print(
+                f"[扩展] MCP 工具实测名: {mcp_called}"
+                "（拆流依据：mcp__<server>__<tool> 前缀出现在 toolName 即成立）"
+            )
+        skill_calls = [
+            c.get("input")
+            for c in report["raw"]
+            if c.get("type") == "tool-input-available" and c.get("toolName") == "use_skill"
+        ]
+        if skill_calls:
+            print(f"[扩展] use_skill 入参实测: {skill_calls}")
 
     print(f"[耗时] {elapsed:.1f}s")
     if dump_path is not None:
