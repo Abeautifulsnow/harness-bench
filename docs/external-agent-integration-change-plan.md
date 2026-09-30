@@ -120,6 +120,15 @@ license 已激活）完成四场景实测（basic / approval / subagent / 缺 id
 
 全部发现落 shim 侧；框架（PRD §8 词汇、E 类机制、A2/A3 的口径）无一需要改动。
 
+**记忆功能核查（2026-09-30，无需 smoke）**：ai-chatbot 有记忆功能（会话后台抽取 +
+每轮召回注入 `<system-reminder>`），但**全程流外**——`memory.query`/`memory.result`
+在流上零事件，harness 亦无消费方（MemoryRetrieval/MemoryConflict 属"缺声明侧"未实现，
+Spec §17.3）。三个推论：shim v1 不转译记忆；观测面表不需 memory 行（无插件声明依赖）；
+**记忆作用域按 userId+projectDir 解析，而 shim 每 iteration 独立 workdir → 记忆桶天然
+为空/隔离，评测跑的是"无记忆状态"，case 间零污染（B4 副作用隔离的实测确认）**。
+将来要评测记忆能力（含"带记忆行为"），需先补 case 词汇表与观测面（流上无事件，
+需 ai-chatbot 侧暴露召回事实或读其记忆目录），再补插件——新能力，非本次缺口。
+
 **扩展场景补测（2026-09-30 同日，arxiv MCP + archify skill）**：
 `mcp__arxiv__search_papers` 前缀逐字出现在 toolName（拆流依据成立），且
 `tool-input-start/available` 带 **`dynamic:true`** 标记（动态注册工具，静态工具无此字段
