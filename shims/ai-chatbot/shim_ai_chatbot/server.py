@@ -44,9 +44,15 @@ SETTINGS: dict = {
 # ------------------------------------------------------------------ upstream
 
 
-def _validate_upstream(url: str, allow_public: bool) -> str | None:
-    """上游边界：仅 http(s)；默认仅回环/私网（同冒烟脚本的探测边界）。"""
-    split = urlsplit(url)
+def _upstream_candidates(allow_public: bool) -> list[tuple[str, str]]:
+    """解析上游并把**全部**合法地址作为连接候选（getaddrinfo 顺序）。
+
+    返回 [(connect_host, host_header)]。Windows 上 `localhost` 通常先解析出 IPv6
+    `::1`，而 `next dev -H 0.0.0.0` 只绑 IPv4——只钉第一个地址会钉错族（实测踩坑：
+    WinError 10061），所以逐个候选尝试。https 上游不做 IP 钉定（TLS SNI/证书校验
+    按主机名走），主机名边界仍由本函数校验。
+    """
+    split = urlsplit(SETTINGS["upstream"])
     if split.scheme not in ("http", "https"):
         raise SystemExit(f"拒绝：上游协议必须是 http/https，得到 {split.scheme!r}")
     host = split.hostname or ""
@@ -54,34 +60,44 @@ def _validate_upstream(url: str, allow_public: bool) -> str | None:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror as exc:
         raise SystemExit(f"拒绝：无法解析上游主机 {host!r}: {exc}") from exc
-    pinned = None
+    candidates: list[tuple[str, str]] = []
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
-        if ip.is_loopback or ip.is_private or ip.is_link_local:
-            pinned = pinned or str(ip)
-            continue
-        if not allow_public:
+        if not (ip.is_loopback or ip.is_private or ip.is_link_local) and not allow_public:
             raise SystemExit(f"拒绝：上游 {host} 解析到公网地址 {ip}（确需请加 --allow-public）")
-    if pinned is None and not allow_public:
-        raise SystemExit(f"拒绝：上游 {host} 未解析到回环/私网地址")
-    return pinned
+        connect_host = f"[{ip}]" if ":" in str(ip) else str(ip)
+        candidate = (connect_host, host) if split.scheme == "http" else (host, host)
+        if candidate not in candidates:
+            candidates.append(candidate)
+    if not candidates:
+        raise SystemExit(f"拒绝：上游 {host} 无可用解析地址")
+    return candidates
 
 
 def _connect(method: str, path: str, body: dict | None, timeout: float) -> HTTPConnection:
     split = urlsplit(SETTINGS["upstream"])
-    pinned = _validate_upstream(SETTINGS["upstream"], SETTINGS["allow_public_upstream"])
-    host = pinned or split.hostname
+    candidates = _upstream_candidates(SETTINGS["allow_public_upstream"])
     port = split.port or (443 if split.scheme == "https" else 80)
     conn_cls = HTTPSConnection if split.scheme == "https" else HTTPConnection
-    conn = conn_cls(host, port, timeout=timeout)
     headers = {"Accept": "text/event-stream"}
     payload = None
     if body is not None:
         payload = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
     target = f"{split.path.rstrip('/')}{path}" if split.path not in ("", "/") else path
-    conn.request(method, target, body=payload, headers=headers)
-    return conn
+    last_exc: OSError | None = None
+    for connect_host, host_header in candidates:
+        conn = conn_cls(connect_host, port, timeout=timeout)
+        try:
+            # Host 头保留原主机名（路由/虚拟主机语义不变）
+            conn.request(method, target, body=payload, headers={**headers, "Host": host_header})
+            return conn
+        except OSError as exc:  # 连接被拒/超时：换下一个解析地址（IPv4/IPv6 双栈兼容）
+            last_exc = exc
+            conn.close()
+    raise OSError(
+        f"upstream {SETTINGS['upstream']} unreachable（候选 {candidates}，端口 {port}）：{last_exc}"
+    )
 
 
 # ------------------------------------------------------------------ handlers
@@ -370,9 +386,10 @@ def main() -> None:
     SETTINGS["model"] = args.model
     SETTINGS["policy"] = args.policy
     SETTINGS["allow_public_upstream"] = args.allow_public_upstream
-    _validate_upstream(args.upstream, args.allow_public_upstream)
+    candidates = _upstream_candidates(args.allow_public_upstream)
     server = serve(args.host, args.port)
     print(f"shim-ai-chatbot listening on http://{args.host}:{args.port} → {args.upstream}")
+    print(f"upstream candidates: {candidates}")
     print(f"approval policy: {args.policy}; model: {args.model or 'platform-default'}")
     try:
         server.serve_forever()
