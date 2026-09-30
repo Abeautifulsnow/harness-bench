@@ -12,16 +12,13 @@
 > 最多已偏 80 行）。引用**以符号名与行为为准**，行号只是便于当下定位的近似值。
 > 若行号与行为不符，信行为。
 >
-> **验证状态（第四轮校准后）**：harness-bench 侧的全部行为均已对照源码核实；
-> ai-chatbot 侧的**静态事实**（端点与响应头、402 门禁、chunk 载荷字段、审批落库
-> 契约、工具面、并发与目录约定）已升级为**源码级坐标核实**——坐标逐条列在附录，
-> 本轮由两个独立来源交叉确认（可行性评估报告
-> `outputs/UUj9KH79JAcCE1ShSil_h/reports/stage1_可行性评估报告.md` + 本仓复核）。
-> **但运行时行为仍零实跑**：chunk 的实际顺序、`finish`+`[DONE]` 的收尾时序、
-> 402 发生在流前还是流中、审批后流是否干净结束、`data-sub-*` 的 `id` 是否等于
-> 父级 `toolCallId`——这些只能跑起来才知道。第 0 步（冒烟脚本）因此仍是第一优先动作；
-> 在它跑通之前，B2 映射表的**顺序与时序**部分应视为"高置信推断"，
-> 载荷字段部分已是"已核实"。
+> **验证状态（第五轮实测校准后，2026-09-30）**：harness-bench 侧的全部行为均已对照源码核实；
+> ai-chatbot 侧的**静态事实**已源码级核实（附录 §8，第五轮抽查仍成立），**运行时行为亦已实测**——
+> 第 0 步冒烟已对运行中的服务执行（四场景，原始 chunk 证据存 `tmp/smoke/*.json`），
+> 五条运行时行为全部落定（见 §0 第五轮实测校准）。B2 映射表的**顺序与时序**部分
+> 自此从"高置信推断"升级为"**已验证**"，shim 可照表实作。
+> 两处静态判断被运行时修正（`tool-approval-request` 确为流上 chunk 类型、
+> usage 载荷形状扩展且为每 step 一次），无一条框架侧结论受影响。
 
 ---
 
@@ -102,9 +99,26 @@ E3 可以今天就写成绿、A1 落地没有时序障碍。另有一处**新增
 | --- | --- |
 | A1–A4 / B / C / D / E 的结论 | 与 stage1 报告互证，**未被推翻**；harness 侧坐标（`benchmark_cmd.py:38`、`native.py:90/93`、`events.py:51`）逐字吻合 |
 | ai-chatbot 侧静态事实 | **全部核实**，坐标见附录 §8：端点/响应头、402 门禁、`data-context-usage` 字段、retry 只打日志、`data-sub-*` 事件、`mcp__` 命名、并发 5/队列 30、审批落库契约、`outputs/<conversationId>`、vitest+Playwright、仓内无评测设施痕迹 |
-| 运行时行为 | **仍零实跑**——chunk 顺序、`finish`+`[DONE]` 时序、402 时点、审批后流收尾、`id === toolCallId` 关联，第 0 步冒烟仍是唯一手段 |
+| 运行时行为 | **已实测（第五轮，2026-09-30）**——五条全部落定，见 §0 第五轮实测校准；证据存 `tmp/smoke/*.json` |
 | stage1 报告自身的三处数字错误 | **不采纳**：`EVENT_TYPES` "27 个"（实际 **30**）、"~46 个源模块"（实际 103 个 `.py` / 80 个非 `__init__`）、"405+ pytest"（当前 441）。这三处不影响本文的任何结论 |
 | 两处精度修正 | 已写回正文：B3 的审批**线格式**（`tool-approval-request` 不是第一方形状）、B2 的 denied 原因可从 `approval.reason` 取回 |
+
+**第五轮实测校准（2026-09-30，第 0 步冒烟已执行）：五条运行时行为全部落定；
+两处静态判断被运行时修正，无一条框架侧结论受影响。**
+
+冒烟脚本 `scripts/smoke-agent-protocol.py` 对运行中的 ai-chatbot（desktop 分支、
+license 已激活）完成四场景实测（basic / approval / subagent / 缺 id 探针），
+原始 chunk 证据存 `tmp/smoke/*.json`。逐条结论：
+
+| 验收项 | 实测结论 |
+| --- | --- |
+| 1 chunk 顺序 | **已确认**。主链 `start → start-step → [reasoning-*] → text-* 或 tool-input-* → finish-step → data-context-usage → finish(finishReason) → [DONE]`；多步 run 出现多组 start-step/finish-step，`data-context-usage` 在每个 finish-step 之后；子代理事件族夹在 `tool-input-available` 与 `tool-output-available` **之间**。新方言族（B2 原表未列）：`start-step`/`finish-step`（step 边界）、`reasoning-start/delta/end`（思考令牌）、`tool-input-start`/`tool-input-delta`（入参流式增量）、`data-sub-text-delta`/`data-sub-tool-call`/`data-sub-tool-result`（子代理内部事件） |
+| 2 402/400 时点 | **已确认（流前 HTTP 层）**。缺 conversationId 实测 `HTTP 400 {"error":"Missing conversationId"}`；license 402（静态核实 `proxy.ts`）同为流前——shim 把两类都转成 `InfraError` 语义是对的 |
+| 3 审批收尾 | **已确认，且一处翻案**。审批触发后流干净收尾：`tool-approval-request → text-end → finish-step → data-context-usage → finish(finishReason="tool-calls") → [DONE]`，被审批的工具**没有** `tool-output-available`（未执行）——"轮次即结束、等待在客户端"实测成立。**翻案**：`tool-approval-request` 实测就是流上 chunk 类型（载荷 `{approvalId, toolCallId}`）——第四轮"非第一方形状"的静态结论被运行时推翻，shim 按 chunk type 识别即可，不必猜 part state；`finishReason` 是"这轮在等人"的判别信号（正常结束 = "stop"） |
+| 4 id 关联 | **已确认**。`data-sub-*` 全事件族（open/text-delta/tool-call/tool-result/done）的 `id` === 父流 `toolCallId`；`data-sub-open` 载荷含 `subConversationId`；`data-sub-done` 含 `tokenUsage{inputTokens,outputTokens,totalTokens}` / `success` / `durationMs` / `stepsExecuted` / `toolsUsed` / `status` |
+| 5 usage 频率 | **修正**。`data-context-usage` **每 step 一次**（finish-step 之后），非"每轮一次"亦非"每 delta"；载荷实为 **12 键**（第四轮只记录了 4 键）：`totalTokens/messagesTokens/instructionsTokens/toolsTokens/contextLimit/triggerTokens/outputReserve/tokenizerBuffer/lastCompactionFreed/actualInputTokens/cachedTokens/cacheHitRate`。**`totalTokens` 是预算总量不是输出观测**——实测 107751 = messages 63 + instructions 16683 + tools 33023 + tokenizerBuffer 7982 + **outputReserve 50000**，精确吻合；全载荷无 outputTokens 分量 → **A3"仅输入侧"结论维持且证据更强**（子代理 `data-sub-done.tokenUsage` 有全量三分量，印证"哪里有全量哪里只有单侧"） |
+
+全部发现落 shim 侧；框架（PRD §8 词汇、E 类机制、A2/A3 的口径）无一需要改动。
 
 ### 0.1 通用 vs 定制：各类变更的归属
 
@@ -509,17 +523,22 @@ health 必须把这两件事的区别暴露出来。
 
 | PRD §8 事件 | ai-chatbot SSE 来源 | 必须注意 |
 | --- | --- | --- |
-| `run.started` / `run.finished` | `start` chunk / `finish` chunk + `[DONE]` | 缺 `run.finished` 会被 `runner.py:892` 判 agent 失败，必须可靠发出 |
-| `tool.call` / `tool.result` | `tool-input-available` / `tool-output-available` | `input` 已是解析后的对象，直接作 `data.arguments`；**参数类与安全类断言全靠它** |
+| `run.started` / `run.finished` | `start` chunk / `finish` chunk + `[DONE]` | **实测已验证**：`finish` 带 `finishReason`（正常="stop"，审批挂起="tool-calls"——shim 靠它判"这轮在等人"）；缺 `run.finished` 会被 `runner.py:892` 判 agent 失败，必须可靠发出 |
+| `tool.call` / `tool.result` | `tool-input-available` / `tool-output-available` | **实测已验证**：`input` 已是解析后的对象，直接作 `data.arguments`；前置的 `tool-input-start`/`tool-input-delta`（入参流式增量）可忽略；**参数类与安全类断言全靠它** |
 | `tool.result`(错误) | `tool-output-error` / `tool-output-denied` | `denied` 的载荷只有 `toolCallId`，part 本身**没有 reason 字段**；但原因可从该 part 的 **`approval.reason`** 取回（`zombie-approval-contracts.md` §1：审批终态只能落在 `approval.reason`，不得带 `output`/`errorText`）——shim 取它即可，不必"自行编" |
 | `mcp.call` / `mcp.result` | `toolName` 形如 `mcp__<server>__<tool>` | **必须拆成独立事件**，不得折叠进 `tool.call` |
 | `command.started` / `command.finished` | `bash` 工具调用 | 退出码在 output 对象的 `exitCode` 键里，需提到 `data.exit_code`（Spec §19.4 的唯一观测来源） |
-| `subagent.started` / `finished` | `data-sub-open` / `data-sub-done` | 含 `tokenUsage` / `status`（done 载荷为全量三键，见 A3 第四轮补）；"按 `id === toolCallId` 关联"是**运行时待验证项**（冒烟清单第 4 条）。另有 `data-sub-async`：父流不会再有 done，终态要查 `subagent_sessions`，shim 不得把它当丢事件 |
+| `subagent.started` / `finished` | `data-sub-open` / `data-sub-done` | **实测已验证**：全事件族（open/text-delta/tool-call/tool-result/done）`id === toolCallId`；done 载荷含 `tokenUsage{input,output,total}`（A3：子代理侧的全量三分量）；中间事件族 `data-sub-text-delta`/`data-sub-tool-call`/`data-sub-tool-result` shim 可折叠或映射进子代理 span；另有 `data-sub-async`：父流不会再有 done，终态要查 `subagent_sessions`，shim 不得把它当丢事件 |
 | `skill.loaded` | `use_skill` 工具调用 | 也可走 `skill.loaded` 显式事件 |
-| `model.response.data.usage` | `data-context-usage` | 只有输入侧，见 A3 |
+| `model.response.data.usage` | `data-context-usage` | **实测修正**：**每 step 一次**（finish-step 之后），非每轮/每 delta；载荷 12 键，`totalTokens` = 各分量 + `outputReserve`（预算总量，非输出观测），**无 outputTokens 分量** → A3"仅输入侧"维持且证据更强 |
 | `error` | `error` chunk 或 `finishReason:"error"` | 注意 `errorText` 可能被自愈逻辑抑制为空串 |
 | `retry` | **不可观测** | 见 A2，应落 skipped |
 | `context.compaction.*` | **不可观测** | 见 A2，应落 skipped |
+
+**第五轮实测新增的方言行（无 §8 对应，shim 一律丢弃，不得透传）**：
+`start-step` / `finish-step`（step 边界标记）、`reasoning-start` / `reasoning-delta` /
+`reasoning-end`（思考令牌）、`tool-approval-request`（**实测确为流上 chunk 类型**，
+载荷 `{approvalId, toolCallId}`——B3 的审批识别信号，映射见 B3）。
 
 **为什么把 MCP/command 单列**：`security/evaluator.py:209-223` 明确要求
 `tool_names` / `mcp_names` / `command_calls` 三路**逐条透传**，
@@ -552,6 +571,15 @@ ai-chatbot 第一方代码零命中——初版把它当成了流上 part 的类
 shim 转译时应按第一方形状（tool part 的 `state` 字段）识别审批，
 **最终以第 0 步冒烟的实测 chunk 为准**。本段的三个实质判断不受影响：
 轮次即结束、等待在客户端、续跑重新 POST——三条都已在源码与契约文档中核实。
+
+**（第五轮实测翻案，2026-09-30）`tool-approval-request` 确为流上 chunk 类型。**
+冒烟实测：审批触发时流上出现 `{"type":"tool-approval-request","approvalId":"aitxt-…","toolCallId":"call_00_…"}`，
+随后流干净以 `finish(finishReason="tool-calls") + [DONE]` 收尾，被审批工具**没有**
+`tool-output-available`。第四轮"按 tool part 的 state 字段识别"的指引**作废**——
+shim 按 chunk type `tool-approval-request` 识别即可（比猜 state 简单且已验证）；
+`finishReason="tool-calls"` 是"这轮在等人"的判别信号（正常结束 = "stop"）。
+自动审批策略的注入方式（重新 POST `approval-responded` 消息）不变。
+三个实质判断（轮次即结束、等待在客户端、续跑重新 POST）经运行时再次确认。
 
 harness-bench 的协议里没有"等人"这个概念，`run.finished` 一到就结算。因此 shim 必须
 定一个自动策略（预置 `allow` 权限规则 / 自动批准 / 自动拒绝），并且：
@@ -980,18 +1008,14 @@ D 类文档变更与第 1/2 步同批提交 —— 条款先落地，后续实�
 D16（模型钉住 + 用量口径）不晚于第 3 步：第一次 pin 基线之前 `agent_model` 与口径
 必须已是受校验字段，否则第一批基线就是可被模型漂移与口径漂移污染的。
 
-**第 0 步的性质（第五轮更新，2026-09-29）**：冒烟脚本**已就位**——
-本仓 `scripts/smoke-agent-protocol.py`（标准库实现；五个场景分别钉死
-五条运行时行为，`--dump-dir` 留原始 chunk 证据；自带安全边界：默认仅回环/私网、
-请求钉定已校验 IP、不跟随重定向、dump 目录防穿越。场景提示词按接入对象的
-工具面改写 SCENARIOS 即可，判定逻辑与平台无关）。ai-chatbot 侧的
-**静态事实**已由第四轮校准升级为"源码级已核实"（附录 §8），且本轮复核时
-在最新工作树（desktop 分支）上抽查仍全部成立；**运行时行为仍零实跑**——
-本机 3000 端口无监听，脚本待服务可用时执行（`pnpm start:agent` + license
-激活后运行，把输出的 `[验收N]` 行与 dump JSON 回填 B2 映射表）。
-反过来，harness-bench 侧的 A/B/C/D/E 五类判断在这 5 天里**没有一条被推翻**，
-且其中四条（A3 的修法、A4 的落点、E3 的干净基线、A1 无时序障碍）现在有了
-比初版更强的证据 —— 这些校准写在各自的章节里，不改变任何一条结论。
+**第 0 步的性质（2026-09-30 更新：已执行）**：冒烟已对运行中的服务完成
+（`scripts/smoke-agent-protocol.py` 四场景，缺 id 探针 + basic + approval + subagent），
+五条运行时行为全部落定——结论与两处翻案见 §0 **第五轮实测校准**，
+原始 chunk 证据存 `tmp/smoke/*.json`。B2 的顺序与时序自此升级为"已验证"，
+第 3 步 shim 可以照表实写。反过来，harness-bench 侧的 A/B/C/D/E 五类判断
+在这 5 天里**没有一条被推翻**，且其中四条（A3 的修法、A4 的落点、E3 的干净基线、
+A1 无时序障碍）现在有了比初版更强的证据 —— 这些校准写在各自的章节里，
+不改变任何一条结论。
 
 **第三轮修订的性质**：它**没有推翻任何结论**，改的全是落点与触发条件
 （A2 的降级由谁承接、A3 判 skipped 的条件、A1 回执走哪条通道、E1 的默认值），
@@ -1008,6 +1032,7 @@ D16（模型钉住 + 用量口径）不晚于第 3 步：第一次 pin 基线之
 (4) `data-sub-open/done` 的 `id` 是否等于父流的 `toolCallId`；
 (5) `data-context-usage` 出现的时机与频率（每轮一次还是每 delta 一次）。
 五条对上之后，B2 映射表的"顺序与时序"部分才算从推断变成事实。
+**（2026-09-30 已执行：五条全部对上，逐条结论见 §0 第五轮实测校准。）**
 
 ---
 
@@ -1022,12 +1047,12 @@ D16（模型钉住 + 用量口径）不晚于第 3 步：第一次 pin 基线之
 | `POST /api/chat`：UIMessage 流 + `X-Conversation-Id` 响应头 | `apps/sime-agent/app/api/chat/route.ts:33-52`（`createUIMessageStreamResponse`） |
 | `conversationId` **必填**（缺失 400 `Missing conversationId`），值由调用方自选 | `apps/sime-agent/lib/ai/chat/chat-service.ts`（`handleChatMessage` 开头） |
 | license 门禁：`/api/*` 无效/过期 → `402 {error:'LICENSE_INVALID'}`；豁免 `/api/license/*`、`/nest`、`/sime`、`/.well-known/*` | `apps/sime-agent/proxy.ts:55-72`（第五轮复核：402 响应体实为三键 `{ok:false, error:'LICENSE_INVALID', message}`，判废请匹配 `error` 键） |
-| `data-context-usage`：`actualInputTokens` / `cachedTokens` / `contextLimit` / `lastCompactionFreed`，**无 output token** | `packages/core/src/runtime/chat-session/run-session.ts:266-285` |
+| `data-context-usage`：**每 step 一次**（实测）；载荷 12 键 `totalTokens/messagesTokens/instructionsTokens/toolsTokens/contextLimit/triggerTokens/outputReserve/tokenizerBuffer/lastCompactionFreed/actualInputTokens/cachedTokens/cacheHitRate`，`totalTokens` = 各分量 + outputReserve（**预算总量，非输出观测**），**无 output token** | `packages/core/src/runtime/chat-session/run-session.ts:266-285`；载荷键以 `tmp/smoke/smoke-basic.json` 实测为准 |
 | 重试只打日志（指数退避），不发任何流事件 | `packages/core/src/foundation/model/retry-middleware.ts:125-150` |
 | 子 Agent 事件 `data-sub-open` / `data-sub-done`（done 载荷含 `tokenUsage{input,output,total}` / `status`）；另有 `data-sub-async`（父流无 done，终态查 `subagent_sessions`） | `packages/core/src/extensions/subagents/event-broadcaster.ts:49-145` |
 | MCP 工具命名 `mcp__<server>__<tool>` | `packages/core/src/extensions/mcp/registry.ts:26`（逐字构造） |
 | 静态工具 registry：`read_file` / `write_file` / `edit_file` / `save_report` / `bash` / `grep` / `glob` / `ls` / `web_search` / `ask_user_question` / `use_skill` / cron 系列 | `packages/core/src/runtime/tools/index.ts:41-56`；`agent` / `task_*` / `exit_plan_mode` 见 `plan-mode.ts:37-53` 白名单 |
-| 审批：`needsApproval` 挂起 → 流暂停 → `state:'approval-requested'` 的 tool part 落库；续跑 = 重新 POST `body.message` 含 `approval-responded`；denied 的原因在 `approval.reason` | `packages/core/src/extensions/connector/tool-adapter.ts:142-145`；`docs/zombie-approval-contracts.md` |
+| 审批：`needsApproval` 挂起 → 流暂停 → `state:'approval-requested'` 的 tool part 落库；**流上实测出现 `{"type":"tool-approval-request","approvalId":…,"toolCallId":…}` chunk（第五轮）**；续跑 = 重新 POST `body.message` 含 `approval-responded`；denied 的原因在 `approval.reason` | `packages/core/src/extensions/connector/tool-adapter.ts:142-145`；`docs/zombie-approval-contracts.md`；chunk 形状以 `tmp/smoke/smoke-approval.json` 实测为准 |
 | 并发默认 5、队列 30（`CHAT_MAX_CONCURRENCY` / `MAX_QUEUE_SIZE` 可覆盖）；超限发 `{type:'error', errorText:'服务器繁忙，请稍后重试'}` | `packages/core/src/foundation/concurrency/types.ts:14-17`；`apps/sime-agent/lib/ai/chat/chat-service.ts:83-92,120` |
 | agent 产物目录：有 projectDir 时写 `<projectDir>/outputs/<conversationId>` | `packages/core/src/api/app/resolve-agent-config.ts:602` |
 | workdir 作用域：`SIACT_PROJECT_DIR` 环境变量决定项目根 | `apps/sime-agent/.env.example:27`；`apps/sime-agent/lib/utils/paths.ts:93` |
