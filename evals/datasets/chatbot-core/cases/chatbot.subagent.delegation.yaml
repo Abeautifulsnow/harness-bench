@@ -1,18 +1,23 @@
 # 维度：Tool（子代理路由）——`subagent.started` 事件与 `harness.subagent_routing`。
 #
 # 判定对象是"把子任务交给了谁"，不是"交得好不好"（后者是语义判断，留给 judge，
-# 见 SubAgentRoutingEvaluator 的注释）。实测（tmp/probe_c_cases.py subagent）：
-# prompt 要求用 agent 工具委托时，流上出现 `tool.call agent` 与恰好一个
-# `subagent.started`，其 name 是 `auto` —— 那是 ai-chatbot 在调用方未指定
-# agentType 时的缺省标识（`agentType ?? 'auto'`），不是工具名。
+# 见 SubAgentRoutingEvaluator 的注释）。
 #
-# 因此参数这样定：
-#   expected: ["auto"]       —— 至少路由到了缺省代理（少路由会红）；
-#   allow_extra: true        —— 允许它另外起 `general-purpose` 之类的专用代理
-#                               （实测在别的提示词下确实会先起 auto 再起它，
-#                               用 allow_extra 换掉随机变红的风险）。
-# 这是"集合断言在非确定性 SUT 上的正确用法"：**确定的那一侧**写死，
-# 不确定的那一侧显式放宽，而不是把整条断言退化成一个宽松的词匹配。
+# `subagent.started` 的 name 来自 `data-sub-open.agentType`，而它由**模型填不填
+# `agentType` 参数**决定（平台侧是 `agentType ?? 'auto'`，agent-tool.ts:335）。
+# 首版提示词没钉死 agentType，第二轮 C 类全量跑里同一条 case 两次运行给出了不同的
+# name（iter1 `fullstack-engineer` / iter2 `auto`），failure_category=
+# `harness.subagent_routing`——一次**用例自身的非确定性**被记成了路由错误。
+#
+# 第九轮实测（tmp/probe-async/probe_subagent_name.py，同提示词重复采样）：
+#   不指定 agentType：9 次里 6 次 `auto`、3 次 `fullstack-engineer`（两个取值都出现）
+#   显式要求 general-purpose：8 次全为 `general-purpose`（唯一取值）
+# 因此提示词改成**显式指定**，expected 取那个被指定的值。
+#
+# 这条改动不是在把断言改宽——反而收紧了：原先靠 `allow_extra: true` 兜住"顺手起了
+# 别的代理"，现在观测集合必须恰好等于被指定的那一个（集合去重，同类型委托两次仍算
+# 命中）。被钉住的是**模型的自由度**，不是平台事实；"subagent.started 被观测到、
+# name 与请求一致"这件事仍然可红（平台不发事件、或归一化错名字，都会判 FAIL）。
 id: chatbot.subagent.delegation
 version: 1
 name: 子代理委托与路由（Tool 正向）
@@ -26,7 +31,8 @@ difficulty: medium
 input:
   type: single_turn
   prompt: |
-    请用 agent 工具把这件事委托给一个子代理：让它统计当前工作目录里 handbook.md 的字符数。
+    请用 agent 工具把这件事委托给一个子代理，并且**必须在 agentType 参数里显式写
+    `general-purpose`**：让它统计当前工作目录里 handbook.md 的字符数。
 
 environment:
   fixture: chatbot_workspace
@@ -58,5 +64,4 @@ evaluation_profile: chatbot-strict
 metric_params:
   harness.subagent_routing:
     expected:
-      - auto
-    allow_extra: true
+      - general-purpose

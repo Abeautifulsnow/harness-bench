@@ -40,6 +40,40 @@ def maybe_decode_json(value: object) -> object:
     return value
 
 
+def resolve_answers(
+    questions: list[dict], configured: dict[str, object]
+) -> tuple[dict[str, object], list[str], list[str]]:
+    """把配置的答案对齐到本轮**实际被问的**问题。
+
+    返回 ``(answers, unanswered, unused)``：
+
+    - ``answers``：键是 **question 全文**（实测可用的那种键，第七轮）；
+    - ``unanswered``：agent 问了、配置里没有的问题（答案缺失的**唯一**判据）；
+    - ``unused``：配置里没被任何问题命中的键（写错键的表现，第七轮实测：
+      平台不校验键名，写错了只会静默返回一份查不到的答案）。
+
+    三种键写法都认（question 全文 / header / ``#<1-based 序号>``），按此顺序取第一个
+    命中的。放宽是**为了吸收写法差异**，不是为了让缺口看不见：``unanswered`` 仍然按
+    问题算，与用哪种键写法无关。
+    """
+    answers: dict[str, object] = {}
+    unanswered: list[str] = []
+    used: set[str] = set()
+    for index, question in enumerate(questions, start=1):
+        text = str(question.get("question", ""))
+        header = str(question.get("header", ""))
+        for key in (text, header, f"#{index}"):
+            if key and key in configured:
+                answers[text] = configured[key]
+                used.add(key)
+                break
+        else:
+            if text:
+                unanswered.append(text)
+    unused = [key for key in configured if key not in used]
+    return answers, unanswered, unused
+
+
 class TranslationSession:
     """一次 run 的转译会话（跨审批续跑的多条 POST 流拼接为一条 §8 流）。
 
@@ -56,12 +90,19 @@ class TranslationSession:
         model: str | None = None,
         policy: str = "auto-approve",  # auto-approve | auto-deny（B3 策略名，进 /health）
         max_approval_rounds: int = MAX_APPROVAL_ROUNDS,
+        answers: dict[str, object] | None = None,
+        answers_policy: str = "strict",  # strict | partial（见 resolve_answers 的说明）
     ) -> None:
         self.trace_id = trace_id
         self.user_message = user_message
         self.model = model
         self.policy = policy
         self.max_approval_rounds = max_approval_rounds
+        # 审批答案（`ask_user_question` 的 answers）：None = 不注入（保持第七轮行为）。
+        self.answers = answers
+        self.answers_policy = answers_policy
+        self.answer_gaps: list[str] = []  # 问了却没配到答案的问题（本 run 的接入侧缺陷）
+        self.unused_answers: list[str] = []  # 配了却没被问到的键（多半是写错了）
         self.approval_rounds = 0
         self.suspended = False  # True = 审批挂起，server 应构造续跑请求再 POST
         self.decision = "approve"  # 本次挂起的决定（B3 策略的产物，续跑消息据它构造）
@@ -72,13 +113,31 @@ class TranslationSession:
         self._message_id = ""  # start chunk 的 messageId（续跑重建 assistant 消息用）
         self._step = 0
         self._step_text = ""
+        # part 级累加器：`text-start` 是**每个** text part 的起点，所以 part 的文本
+        # 不能拿整步的 `_step_text` 当（那样第二个 part 会连前一个一起记，续跑会把
+        # 文本重复回传）。`_step_text` 只留给"这一步的响应文本"（model.response）。
+        self._part_text = ""
         self._last_text = ""  # 最近完成的 text part = 最终回答
         self._model_request_id = ""  # 当前 step 的 model.request 事件 id
         # toolCallId -> {"kind": tool|bash|mcp, "name", "server", "input",
         #                "call_event_id", "command_event_id", "output"}
         self._tools: dict[str, dict] = {}
         self._pending: list[dict] = []  # 审批挂起项
-        self._text_parts: list[dict] = []  # 续跑重建用：{id, text}
+        # 续跑重建用的**叙述型 part**，按到达顺序记 text / reasoning 两种。
+        # reasoning 不得不带：第十一轮实测，平台在 thinking 模式下要求把
+        # reasoning_content 回传，只重建 text + tool part 会让续跑 POST 直接
+        # 以 `The reasoning_content in the thinking mode must be passed back to
+        # the API` 失败——形态是"一次成功的提问在报告里变成 agent 崩溃"。
+        self._narrative_parts: list[dict] = []
+        self._step_reasoning = ""
+        # toolCallId -> {"sub_conversation_id"}：本 run 受理过的**异步**子代理委派。
+        # 它们不会收到 data-sub-done（见 _on_data_sub_async），为避免 builder 把
+        # 未闭合的 subagent span 收口成 error，在 run.finished 前显式关闭。
+        self._async_subs: dict[str, dict] = {}
+        # toolCallId -> started 事件的 event_id。builder 的配对规则是
+        # "closing.parent_span_id == opening.event_id"（builder.py:127），
+        # 不记这个 id 就只能挂在 root 上 → 找不到 span → 静默忽略 → 未闭合 → 判 error。
+        self._sub_spans: dict[str, str] = {}
 
     # ------------------------------------------------------------------ emit
 
@@ -99,8 +158,12 @@ class TranslationSession:
         handler = getattr(self, f"_on_{ctype.replace('-', '_').replace('.', '_')}", None)
         if handler is not None:
             return handler(chunk)
-        # 其余方言（reasoning-*、start-step/finish-step、tool-input-start/delta、
-        # data-task、data-sub-text-delta/tool-call/tool-result…）一律丢弃（B2 表）
+        # 其余方言（start-step/finish-step、tool-input-start/delta、
+        # data-task、data-sub-text-delta/tool-call/tool-result…）一律丢弃（B2 表）。
+        # `data-sub-text-delta` 丢弃是安全的：异步子代理在后台跑，writer 置空，
+        # 它的事件走子会话自己的 registry 通道，**不会**串进父流（第九轮实测：
+        # 异步轮的直方图里一条 data-sub-text-delta 都没有；同步轮里的那批
+        # 属于子代理内部过程，父回合的回答由 data-sub-done 之后自己的 text-* 给出）。
         return []
 
     # ---- 流生命周期 ----
@@ -124,16 +187,40 @@ class TranslationSession:
         return [request]
 
     def _on_text_start(self, chunk: dict) -> list[dict]:
+        self._part_text = ""
         return []
 
     def _on_text_delta(self, chunk: dict) -> list[dict]:
-        self._step_text += str(chunk.get("delta", ""))
+        delta = str(chunk.get("delta", ""))
+        self._step_text += delta
+        self._part_text += delta
         return []
 
     def _on_text_end(self, chunk: dict) -> list[dict]:
-        if self._step_text:
-            self._last_text = self._step_text
-            self._text_parts.append({"id": str(chunk.get("id", "")), "text": self._step_text})
+        if self._part_text:
+            self._last_text = self._part_text
+            self._narrative_parts.append(
+                {"type": "text", "id": str(chunk.get("id", "")), "text": self._part_text}
+            )
+        return []
+
+    # ---- 推理片段（不进 §8 流，但必须为续跑留档）----
+    #
+    # 这三条处理器原本不存在，`reasoning-*` 走 feed() 的方言兜底被丢掉。丢进 §8
+    # 是对的（词汇表里没有推理位置），**只丢不留档是错的**：它是 assistant 消息的
+    # 一部分，续跑回传时缺了它，模型侧会拒绝整条消息（见 _narrative_parts 注释）。
+
+    def _on_reasoning_start(self, chunk: dict) -> list[dict]:
+        return []
+
+    def _on_reasoning_delta(self, chunk: dict) -> list[dict]:
+        self._step_reasoning += str(chunk.get("delta", ""))
+        return []
+
+    def _on_reasoning_end(self, chunk: dict) -> list[dict]:
+        if self._step_reasoning:
+            self._narrative_parts.append({"type": "reasoning", "text": self._step_reasoning})
+            self._step_reasoning = ""
         return []
 
     def _on_data_context_usage(self, chunk: dict) -> list[dict]:
@@ -371,11 +458,14 @@ class TranslationSession:
             # 无策略/超轮数：如实按 error 收尾（不伪造成功）
             return self.fail(f"approval suspended (finishReason={reason})")
         status = "error" if reason == "error" else "success"
+        # 异步委派的收尾在 run.finished **之前**：晚一步就落进 builder 的未闭合收口，
+        # 被判成 error。审批挂起分支已在上方返回，走到这里的一定是终局。
+        closed = self._close_async_subagents()
         finished = self._event(
             "run.finished", {"status": status, "output": self._last_text}, parent=self._root_id
         )
         self.finished = True
-        return [finished]
+        return [*closed, finished]
 
     def _on_error(self, chunk: dict) -> list[dict]:
         message = chunk.get("errorText") or chunk.get("message") or "agent error"
@@ -393,25 +483,98 @@ class TranslationSession:
         """
         if self.finished:
             return []
+        # 失败出口同样要关闭异步子代理：否则 run.finished 的收口会把它们再判一次
+        # error，报告上"后台任务正常受理"与真正的失败混成同一形状。
+        closed = self._close_async_subagents()
         error = self._event("error", {"message": message})
         finished = self._event(
             "run.finished", {"status": "error", "output": self._last_text}, parent=self._root_id
         )
         self.finished = True
-        return [error, finished]
+        return [*closed, error, finished]
 
     # ---- 子代理（实测：全事件族 id === toolCallId） ----
 
     def _on_data_sub_open(self, chunk: dict) -> list[dict]:
         data = chunk.get("data") or {}
-        return [
-            self._event("subagent.started", {"name": data.get("agentType")}, parent=self._root_id)
+        started = self._event(
+            "subagent.started", {"name": data.get("agentType")}, parent=self._root_id
+        )
+        # 记下 opening 的 event_id：closing 必须挂在它身上，否则 builder 视作孤立
+        # closing 忽略掉，span 永不闭合（实测重放暴露，见 module 顶部补丁说明）。
+        self._sub_spans[str(chunk.get("id", ""))] = started["event_id"]
+        return [started]
+
+    def _on_data_sub_async(self, chunk: dict) -> list[dict]:
+        """异步委派标记（`waitMode: "async"`）：父流不会再有 `data-sub-done`。
+
+        实测（2026-09-30 第九轮，见 tmp/probe-async/）：一条 `data-sub-async` 带
+        `{submitted: true, subConversationId}`，同 run 的 `data-sub-done` 缺席，
+        `finishReason` 仍是 `"stop"`。
+
+        转译器不合成一个假的 finished 结果：`subagent.started` 的观测面是路由断言
+        （`harness.subagent_routing` 读 span.name），而"子代理有没有跑完"在 §8 里
+        **没有承载它的词汇**——真实终态在 `subagent_sessions`（另有只读端点）。
+        所以这里只登记，关闭动作放到 `_close_async_subagents`，状态如实写
+        `submitted`：报告里"这一轮结束时它还在跑"与"它跑完了"必须可分辨。
+        """
+        call_id = str(chunk.get("id", ""))
+        data = chunk.get("data") or {}
+        self._async_subs[call_id] = {
+            "sub_conversation_id": str(data.get("subConversationId", "")),
+        }
+        return []  # 方言：不进 §8 流（span 由 data-sub-open 开，close 见下）
+
+    def _close_async_subagents(self) -> list[dict]:
+        """关闭本 run 受理过的异步子代理 span，在 `run.finished` **之前**调用。
+
+        不关闭的后果不是"少一条事件"：`builder._finalize_open` 会把仍未闭合的 span
+        统一判成 `status=error` / `"span never closed (stream ended)"`，于是一次
+        正常的后台委派在报告里呈现为"子代理失败了"（与 `tool-output-denied` 那类
+        误判同源：转译器没把已知事实送上流，收口逻辑只好按最坏情况猜）。
+        """
+        events = [
+            self._event(
+                "subagent.finished",
+                {
+                    "status": "submitted",
+                    "sub_conversation_id": info.get("sub_conversation_id", ""),
+                },
+                parent=self._sub_spans.get(call_id) or self._root_id,
+            )
+            for call_id, info in self._async_subs.items()
         ]
+        self._async_subs = {}
+        return events
 
     def _on_data_sub_done(self, chunk: dict) -> list[dict]:
         data = chunk.get("data") or {}
+        call_id = str(chunk.get("id", ""))
         return [
-            self._event("subagent.finished", {"status": data.get("status")}, parent=self._root_id)
+            self._event(
+                "subagent.finished",
+                {"status": data.get("status")},
+                parent=self._sub_spans.get(call_id) or self._root_id,
+            )
+        ]
+
+    def _on_data_sub_error(self, chunk: dict) -> list[dict]:
+        """子代理失败/被中止的收尾事件。
+
+        **静态已知、运行时尚未观测到**（`event-broadcaster.ts:145` 声明了
+        `data-sub-error`，第九轮探针的 async 轮与既往冒烟 dump 里都没出现）。
+        仍要处理：丢掉它会把一个**真实失败**的子代理留成未闭合 span，虽然结局
+        同为 error span，但 error 文案会从子代理自己的原因退化成
+        "span never closed (stream ended)"——报告该说的事被收口逻辑代答了。
+        """
+        data = chunk.get("data") or {}
+        call_id = str(chunk.get("id", ""))
+        return [
+            self._event(
+                "subagent.finished",
+                {"status": "error", "error": str(data.get("error", ""))},
+                parent=self._sub_spans.get(call_id) or self._root_id,
+            )
         ]
 
     # ------------------------------------------------------------------ 续跑
@@ -426,8 +589,16 @@ class TranslationSession:
         if not self._pending or not self._message_id:
             return None
         parts: list[dict] = []
-        # 已完成的 text part 原样带上（服务端按 id 整体覆盖该消息）
-        for part in self._text_parts:
+        # 已完成的叙述型 part 按**到达顺序**带上（服务端按 id 整体覆盖该消息）。
+        # reasoning 与 text 一样是 assistant 消息的一部分，顺序也会影响模型看到的
+        # 消息结构，所以两者合在一个列表里保序，而不是分两轮追加。
+        for part in self._narrative_parts:
+            if part["type"] == "reasoning":
+                # AI SDK 的 ReasoningUIPart 是 `{type, text, state?}`——**没有 id**
+                # （ai/dist/index.d.ts:1706）。TextUIPart 的 id 是本平台实测可用的，
+                # 故保留；reasoning 这边不凭空加字段（多出来的键没有任何依据）。
+                parts.append({"type": "reasoning", "text": part["text"], "state": "done"})
+                continue
             rebuilt = {"type": "text", "text": part["text"]}
             if part["id"]:
                 rebuilt["id"] = part["id"]
@@ -448,6 +619,15 @@ class TranslationSession:
                 approval = {"id": pending["approval_id"], "approved": self.decision == "approve"}
                 if self.decision == "deny":
                     approval["reason"] = "denied by shim approval policy (auto-deny)"
+                elif self.answers is not None and pending.get("tool_name") == "ask_user_question":
+                    # 答案注入：形状逐字照第七轮实测（reason = JSON({answers: {问题全文: 答案}})）。
+                    # 只对 ask_user_question 生效——往别的工具塞 reason 是伪造入参。
+                    questions = (entry.get("input") or {}).get("questions") or []
+                    answers, unanswered, unused = resolve_answers(questions, self.answers)
+                    self.answer_gaps.extend(unanswered)
+                    self.unused_answers.extend(unused)
+                    if answers:
+                        approval["reason"] = json.dumps({"answers": answers}, ensure_ascii=False)
                 part["approval"] = approval
             elif "output" in entry:
                 part["state"] = "output-available"

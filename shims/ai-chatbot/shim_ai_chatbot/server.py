@@ -26,6 +26,7 @@ import contextlib
 import ipaddress
 import json
 import socket
+import sys
 import threading
 import uuid
 from collections.abc import Iterator
@@ -51,6 +52,13 @@ SETTINGS: dict = {
     # 每次 /run 都在 `SETTINGS["timeout"]` 上抛 KeyError——头已发出，于是 harness 收到
     # "200 + 空流"，五个 case 全判 AGENT_FAILURE，被测平台一次都没被调用（联调实测）。
     "timeout": 300.0,
+    # 审批答案（`ask_user_question` 的 answers）：problem→answer 的 dict，
+    # None = 不注入（第七轮行为：平台回显空答案、agent 降级追问）。
+    # 形状依据是第七轮实测的续跑消息（见 translator.build_resume_message）。
+    "answers": None,
+    # strict：问了却没配到答案 → 本轮流带自述原因失败（默认，见下）；
+    # partial：省略该问题的答案，只在 stderr 告警。
+    "answers_policy": "strict",
     "allow_public_upstream": False,
 }
 
@@ -77,6 +85,35 @@ OBSERVATION_SURFACE: dict[str, bool] = {
     "context.compaction.started": False,
     "context.compaction.finished": False,
 }
+
+
+def load_answers(path: str) -> dict[str, object]:
+    """读答案配置文件（JSON 对象）。**fail-fast**：形状不对直接拒绝启动。
+
+    静默容忍配置错误在这里代价很高：答案缺失不会报错，只会让 agent 收到一份它按
+    question 全文查不到的 map（第七轮实测：平台不校验键名），于是用例红的理由变成
+    "agent 没照答案做"，而真实原因是接入侧的答案配置写错了。启动期就拦住。
+    """
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"拒绝：答案文件不可读或不是 JSON（{path}）：{exc}") from exc
+    if not isinstance(raw, dict):
+        raise SystemExit(
+            "拒绝：答案文件必须是 JSON 对象（question/header/#序号 → 答案），"
+            f"得到 {type(raw).__name__}"
+        )
+    answers: dict[str, object] = {}
+    for key, value in raw.items():
+        if isinstance(value, str):
+            answers[str(key)] = value
+        elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+            answers[str(key)] = list(value)  # multiSelect
+        else:
+            raise SystemExit(
+                f"拒绝：答案 {key!r} 必须是字符串或字符串数组（multiSelect），得到 {value!r}"
+            )
+    return answers
 
 
 # ------------------------------------------------------------------ upstream
@@ -165,6 +202,10 @@ def _health_payload() -> tuple[int, dict]:
         # A4：实际生效模型。shim 配置了显式模型则上报之；否则如实声明平台默认。
         "agent_model": SETTINGS["model"] or "platform-default",
         "approval_policy": SETTINGS["policy"],  # B3：策略可追溯
+        # 答案注入是**配置事实**，随 health 上报：跑之前就能看出这一轮有没有答案可注入
+        # （条数而已，不泄漏内容）。
+        "answers_configured": len(SETTINGS["answers"] or {}),
+        "answers_policy": SETTINGS["answers_policy"],
         "detail": "ai-chatbot shim (change-plan §2)",
     }
 
@@ -236,6 +277,8 @@ def _run_stream(session: dict, message: str) -> tuple[Iterator[bytes], Translati
         user_message=message,
         model=SETTINGS["model"],
         policy=SETTINGS["policy"],
+        answers=SETTINGS["answers"],
+        answers_policy=SETTINGS["answers_policy"],
     )
 
     def generate():
@@ -285,6 +328,32 @@ def _run_stream(session: dict, message: str) -> tuple[Iterator[bytes], Translati
                     ):
                         yield _sse(event)
                     return
+                for key in translator.unused_answers:
+                    # 写错键不会报错（平台原样回显），只会静默退化——所以在这里喊一声。
+                    print(
+                        f"[shim] 答案配置里的键 {key!r} 没有被本轮任何问题命中（写错了？）",
+                        file=sys.stderr,
+                    )
+                translator.unused_answers = []
+                if translator.answer_gaps and SETTINGS["answers_policy"] == "strict":
+                    # 答案缺失是**接入侧配置不全**，不是 agent 的失败。默认不放过它：
+                    # 放过去的话，这一轮红的是 agent 的行为，而报告里看不到真实原因
+                    # （与"超时归属必须唯一"同源的理由）。
+                    reason = (
+                        "shim answers config incomplete: "
+                        f"{len(translator.answer_gaps)} 个被问到的问题没有配置答案："
+                        + "; ".join(translator.answer_gaps)
+                        + "（--answers-policy partial 可改为省略并继续）"
+                    )
+                    for event in translator.fail(reason):
+                        yield _sse(event)
+                    return
+                if translator.answer_gaps:
+                    print(
+                        f"[shim] 未配置答案的问题（已省略）：{translator.answer_gaps}",
+                        file=sys.stderr,
+                    )
+                    translator.answer_gaps = []
                 chat_body = {
                     "conversationId": session["conversation_id"],
                     "message": resume_message,
@@ -466,6 +535,17 @@ def main() -> None:
         help="审批策略（B3 可追溯；两条路径都要真实续跑 POST，见 translator）",
     )
     parser.add_argument(
+        "--answers-file",
+        default=None,
+        help="审批答案 JSON（question 全文 / header / '#序号' → 字符串或字符串数组）",
+    )
+    parser.add_argument(
+        "--answers-policy",
+        default=SETTINGS["answers_policy"],
+        choices=["strict", "partial"],
+        help="strict=问题没配到答案时本轮失败（默认）；partial=省略该答案并告警",
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=SETTINGS["timeout"],
@@ -478,6 +558,8 @@ def main() -> None:
     SETTINGS["upstream"] = args.upstream
     SETTINGS["model"] = args.model
     SETTINGS["policy"] = args.policy
+    SETTINGS["answers"] = load_answers(args.answers_file) if args.answers_file else None
+    SETTINGS["answers_policy"] = args.answers_policy
     SETTINGS["timeout"] = args.timeout
     SETTINGS["allow_public_upstream"] = args.allow_public_upstream
     candidates = _upstream_candidates(args.allow_public_upstream)
@@ -487,6 +569,11 @@ def main() -> None:
     print(
         f"approval policy: {args.policy}; model: {args.model or 'platform-default'}; "
         f"turn timeout: {args.timeout:g}s"
+    )
+    print(
+        f"answers: {len(SETTINGS['answers'] or {})} 条（policy={args.answers_policy}）"
+        if SETTINGS["answers"]
+        else "answers: 未配置（ask_user_question 将回显空答案）"
     )
     try:
         server.serve_forever()

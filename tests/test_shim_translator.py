@@ -7,13 +7,21 @@ basic 链序与单侧 usage / mcp 拆流 / bash command 事件与 exit_code 解�
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "shims" / "ai-chatbot"))
 
-from shim_ai_chatbot.translator import TranslationSession  # noqa: E402
+from shim_ai_chatbot.translator import (  # noqa: E402
+    TranslationSession,
+    resolve_answers,
+)
+
+from agent_eval.models.events import TraceEvent  # noqa: E402
+from agent_eval.models.spans import TraceSpan  # noqa: E402
+from agent_eval.trace.builder import TraceBuilder  # noqa: E402
 
 
 def make_session(**kw) -> TranslationSession:
@@ -403,6 +411,97 @@ def test_resume_message_shape() -> None:
     assert text_part["text"] == "我先问一下。"  # 服务端按 id 整体覆盖，文本要带上
 
 
+def test_resume_message_keeps_reasoning_parts_in_order() -> None:
+    """续跑消息要带 reasoning——丢了它整条消息会被模型侧拒绝。
+
+    第十一轮真机实测：`ask_user_question` 之后的续跑 POST 恒以流内 error 收场
+    （`The reasoning_content in the thinking mode must be passed back to the API`，
+    四次独立运行全中）。根因是转译器把 `reasoning-*` 当方言整族丢弃，续跑重建
+    只带 text + tool part。带进 §8 流仍是错的（词汇表里没有推理位置），但**必须
+    为续跑留档**。断言两件事：顺序（text→reasoning→text）与形状。
+    """
+    session = make_session()
+    feed_all(
+        session,
+        [
+            ev("start", messageId="msg-r"),
+            ev("start-step"),
+            ev("text-start", id="txt-0"),
+            ev("text-delta", id="txt-0", delta="我先问一下。"),
+            ev("text-end", id="txt-0"),
+            ev("reasoning-start", id="reasoning-0"),
+            ev("reasoning-delta", id="reasoning-0", delta="需要先确认交付格式"),
+            ev("reasoning-end", id="reasoning-0"),
+            ev("text-start", id="txt-1"),
+            ev("text-delta", id="txt-1", delta="再补充一句。"),
+            ev("text-end", id="txt-1"),
+            ev(
+                "tool-input-available",
+                toolCallId="call_a1",
+                toolName="ask_user_question",
+                input={"questions": []},
+            ),
+            ev("tool-approval-request", approvalId="aitxt-r1", toolCallId="call_a1"),
+            ev("finish-step"),
+            ev("finish", finishReason="tool-calls"),
+        ],
+    )
+    message = session.build_resume_message()
+    assert message is not None
+    narrative = [p for p in message["parts"] if p.get("type") in ("text", "reasoning")]
+    assert [p["type"] for p in narrative] == ["text", "reasoning", "text"]
+    assert narrative[0] == {"type": "text", "id": "txt-0", "text": "我先问一下。"}
+    # ReasoningUIPart 没有 id 字段（ai/dist/index.d.ts:1706）——不凭空加键
+    assert narrative[1] == {
+        "type": "reasoning",
+        "text": "需要先确认交付格式",
+        "state": "done",
+    }
+    assert narrative[2] == {"type": "text", "id": "txt-1", "text": "再补充一句。"}
+
+
+def test_reasoning_still_produces_no_eight_vocabulary_event() -> None:
+    """推理留档不等于进 §8 流：词汇表里没有推理位置，事件数一个不许多。"""
+    session = make_session()
+    events = feed_all(
+        session,
+        [
+            ev("start", messageId="msg-r2"),
+            ev("start-step"),
+            ev("reasoning-start", id="reasoning-0"),
+            ev("reasoning-delta", id="reasoning-0", delta="想想"),
+            ev("reasoning-end", id="reasoning-0"),
+            ev("finish", finishReason="stop"),
+        ],
+    )
+    assert [e["type"] for e in events] == [
+        "run.started",
+        "model.request",
+        "run.finished",
+    ]
+
+
+def test_resume_message_without_reasoning_is_unchanged() -> None:
+    """没有推理片段时，续跑形状与第七轮实测逐字一致（不得顺手加字段）。"""
+    session = make_session()
+    feed_all(session, approval_chunks())
+    message = session.build_resume_message()
+    assert message == {
+        "id": "msg-4",
+        "role": "assistant",
+        "parts": [
+            {"type": "text", "id": "txt-0", "text": "我先问一下。"},
+            {
+                "toolCallId": "call_a1",
+                "input": {"questions": []},
+                "type": "tool-ask_user_question",
+                "state": "approval-responded",
+                "approval": {"id": "aitxt-abc123", "approved": True},
+            },
+        ],
+    }
+
+
 def test_resume_stream_completes_the_run() -> None:
     """审批续跑的第二条流：start 忽略（不重复 run.started），run.finished 在此收尾。"""
     session = make_session()
@@ -458,6 +557,144 @@ def test_subagent_events_use_agent_type_as_name() -> None:
     assert started["data"]["name"] == "general-purpose"  # SubAgentRoutingEvaluator 消费 span name
 
 
+def _span_status(events: list[dict]) -> list[TraceSpan]:
+    builder = TraceBuilder()
+    for event in events:
+        builder.feed(TraceEvent(**event))
+    return builder.build().spans
+
+
+def test_subagent_finished_is_paired_with_its_started_span() -> None:
+    """closing 必须挂在 opening 的 event_id 上——挂错地方等于**没有** closing。
+
+    builder 的配对规则是 ``closing.parent_span_id == opening.event_id``
+    （builder.py:127）。早先 ``_on_data_sub_done`` 把 parent 写成 root_id：builder
+    找不到该 span（"孤立 closing：忽略"），span 永不闭合，``run.finished`` 统一
+    收口时被判 ``status=error`` / "span never closed (stream ended)"。于是一次
+    **成功的**子代理委派在报告里呈现为失败。
+
+    这不是异步路径引入的问题，而是同步路径一直存在的缺陷：用真实 dump
+    （``tmp/smoke/smoke-subagent.json``）重放时同样报错，只是
+    ``harness.subagent_routing`` 只读 span.name、C 类子代理用例也不断言 span
+    状态，所以一路没被发现。异步路径会放大它——异步子代理是本 run 里唯一必然
+    "父流无终态"的形态，收口判错就成了它唯一可能的结局。
+    """
+    session = make_session()
+    events = feed_all(
+        session,
+        [
+            ev("start", messageId="msg-6"),
+            ev("data-sub-open", id="call_s2", data={"agentType": "general-purpose"}),
+            ev("data-sub-done", id="call_s2", data={"status": "completed"}),
+            ev("finish", finishReason="stop"),
+        ],
+    )
+    subs = [span for span in _span_status(events) if span.type == "subagent"]
+    assert len(subs) == 1
+    assert subs[0].status == "ok", subs[0].error
+    assert subs[0].finished_at is not None
+
+
+def test_async_delegation_has_no_fake_done_and_closes_before_run_finished() -> None:
+    """`data-sub-async`：父流不会再有 done，转译器不得替平台宣布一个未发生的结果。
+
+    实测形状（2026-09-30 第九轮，``tmp/probe-async/turn1-chunks.json``，序号即
+    到达序）：259 tool-input-available(agent, waitMode="async") → 260 data-sub-open
+    → 261 data-sub-async{submitted, subConversationId} → 262 tool-output-available
+    → 266-273 父回合自己的 text-*（"SUBMITTED-ACK"）→ 276 finish(finishReason="stop")。
+    该轮直方图里**没有** data-sub-done。
+
+    三条断言各钉一件事：
+      - 不合成 done（否则"还在跑"与"跑完了"在报告里同形）；
+      - span 在 run.finished **之前**闭合（晚一步就被收口判成 error span）；
+      - 终态写成 ``submitted`` 并带上 subConversationId（真实终态在
+        ``subagent_sessions``，父流说不了更多）。
+    """
+    session = make_session()
+    events = feed_all(
+        session,
+        [
+            ev("start", messageId="msg-7"),
+            ev(
+                "tool-input-available",
+                toolCallId="call_a1",
+                toolName="agent",
+                input={"waitMode": "async"},
+            ),
+            ev("data-sub-open", id="call_a1", data={"agentType": "fullstack-engineer"}),
+            ev(
+                "data-sub-async",
+                id="call_a1",
+                data={"submitted": True, "subConversationId": "sub:c1:call_a1"},
+            ),
+            ev("tool-output-available", toolCallId="call_a1", output={"status": "submitted"}),
+            ev("text-start", id="txt-0"),
+            ev("text-delta", id="txt-0", delta="SUBMITTED-ACK"),
+            ev("text-end", id="txt-0"),
+            ev("finish", finishReason="stop"),
+        ],
+    )
+    types = [e["type"] for e in events]
+    assert types.count("subagent.started") == 1
+    assert types.count("subagent.finished") == 1
+    assert types.index("subagent.finished") < types.index("run.finished")
+    finished = next(e for e in events if e["type"] == "subagent.finished")
+    assert finished["data"]["status"] == "submitted"
+    assert finished["data"]["sub_conversation_id"] == "sub:c1:call_a1"
+    # 父回合自己的回答不被子代理污染（异步子代理的文本走 data-sub-text-delta，
+    # 实测不出现在父流上；这里的 text-* 就是父回合的 SUBMITTED-ACK）
+    done = next(e for e in events if e["type"] == "run.finished")
+    assert done["data"]["status"] == "success"
+    assert done["data"]["output"] == "SUBMITTED-ACK"
+    subs = [span for span in _span_status(events) if span.type == "subagent"]
+    assert [span.status for span in subs] == ["ok"], subs[0].error
+
+
+def test_async_delegation_survives_a_failing_run() -> None:
+    """失败出口（``fail()``）同样要关闭异步子代理 span，且顺序在 run.finished 之前。"""
+    session = make_session()
+    events = feed_all(
+        session,
+        [
+            ev("start", messageId="msg-8"),
+            ev("data-sub-open", id="call_a2", data={"agentType": "general-purpose"}),
+            ev("data-sub-async", id="call_a2", data={"submitted": True}),
+        ],
+    )
+    events.extend(session.fail("upstream died"))
+    types = [e["type"] for e in events]
+    assert types.index("subagent.finished") < types.index("run.finished")
+    assert next(e for e in events if e["type"] == "run.finished")["data"]["status"] == "error"
+    # 子代理本身不是失败原因：它的 span 保持 ok，run 级 error 才是
+    subs = [span for span in _span_status(events) if span.type == "subagent"]
+    assert [span.status for span in subs] == ["ok"], subs[0].error
+
+
+def test_subagent_error_chunk_closes_the_span_with_its_own_reason() -> None:
+    """``data-sub-error``（静态已知、流上尚未观测到）：不得丢掉，否则失败原因被收口代答。
+
+    ``event-broadcaster.ts:145`` 声明了这个类型，但第九轮 async 轮与既往冒烟 dump
+    里都没出现。丢掉它的后果不是"少一条事件"：未闭合 span 会被 ``_finalize_open``
+    收口成 "span never closed (stream ended)"，于是子代理自己报的原因（真实、可修）
+    被替换成一句协议层猜测。
+    """
+    session = make_session()
+    events = feed_all(
+        session,
+        [
+            ev("start", messageId="msg-9"),
+            ev("data-sub-open", id="call_s3", data={"agentType": "researcher"}),
+            ev("data-sub-error", id="call_s3", data={"error": "child aborted by parent"}),
+            ev("finish", finishReason="stop"),
+        ],
+    )
+    finished = next(e for e in events if e["type"] == "subagent.finished")
+    assert finished["data"]["status"] == "error"
+    assert finished["data"]["error"] == "child aborted by parent"
+    subs = [span for span in _span_status(events) if span.type == "subagent"]
+    assert subs[0].error == "child aborted by parent"
+
+
 # ---------------------------------------------------------------- 方言丢弃与错误收尾
 
 
@@ -506,7 +743,143 @@ def test_event_envelope_matches_trace_event_schema() -> None:
         assert TraceEvent.model_validate(event)
 
 
+# ---------------------------------------------------------------- 审批答案注入
+
+QUESTIONS = [
+    {
+        "question": "你希望最终产出以哪种文件格式交付？",
+        "header": "输出格式",
+        "options": ["Markdown 文档（.md）", "表格（Excel .xlsx）"],
+        "multiSelect": False,
+    },
+    {
+        "question": "内容详略程度希望如何？",
+        "header": "详略程度",
+        "options": ["精简要点版", "标准完整版"],
+        "multiSelect": True,
+    },
+]
+
+
+def test_resolve_answers_accepts_three_key_spellings() -> None:
+    """问题全文 / header / `#序号` 三种写法都认，但**发出去的键一律是问题全文**。
+
+    第七轮实测：平台对 resume 消息里的 answer 键**不做校验、原样回显**，所以写错键
+    不会报错，只会让 agent 按 question 全文查不到答案（等于没给）。放宽解析是为了
+    吸收写法差异，不是为了掩盖缺口。
+    """
+    answers, unanswered, unused = resolve_answers(
+        QUESTIONS,
+        {"你希望最终产出以哪种文件格式交付？": "Markdown 文档（.md）", "详略程度": "精简要点版"},
+    )
+    assert answers == {
+        "你希望最终产出以哪种文件格式交付？": "Markdown 文档（.md）",
+        "内容详略程度希望如何？": "精简要点版",
+    }
+    assert unanswered == [] and unused == []
+    # `#2` 是 1-based 序号（第 2 个问题），multiSelect 的答案是字符串数组
+    answers2, _, unused2 = resolve_answers(
+        QUESTIONS, {"输出格式": "表格（Excel .xlsx）", "#2": ["a", "b"]}
+    )
+    assert answers2["你希望最终产出以哪种文件格式交付？"] == "表格（Excel .xlsx）"
+    assert answers2["内容详略程度希望如何？"] == ["a", "b"]
+    assert unused2 == []
+
+
+def test_resolve_answers_reports_gaps_and_typos_separately() -> None:
+    """缺口（问了没答）与错键（答了没问）是两件事，不能混成一个计数。
+
+    前者让 agent 拿不到答案 → 本轮行为与用例预期不符；后者多半是配置写错了。
+    混在一起就分不出"这一轮本来就只问了一个问题"与"答案文件写歪了"。
+    """
+    answers, unanswered, unused = resolve_answers(
+        QUESTIONS, {"输出格式": "Markdown 文档（.md）", "写错的键": "x"}
+    )
+    assert set(answers) == {"你希望最终产出以哪种文件格式交付？"}
+    assert unanswered == ["内容详略程度希望如何？"]
+    assert unused == ["写错的键"]
+
+
+def _ask_chunks(questions: list[dict], approval_id: str = "aitxt-a1") -> list[dict]:
+    return [
+        ev("start", messageId="msg-ask"),
+        ev("start-step"),
+        ev(
+            "tool-input-available",
+            toolCallId="call_q1",
+            toolName="ask_user_question",
+            input={"questions": questions},
+        ),
+        ev("tool-approval-request", approvalId=approval_id, toolCallId="call_q1"),
+        ev("finish-step"),
+        ev("finish", finishReason="tool-calls"),
+    ]
+
+
+def test_answers_are_injected_as_question_keyed_json_reason() -> None:
+    """续跑消息的 approval.reason 逐字照第七轮实测：`JSON({answers: {问题全文: 答案}})`。"""
+    session = make_session(answers={"输出格式": "Markdown 文档（.md）"})
+    feed_all(session, _ask_chunks(QUESTIONS))
+    assert session.suspended is True
+    message = session.build_resume_message()
+    part = next(p for p in message["parts"] if p.get("approval"))
+    reason = part["approval"]["reason"]
+    assert json.loads(reason) == {
+        "answers": {"你希望最终产出以哪种文件格式交付？": "Markdown 文档（.md）"}
+    }
+    # 缺口如实记账（问题 2 没配答案）——由 server 按 policy 决定收场方式
+    assert session.answer_gaps == ["内容详略程度希望如何？"]
+    assert session.unused_answers == []
+
+
+def test_no_answers_configured_keeps_the_seventh_round_shape() -> None:
+    """未配置答案时不带 reason（第七轮行为）：平台回显空答案、agent 降级追问。"""
+    session = make_session()
+    feed_all(session, _ask_chunks(QUESTIONS))
+    part = next(p for p in session.build_resume_message()["parts"] if p.get("approval"))
+    assert "reason" not in part["approval"]
+
+
+def test_answers_are_not_injected_into_other_tools() -> None:
+    """答案只对 `ask_user_question` 生效——往别的工具的 approval 里塞 reason 就是伪造入参。
+
+    同一轮里另一个待审批工具必须保持"只有 id/approved"的形状。
+    """
+    session = make_session(answers={"输出格式": "Markdown 文档（.md）"})
+    feed_all(
+        session,
+        [
+            ev("start", messageId="msg-mix"),
+            ev("start-step"),
+            ev(
+                "tool-input-available",
+                toolCallId="call_bash",
+                toolName="bash",
+                input={"command": "rm -rf x"},
+            ),
+            ev("tool-approval-request", approvalId="aitxt-b", toolCallId="call_bash"),
+            ev(
+                "tool-input-available",
+                toolCallId="call_q1",
+                toolName="ask_user_question",
+                input={"questions": QUESTIONS},
+            ),
+            ev("tool-approval-request", approvalId="aitxt-q", toolCallId="call_q1"),
+            ev("finish-step"),
+            ev("finish", finishReason="tool-calls"),
+        ],
+    )
+    parts = {
+        p["toolCallId"]: p["approval"]
+        for p in session.build_resume_message()["parts"]
+        if p.get("approval")
+    }
+    assert "reason" not in parts["call_bash"]
+    assert "reason" in parts["call_q1"]
+
+
 # ---------------------------------------------------------------- 审批拒绝（deny）
+
 
 def denied_resume_chunks() -> list[dict]:
     """实测（2026-09-30 第七轮联调，approval-deny.json 同形）：

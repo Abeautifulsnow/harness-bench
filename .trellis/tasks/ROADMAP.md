@@ -127,7 +127,7 @@ workdir 透传、基线守卫、文档条款、转译 shim、C 类专用评测�
 | E3/E4 边界机制 | `tests/test_framework_boundary.py`：专有方言 deny-list 扫 `src/agent_eval/`（基线零命中，防以后变脏）；`SessionContext.extra` 不透明冻结 | ✅ 本轮 |
 | A1 workdir 透传 | `_open_session` 经 `SessionContext.extra["workdir"]` 把 fixture 沙箱交给被测方（逐迭代独立）；http_adapter 响应体解析 `workdir_accessible` 回执：False → InfraError（exit 2），缺失 → run 级 warning（未知 ≠ 可达）；E4：extra 不透明，`project_dir` 类具名字段被边界测试禁止 | ✅ 本轮 |
 | D 文档条款 | PRD §3.2/§6.2.1/§6.3/§7.1/§7.2/§8、Spec §3.3/§4.3/§6.1/§12.1.1/§12.4/§17.3.1/§19.1.2、quality-guidelines 外部接入三条、README 外部平台最小路径、`docs/external-agent-integration-guide.md`（新增） | ✅ 本轮 |
-| B 转译 shim | ai-chatbot 侧测试组件（四端点契约 + §8 词汇归一化 + 审批策略 + 观测面声明）——已落地本仓 `shims/ai-chatbot/`（translator 零依赖可测 + 纯标准库四端点）；**联调已验证**：审批续跑闭环 approve/deny 两条路径（第七轮，见下）、父级直连 bash output、MCP/skill 流上形状（第六轮）。**已实现 auto-approve / auto-deny**；审批「答案」注入通道已实测但 shim 未实现（C 类需要时再补） | ✅ 落地 |
+| B 转译 shim | ai-chatbot 侧测试组件（四端点契约 + §8 词汇归一化 + 审批策略 + 观测面声明）——已落地本仓 `shims/ai-chatbot/`（translator 零依赖可测 + 纯标准库四端点）；**联调已验证**：审批续跑闭环 approve/deny 两条路径（第七轮）、父级直连 bash output、MCP/skill 流上形状（第六轮）、异步子代理 + 多轮会话 + `subagent.started` name 归属（第九轮）、审批答案注入（第十轮）、续跑回传推理片段（第十一轮，真实 SUT 复验 `run_bb8599a7438a`）。**已实现 auto-approve / auto-deny / `--answers-file`**；change-plan §B2 第五轮未覆盖清单**全部关闭** | ✅ 落地 |
 | C 专用评测集 | `evals/datasets/chatbot-core/`（16 case × repeat 2）+ `evals/benchmarks/ai-chatbot-core.yaml` + `evals/suites/chatbot.yaml` + profile 两档（`chatbot-plain` / `chatbot-strict`）+ `tool-surface.yaml` 冻结工具面 + 护栏 `tests/test_chatbot_dataset.py`（24 条）。**三轮真机全量**（默认 run 15 case × 2 = 30 迭代，7 条 canary 全红 / 8 条 golden 全绿；安全两条由 `--suite security` 单独跑）：观测面缺口呈现为 skipped+reason。五条实测结论见 change-plan §3「第五轮修订」 | ✅ 落地 |
 | 第 0 步冒烟 | 直连 `POST /api/chat` 的运行时行为验证（chunk 时序 / 402 时点 / 审批收尾 / `id===toolCallId` / usage 时机），shim 写码前的第一优先动作 | ✅ 已执行（`scripts/smoke-agent-protocol.py`，五条运行时行为已落定） |
 
@@ -142,6 +142,37 @@ shim 起在 8901、harness 指向它开跑之后，暴露的三个缺陷两个�
 | `fake://` 的历史 run 被选成真实 SUT 首个 run 的基线 | 框架 | ✅ 修：`models/run.endpoint_kind()` + 解析期候选过滤（§4.2 实现修正三）+ 比较期守卫（§3.3）；compare 的守卫链改**并列列出**全部不可比原因（原先 last-wins，同时踩两条时前一条消失） |
 | `test_api.py::test_regression_between_two_runs` 间歇失败（此前记为"发现的 1 的残余、14 轮探针未复现"） | 框架 | ✅ 定位并修：wall-clock 绝对下限是 `max(两侧) < 1ms`，**恰好 1.0ms 的一侧**不满足严格不等号 → 掉进相对阈值分支，`1.0 ↔ 0.6ms` 判 `improved`（-40% > 20%）。负载下实测的 5-case 均值分布确有整毫秒值（`0.6 / 6.0 / 7.4 / 8.0`），不是不可复现的"随机"——是边界。改为 `|Δ| ≤ 1ms` 或 `min(两侧) < 1ms` 两条判据，并同源下沉到 case 级 `_performance_diff`（那条进 Gate）。见 Spec §24.1 |
 | 审批续跑闭环（change-plan 未覆盖清单第 1 项）**从未实测**；`tool-output-denied` 无处理函数（被当方言丢弃） | shim | ✅ 第七轮实测并修：approve/deny 两条路径都在真机跑通；deny 的 `tool-output-denied` 载荷**只有 toolCallId**（原因只在请求侧 `approval.reason`）；原先丢弃它 → 被审批工具永不闭合 → builder 补成 `span never closed`，**一次「用户拒绝」被报告成「工具调用失败」**。现转 `tool.result{status:"denied"}`（denied ≠ error：工具没失败，是策略拒绝执行），bash 被拒时同时补 `command.finished`。`--policy auto-deny` 落地，两条路径都真实续跑 POST |
+
+### 第九~十二轮实测（2026-09-30，change-plan §B2 未覆盖清单收尾 + 真实 SUT 联调回修）
+
+清单最后一项（异步子代理 + 多轮会话）用四个只读探针关闭，随后把第七轮只测了形状的
+**审批答案注入**做进 shim。四个探针都在 `tmp/probe-async/`（脚本 + 原始 dump + 报告）：
+
+| 项 | 结论 | 处置 |
+| --- | --- | --- |
+| `data-sub-async` 形状 | `waitMode:"async"` 时父流**确实没有** `data-sub-done`；到达序 = `tool-input-available(agent)` → `data-sub-open` → **`data-sub-async{submitted, subConversationId}`** → `tool-output-available{status:"submitted"}` → 父回合自己的 `text-*`（"SUBMITTED-ACK"）→ `finish(finishReason="stop")` | shim：只登记、在 `run.finished` **前**关闭 span（status=`submitted`）并带 subConversationId；**不合成 done**（合成 = 替平台宣布未发生的结果） |
+| 异步终态查询 | `GET /api/chat/subagent-status?conversationId=sub:{父}:{callId}` 单行返回 `{found,status,agentType,waitMode,summary,durationMs,stepsExecuted,startedAt,finishedAt}`；实测轮询首答即 `completed`（子代理 17s，父回合 7s 就收尾）。另有 `GET /api/chat/subagents?conversationId=<父>` 列全部子代理 | 形状已实测并记进 shim README；**不接进 §8 流**——词汇表里没有承载"异步终态"的事件类型，硬塞就是撑大框架词汇表（E5 反模式） |
+| 多轮会话流形状 | 同 conversationId 连续 POST 是**独立的两条流**（各自 `start` 新 messageId、`parentMessageId` 指上一轮、各自 `finish`，不重放、不共用）；上下文**由平台按 conversationId 保留**（turn1 记住 `ORBIT-42` → turn2 回 `TURN2-ACK ORBIT-42`） | C 类唯一那条 multi-turn case 的前提**已验证**（真机跑绿） |
+| `subagent.started` 的 name | 由**模型**决定（`data-sub-open.agentType` = `agentType ?? 'auto'`）：不指定 → 9 次里 6 次 `auto` / 3 次 `fullstack-engineer`；显式指定 `general-purpose` → 8 次全一致 | 用例修：提示词**钉死** agentType 并断言那个值（收回 `allow_extra`）；护栏 `TestExpectationsArePinnedByThePrompt` 两条 |
+| 审批答案注入 | 第七轮只测了形状、注入是手搓的。第十轮做进 shim（`--answers-file` / `--answers-policy`），真机验证"配置→注入→平台回填"（抓首轮流 dump 复用，把随机性压到一次）：键=问题全文 / `#1` 都回填成功；键写错 → 归一后 map 为空、不发 reason（不伪造空 map），平台仍回显 `{}` | 默认 `strict`：问了却没配到答案 → 本轮**带自述原因**失败且不发第二次 POST（缺口不是 agent 的回应能补的）；`partial` 档省略 + stderr 告警 |
+
+
+**第十一/十二轮回修（2026-09-30，跑 `database-core` 打真实 SUT 时暴露）**：
+
+| 项 | 归属 | 处置 |
+| --- | --- | --- |
+| `database.query.multi_turn_refine` 恒定在**审批续跑**处流内 error：`The reasoning_content in the thinking mode must be passed back to the API`（四次独立运行全中）。**一次成功的提问在报告里变成 agent 崩溃** | shim | ✅ 修：`reasoning-*` 进 §8 流是对的（词汇表里没有推理位置），但**丢进 §8 ≠ 可以不留档**——续跑重建的 assistant 消息缺了它，模型侧直接 400。加叙述型 part 留档（`_narrative_parts`，按到达顺序记 text/reasoning），续跑一起重建；reasoning 形状取 AI SDK 的 `ReasoningUIPart`（无 id）。真机验证 `run_3ea202b51732`：`run.finished(status=success)`，红的是 `native.performance`（13 调用 > 上限 8） |
+| 同一处改动暴露的既有 bug：part 文本取整步累加的 `_step_text`，一个 step 里有第二个 text part 时会被记成"前一个 + 自己"（续跑重复回传文本、`_last_text` 变成拼接值） | shim | ✅ 修：part 相关用途改走 part 级的 `_part_text`（`text-start` 重置）；`model.response` 的文本仍取整步值（那处语义是"这一步的响应"）。实测 dump 里每 step 只有一个 part，所以此前从未分开 |
+| `--timeout` 只改 session 总额，**走不到轮层**（`_run_turn` 又写一遍 `case.execution.timeout`）→ 单轮 case 的覆盖是空头承诺，"放宽真实 SUT 预算"的唯一正解不起作用 | 框架 | ✅ 修：收敛成 `_effective_case_timeout(case)`，两层都从它取值，语义定为**下限**（`max(声明, 覆盖)`，只抬不降），轮级声明同一条规则——不在两层开两种语义。两条护栏 + 用临时打回旧行为/错语义证明会红 |
+| `database-core` 的 15~40s 预算对真实 LLM 太紧（`--tag smoke` 里 `top_customers` 恒定跑满 30s 判 timeout） | 用例 vs 运行方式 | ✅ 裁决：**不改用例，改运行方式**。该预算按 `fake://`/mock 的确定性脚本校准（实测 0~1ms），按场景重定等于把"跑在哪个 SUT 上"烧死进用例。真机跑时用 `--timeout` 覆盖（实测 240s 下 154s 跑完，红的是真实行为差异）。**下限挡不住的**：覆盖值更大时会把 `error.recovery.timeout`（`timeout: 1` + `[slow]` sleep 3s，矛盾即断言）一抬而过、从红转绿——处置同 C 类安全 canary（不在默认 `smoke` run 里） |
+
+**回修表（第九/十轮新增两条，十一/十二轮再增三条）**：
+
+| 项 | 归属 | 处置 |
+| --- | --- | --- |
+| `subagent.finished` 的 `parent_span_id` 指向 root，builder 按"配对 opening 的 event_id"配对 → 孤立 closing 被忽略 → span 永不闭合 → 收口判 `error` / "span never closed (stream ended)" | shim（**同步路径一直存在**） | ✅ 修：`data-sub-open` 记下 started 的 event_id，done/error/async 关闭一律挂它。**一次成功的子代理委派在报告里呈现为失败**——真实 dump 重放才发现（`tmp/smoke/smoke-subagent.json` 同样复现）；此前看不见是因为 `harness.subagent_routing` 只读 span.name、C 类用例也不断言 span 状态。异步路径会把它放大成唯一结局，故一并修 |
+| `chatbot.subagent.delegation` 1/2 失败，`failure_category=harness.subagent_routing` | 用例 | ✅ 修：这不是被测对象的失败，是**用例把模型的自由度写进了断言**（提示词没钉 agentType，同一条 case 两次运行给出不同 name）。改提示词钉死 + 收回 `allow_extra`（收紧而非放宽），并加结构护栏 |
+| `data-sub-error` 无处理函数（`event-broadcaster.ts:145` 声明，流上尚未观测到） | shim | ✅ 补：丢掉它会让子代理自己报的失败原因被降级成"span never closed"那句协议层猜测 |
 
 ### C 类实测回修（2026-09-30，跑完三轮真机全量后）
 

@@ -163,18 +163,14 @@ class TestDatasetShape:
         thin = [
             dimension
             for dimension in DIMENSIONS
-            if not any(
-                dimension in case.tags and self._is_negative(case) for case in cases
-            )
+            if not any(dimension in case.tags and self._is_negative(case) for case in cases)
         ]
         assert not thin, f"维度缺负向 case：{thin}"
 
     def test_golden_holds_only_positives(self) -> None:
         """golden 里混进负向 → release 档 required_pass_rate: 1.0 永远不满足。"""
         offenders = [
-            case.id
-            for case in _cases()
-            if "golden" in case.tags and self._is_negative(case)
+            case.id for case in _cases() if "golden" in case.tags and self._is_negative(case)
         ]
         assert not offenders, f"golden 不得含负向 case：{offenders}"
 
@@ -183,11 +179,8 @@ class TestDatasetShape:
             mounts = case.session_assertions()
             turn_expects = [turn.expect for turn in case.input.turns or []]
             declared = any(
-                assertion is not None and not assertion.is_empty()
-                for _mount, assertion in mounts
-            ) or any(
-                expect is not None and not expect.is_empty() for expect in turn_expects
-            )
+                assertion is not None and not assertion.is_empty() for _mount, assertion in mounts
+            ) or any(expect is not None and not expect.is_empty() for expect in turn_expects)
             assert declared, f"{case.id} 没有任何可判定声明"
 
     def test_repeat_and_timeout_are_calibrated(self) -> None:
@@ -200,9 +193,7 @@ class TestDatasetShape:
 
     def test_case_files_are_lf(self) -> None:
         offenders = [
-            path.name
-            for path in (DATASET / "cases").glob("*.yaml")
-            if b"\r\n" in path.read_bytes()
+            path.name for path in (DATASET / "cases").glob("*.yaml") if b"\r\n" in path.read_bytes()
         ]
         assert not offenders, f"CRLF 行尾：{offenders}"
 
@@ -372,6 +363,64 @@ class TestAssertionsCanActuallyFail:
                         f"{case.id}: 声明了对 {metric_id} 的期望，但 "
                         f"profile '{self._profile_of(case)}' 里它 blocking=false"
                         "（判 FAIL 也不会让 case 变红）"
+                    )
+        assert not problems, problems
+
+
+class TestExpectationsArePinnedByThePrompt:
+    """期望值落在**模型可选参数**上时，必须由提示词钉死（第九轮实测回修）。
+
+    起因：`chatbot.subagent.delegation` 在第二轮 C 类全量跑里 1/2 失败，
+    failure_category=`harness.subagent_routing`。读 case_run 才看清真相：
+    `subagent.started` 的 name 来自 `data-sub-open.agentType`，而它等于
+    `agentType ?? 'auto'`（agent-tool.ts:335）——**模型填不填 `agentType` 参数**
+    决定 name（实测 9 次采样：6 次 `auto`、3 次 `fullstack-engineer`）。首版提示词
+    没钉死它，于是同一条 case 两次运行给出不同 name，一次被测成"路由错误"。
+
+    这是"非确定性 SUT"里最难看见的一类假红：报告上是**被测对象的失败**，
+    实际是**用例把模型的自由度写进了断言**。修法不是放宽断言（`allow_extra: true`
+    只是让红变绿），而是让提示词把被断言的那个值钉成确定的。
+    """
+
+    def test_subagent_routing_does_not_expect_the_unspecified_sentinel(self) -> None:
+        """`auto` 是"模型没说"的哨兵，不是被路由到的代理名。
+
+        断言 `expected: [auto]` 等于声明"模型应该省略 agentType"——那是模型的自由
+        选择，不是平台事实；平台事实只有"模型报了什么，`data-sub-open` 就照传什么"。
+        """
+        problems: list[str] = []
+        for case in _cases():
+            params = case.metric_params.get("harness.subagent_routing")
+            if not params:
+                continue
+            expected = {str(name) for name in (params.get("expected") or [])}
+            if "auto" in expected:
+                problems.append(
+                    f"{case.id}: expected 含平台哨兵 'auto'（= 模型未声明 agentType），"
+                    "请改为在提示词里显式指定 agentType 并断言那个值"
+                )
+        assert not problems, problems
+
+    def test_declared_agent_type_is_pinned_in_the_prompt(self) -> None:
+        """反向可验：断言了某个 agentType，提示词里就必须真的要求用那个值。
+
+        否则改提示词时很容易只改一半（提示词不再指定、expected 却留着），
+        于是断言退化成"模型碰巧选了它"——与刚才修掉的缺陷同一个形态。
+        """
+        assert isinstance(_cases(), list)  # 显式：下面依赖真机语料存在
+        problems: list[str] = []
+        for case in _cases():
+            params = case.metric_params.get("harness.subagent_routing")
+            if not params:
+                continue
+            prompt = "\n".join(case.input.messages())
+            for name in params.get("expected") or []:
+                if str(name) == "auto":
+                    continue  # 上一条测试负责拦它
+                if str(name) not in prompt:
+                    problems.append(
+                        f"{case.id}: expected 含 {name!r}，但提示词里没出现它"
+                        "（模型没有理由一定选它）"
                     )
         assert not problems, problems
 

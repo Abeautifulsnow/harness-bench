@@ -96,7 +96,24 @@ def _approval_chunks() -> list[dict]:
     ]
 
 
-def _resume_chunks(decision: str) -> list[dict]:
+def _resume_answers(body: dict | None) -> dict:
+    """从续跑请求里读回注入的答案（复刻被测平台：工具 `JSON.parse(reason).answers`）。
+
+    键是**问题全文**——这正是要验证的那件事（写 header 平台也不报错，只是 agent
+    查不到，见 translator.resolve_answers）。
+    """
+    message = (body or {}).get("message") or {}
+    for part in message.get("parts") or []:
+        reason = (part.get("approval") or {}).get("reason")
+        if reason:
+            try:
+                return json.loads(reason).get("answers") or {}
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def _resume_chunks(decision: str, answers: dict | None = None) -> list[dict]:
     """第二轮（续跑）：批准走 tool-output-available；拒绝走 tool-output-denied。
 
     deny 的形状是实测的：``{"type":"tool-output-denied","toolCallId":"…"}``——只有 id，
@@ -108,7 +125,7 @@ def _resume_chunks(decision: str) -> list[dict]:
         else {
             "type": "tool-output-available",
             "toolCallId": "call_a1",
-            "output": {"answers": {}, "timestamp": 1},
+            "output": {"answers": answers or {}, "timestamp": 1},
         }
     )
     return [
@@ -166,7 +183,9 @@ def upstream() -> Iterator[dict]:
                 chunks = (
                     _approval_chunks()
                     if state["chat_calls"] == 1
-                    else _resume_chunks(_resume_decision(state["got_body"]))
+                    else _resume_chunks(
+                        _resume_decision(state["got_body"]), _resume_answers(state["got_body"])
+                    )
                 )
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream")
@@ -197,6 +216,8 @@ def shim(upstream: dict) -> Iterator[str]:
     shim_server.SETTINGS["model"] = None
     shim_server.SETTINGS["policy"] = "auto-approve"
     shim_server.SETTINGS["timeout"] = 30.0
+    shim_server.SETTINGS["answers"] = None
+    shim_server.SETTINGS["answers_policy"] = "strict"
     shim_server.SESSIONS.clear()
     httpd, endpoint = _serve_shim()
     try:
@@ -350,9 +371,7 @@ async def test_missing_timeout_setting_is_not_a_silent_empty_stream(upstream: di
 
 
 # 4. 终局事件三形态（PRD §6.2.1 义务 5）：不假绿纪律在 shim 侧的落点。
-async def test_normal_turn_reaches_a_documented_terminal_shape(
-    shim: str, upstream: dict
-) -> None:
+async def test_normal_turn_reaches_a_documented_terminal_shape(shim: str, upstream: dict) -> None:
     """上游正常：事件链以 ``run.finished(status=success)`` 收尾，且**没有** error。
 
     三种终局形态是互斥的（5xx+原因 / 流内 error+run.finished / 正常 finish），
@@ -405,13 +424,89 @@ async def test_settings_have_a_default_for_every_key_the_source_touches() -> Non
     source = (REPO / "shims" / "ai-chatbot" / "shim_ai_chatbot" / "server.py").read_text(
         encoding="utf-8"
     )
-    touched = set(re.findall(r'''SETTINGS\["([a-z_]+)"\]''', source))
+    touched = set(re.findall(r"""SETTINGS\["([a-z_]+)"\]""", source))
     assert len(touched) >= 4, f"扫描逻辑失效：只扫出 {sorted(touched)}"
     for key in sorted(touched):
         assert key in shim_server.SETTINGS, (
-            f"SETTINGS[{key!r}] 在源码里被访问但没有模块级默认值"
-            "——联调实测的 200+空流就是这么来的"
+            f"SETTINGS[{key!r}] 在源码里被访问但没有模块级默认值——联调实测的 200+空流就是这么来的"
         )
+
+
+ANSWERS = {"要什么格式？": "Markdown 文档（.md）"}
+
+
+async def test_answers_are_injected_and_echoed_by_the_tool(shim: str, upstream: dict) -> None:
+    """端到端：配置的答案经续跑消息进入平台，作为工具输出回到流上（第七轮形状的回归）。
+
+    只断言**可观测的那个事实**：``tool.result`` 的 payload 是平台按注入的 map 回填的
+    ``{"answers": {问题全文: 答案}}``。键必须是问题全文——写成 header 平台也照收，
+    但 agent 按 question 查不到（第七轮实测的静默退化）。
+    """
+    upstream["mode"] = "approval"
+    shim_server.SETTINGS["answers"] = dict(ANSWERS)
+    adapter, _, _, events = await _turn(shim)
+    try:
+        result = next(e for e in events if e.type == "tool.result")
+        assert result.data["result"]["answers"] == ANSWERS
+        assert upstream["chat_calls"] == 2  # 真实续跑了一次
+    finally:
+        await adapter.aclose()
+
+
+async def test_unanswered_question_stops_the_turn_with_a_self_describing_reason(
+    shim: str, upstream: dict
+) -> None:
+    """默认 strict：问题没配到答案 → 本轮流失败，且原因写明是**接入侧的答案配置**。
+
+    不放过它的理由：答案缺失放过去，红的是 agent 的行为（它没收到答案，自然不照答案
+    做），而报告里看不到真实原因。同时**不**发第二次 POST——缺的不是 agent 的回应。
+    """
+    upstream["mode"] = "approval"
+    shim_server.SETTINGS["answers"] = {"写错的键": "x"}
+    adapter, _, _, events = await _turn(shim)
+    try:
+        assert events[-1].type == "run.finished"
+        assert events[-1].data["status"] == "error"
+        error = next(e for e in events if e.type == "error")
+        assert "answers config incomplete" in error.data["message"]
+        assert "要什么格式？" in error.data["message"]
+        assert upstream["chat_calls"] == 1  # 没有续跑
+    finally:
+        await adapter.aclose()
+
+
+async def test_partial_policy_continues_without_the_missing_answer(
+    shim: str, upstream: dict
+) -> None:
+    """partial 档：省略没配到答案的问题、照常续跑（探索性运行用的退路）。"""
+    upstream["mode"] = "approval"
+    shim_server.SETTINGS["answers"] = {"写错的键": "x"}
+    shim_server.SETTINGS["answers_policy"] = "partial"
+    adapter, _, _, events = await _turn(shim)
+    try:
+        assert events[-1].data["status"] == "success"
+        # 一个答案都没命中 → reason 不带 answers（也不带一个空 map 假装有）
+        assert _resume_answers(upstream["bodies"][1]) == {}
+        assert upstream["chat_calls"] == 2
+    finally:
+        await adapter.aclose()
+
+
+def test_health_reports_the_answers_configuration(shim: str, upstream: dict) -> None:
+    """配置事实随 health 上报：跑之前就能看出这一轮有没有答案可注入。
+
+    直接调 `_health_payload()`（它要的上游 fixture 已经起着），不在测试里再发一次
+    HTTP——形状断言不需要真 socket，而 `HealthStatus` 也不承载这两个键（它们是
+    **接入方扩展**，只在 /health 的原始 JSON 里）。
+    """
+    shim_server.SETTINGS["answers"] = dict(ANSWERS)
+    shim_server.SETTINGS["answers_policy"] = "partial"
+    code, body = shim_server._health_payload()
+    assert code == HTTPStatus.OK
+    assert body["answers_configured"] == 1
+    assert body["answers_policy"] == "partial"
+    shim_server.SETTINGS["answers"] = None
+    assert shim_server._health_payload()[1]["answers_configured"] == 0
 
 
 def test_cli_exposes_timeout_option() -> None:
@@ -524,9 +619,7 @@ async def test_auto_deny_resume_is_reported_as_denied_not_as_a_failure(
 
         resume_body = upstream["bodies"][1]
         part = next(
-            p
-            for p in resume_body["message"]["parts"]
-            if p.get("state") == "approval-responded"
+            p for p in resume_body["message"]["parts"] if p.get("state") == "approval-responded"
         )
         assert part["approval"]["approved"] is False
         # reason 是拒绝原因的唯一落点：流上回来的 tool-output-denied 只有 toolCallId

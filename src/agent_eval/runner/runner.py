@@ -574,9 +574,7 @@ class Runner:
             # handle.workdir —— 此时用 iteration 根当沙箱会让 agent 在 fixture
             # 之外工作，而 `file_state`（读 handle.workdir）永远看不到它写的文件：
             # 一次成功的写入被报成 FAIL，且报告里毫无异常。
-            session = await self._open_session(
-                case, iteration, result, workdir=handle.workdir
-            )
+            session = await self._open_session(case, iteration, result, workdir=handle.workdir)
             if session is None:
                 return _AgentPhase(
                     _error(
@@ -704,6 +702,27 @@ class Runner:
         result.error = f"create_session failed: {last_error}"
         return None
 
+    def _effective_case_timeout(self, case: Case) -> float:
+        """Case 的有效总预算（秒）：运行期 `--timeout` 是它的**下限**。
+
+        两层预算（Spec §2.4）都从这里取值，覆盖才会同时生效。此前 session 层与
+        轮层各写一次 `cfg.timeout or case.execution.timeout`，漏掉的正是轮层——
+        `--timeout` 对单轮 case 因此完全无效（联调实测：把 `database-core` 那份
+        15~40s 的预算指向真实 SUT 时，唯一的正解是运行期覆盖，而它不起作用）。
+
+        只抬不降：这个开关的用途是"真实 SUT 比确定性脚本慢一个数量级"，而**调低**
+        会把"以超时为断言"的 case 消解掉——实测 `--timeout 5` 让
+        `error.recovery.timeout`（`timeout: 1`，`[slow]` 脚本 sleep 3s）从红转绿，
+        而那条 case 存在的唯一理由就是证明"超时真的会红"。收紧预算应当逐条改用例，
+        那是有意为之的决定，不该由一个全局开关顺手做掉。
+
+        副作用要说清：真机联调时 `error.recovery.timeout` 会因此**必然**超时失败
+        （它的预算只有 1s），这正是它的预期——它是一条 canary。
+        """
+        if self.cfg.timeout is None:
+            return case.execution.timeout
+        return max(case.execution.timeout, self.cfg.timeout)
+
     async def _drive_session(
         self, session: AgentSession, case: Case, result: CaseRunResult
     ) -> tuple[list[TurnResult], list[TraceEvent], str]:
@@ -721,7 +740,7 @@ class Runner:
         在打转吗？）。联调实测：真实 SUT 首跑，超时那条 case 的 token 与工具调用
         全部归零，只有未超时的几条进了 run 级均值。
         """
-        total_timeout = self.cfg.timeout or case.execution.timeout
+        total_timeout = self._effective_case_timeout(case)
         deadline = time.monotonic() + total_timeout
         turn_results: list[TurnResult] = []
         session_events: list[TraceEvent] = []
@@ -987,9 +1006,17 @@ class Runner:
         session_remaining: float | None = None,
     ) -> tuple[TurnResult, list[TraceEvent], bool]:
         turn_spec = case.input.turns[index - 1] if case.input.type == "multi_turn" else None
+        # 轮层预算 = max(轮级声明, 运行期覆盖, session 级声明)——**全部按下限**。
+        # 不在这里给轮级声明单独开"替换语义"的分支：同一个开关在两层取两种语义，
+        # 读代码的人没法判断该信哪条（而 Spec §2.4 只规定了两层预算，没规定两套优先级）。
+        # session 剩余量仍会在其后收紧这一轮，硬上限不变。
         per_turn_timeout = (
             turn_spec.timeout if turn_spec is not None and turn_spec.timeout else None
-        ) or case.execution.timeout
+        )
+        per_turn_timeout = max(
+            per_turn_timeout if per_turn_timeout is not None else 0.0,
+            self._effective_case_timeout(case),
+        )
         if session_remaining is not None:
             # session 总预算是硬上限：这一轮最多花掉"还剩下的那些"（Spec §2.4 的两层
             # 超时都要真的生效，而不是靠外层兜底抢先取消）。

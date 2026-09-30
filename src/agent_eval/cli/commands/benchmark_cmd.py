@@ -60,7 +60,11 @@ def benchmark_run(
         help="跳过 case 级产物采集（工作区变更 / 库 dump）；现场留存是可选行为",
     ),
     tag: list[str] = typer.Option([], "--tag"),
-    timeout: float | None = typer.Option(None, "--timeout"),
+    timeout: float | None = typer.Option(
+        None,
+        "--timeout",
+        help="运行期预算覆盖（秒）：替换 case 声明的 execution.timeout，session 与轮层同时生效",
+    ),
     model: str | None = typer.Option(None, "--model", help="agent model label (PRD §30)"),
     agent_version: str | None = typer.Option(
         None, "--agent-version", help="agent / Harness 版本（PRD §30、§109.3 可复现信息）"

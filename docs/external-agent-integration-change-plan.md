@@ -545,7 +545,7 @@ health 必须把这两件事的区别暴露出来。
 | `tool.result`(错误/被拒) | **执行失败已实测（第六轮）**：`tool-output-error` **确实存在**于流上（第五轮「第一方源码零命中」的静态结论再次被运行时推翻，与 `tool-approval-request` 同一类误判），载荷 `{toolCallId, errorText}`，无 `output`——实测例：连接器工具报 `Connector tool error: SQL query template is empty: use query template or sql field`。**被审批拒绝（denied）已实测（第七轮）**：类型是 `tool-output-denied`，载荷**只有 `{toolCallId}`**——没有 `output`、没有 `errorText`、也没有 reason（reason 只回落在**请求侧**的 `approval.reason`）。它与 `tool-output-error` 是两件事：前者=策略拒绝执行（工具没有失败），后者=执行失败。shim 侧 status 取 `denied` 而非 `error`，否则一次「用户拒绝」会被报告成「工具调用失败」。**审批续跑（第二轮 POST）形状已实测**，见 B3 第七轮段 |
 | `mcp.call` / `mcp.result` | `toolName` **实测**（第五轮扩展）形如 `mcp__arxiv__search_papers`，前缀逐字出现在 toolName | **必须拆成独立事件**，不得折叠进 `tool.call`；输出为 MCP 协议形状 `{content:[{type:'text', text:<JSON 字符串>}], isError}`——text 需二次解码；`tool-input-start/available` 带 **`dynamic:true`** 标记（动态注册工具；静态工具无此字段） |
 | `command.started` / `command.finished` | `bash` 工具调用 | **实测（子代理内路径 + 第六轮父级直连）**：结果 JSON 含 `exitCode`/`stdout`/`stderr`/`command`；子代理内路径的 `result` 是**二次 JSON 编码的字符串**（shim 需解码后取 `exit_code`），**父级直连的 `output` 已是解析后的对象**（实测 `{stdout:"hello-from-bash\r\n", stderr:"", exitCode:0, command:"echo hello-from-bash"}`）。**关键修正**：非零退出**不走 `tool-output-error`**，仍是 `tool-output-available`，只在载荷里加 `error:true, message:"命令以退出码 7 结束"`（实测 `exit 7` → `{exitCode:7, error:true, message:"命令以退出码 7 结束"}`）。因此 `status` 不能无条件写 `ok`：`exitCode≠0` 或 `error==true` 时 `tool.result` / `command.finished` 都要按 error 报，否则报告上"退出码 7"与"调用成功"并存 |
-| `subagent.started` / `finished` | `data-sub-open` / `data-sub-done` | **实测已验证**：全事件族（open/text-delta/tool-call/tool-result/done）`id === toolCallId`；done 载荷含 `tokenUsage{input,output,total}`（A3：子代理侧的全量三分量）；中间事件族 `data-sub-text-delta`/`data-sub-tool-call`/`data-sub-tool-result` shim 可折叠或映射进子代理 span；另有 `data-sub-async`：父流不会再有 done，终态要查 `subagent_sessions`，shim 不得把它当丢事件 |
+| `subagent.started` / `finished` | `data-sub-open` / `data-sub-done` / `data-sub-async` / `data-sub-error` | **实测已验证**：全事件族（open/text-delta/tool-call/tool-result/done）`id === toolCallId`；done 载荷含 `tokenUsage{input,output,total}`（A3：子代理侧的全量三分量）；中间事件族 shim 一律折叠。**异步（第九轮实测）**：`data-sub-async{submitted:true, subConversationId}` 之后父流**不会**再有 done，`finishReason` 仍是 `"stop"`（父回合受理即收尾），终态查 `GET /api/chat/subagent-status?conversationId=sub:{父}:{callId}`；shim 只登记不合成 done，在 `run.finished` 前以 `status:"submitted"` 关闭 span（否则同步/异步两条路径的未闭合 span 都会被收口判成 error） |
 | `skill.loaded` | `use_skill` 工具调用 | **实测已验证**（第五轮扩展）：走统一工具通道、无专用 chunk；入参 `{skillName, args?}`，输出含 `success/skillDir/workspace/_skillOutput`；shim 由 use_skill 的 tool.call **合成** `skill.loaded`，name 取 `input.skillName` |
 | `model.response.data.usage` | `data-context-usage` | **实测修正**：**每 step 一次**（finish-step 之后），非每轮/每 delta；载荷 12 键，`totalTokens` = 各分量 + `outputReserve`（预算总量，非输出观测），**无 outputTokens 分量** → A3"仅输入侧"维持且证据更强 |
 | `error` | `error` chunk 或 `finishReason:"error"` | 注意 `errorText` 可能被自愈逻辑抑制为空串 |
@@ -568,8 +568,113 @@ connectorId, toolName, requestId, toolCallId, durationMs?, error?}`。丢弃是�
 **第五轮未覆盖清单（shim 开发期补测，防止"已验证"被读成"全量已验证"）**：
 冒烟四场景只覆盖了当时的五条高风险未知项，**不是全工具面**。以下按优先级：
 1. ~~**审批续跑闭环**：approve / deny 两条路径第二轮 POST 的流上形状~~ —— **第七轮已关闭**（见 B3 第七轮段与 B2 表 `tool.result` 行）。
-2. **`data-sub-async`**（异步子代理）真实形状与 `subagent_sessions` 终态查询；**多轮会话**（同 conversationId 连续 POST）的流形状（多轮 case 前提）；
+2. ~~**`data-sub-async`**（异步子代理）真实形状与 `subagent_sessions` 终态查询；**多轮会话**（同 conversationId 连续 POST）的流形状（多轮 case 前提）~~ —— **第九轮已关闭**（见下"第九轮实测"段与 B2 表 subagent 行）。
 3. ~~**父级直连 bash** 的 `tool-output-available.output` 形状~~ —— **第六轮已关闭**（见 B2 表 command 行；顺带修正了"非零退出走 error 通道"的错误预期）。
+
+**第九轮实测（2026-09-30，change-plan 未覆盖清单全部关闭）**：三个只读探针
+（`tmp/probe-async/probe_async.py` / `probe_multiturn.py` / `probe_subagent_name.py`），
+结论三条：
+
+1. **`data-sub-async` 的父流确实没有 done**。`agent` 工具带 `waitMode: "async"` 时，
+   该轮 chunk 直方图里**没有** `data-sub-done`（与 `agent-tool.ts:490` 一致：async 分支
+   在 `submitted` 时早退）。到达序：`tool-input-available(agent, waitMode=async)` →
+   `data-sub-open` → **`data-sub-async{submitted:true, subConversationId}`** →
+   `tool-output-available{status:"submitted"}` → 父回合自己的 `text-*`（"SUBMITTED-ACK"，
+   **在 data-sub-async 之后**）→ `finish(finishReason="stop")`。
+   终态在 `GET /api/chat/subagent-status?conversationId=sub:{父}:{toolCallId}`
+   （只读单行，返回 `{found,status,agentType,waitMode,summary,durationMs,stepsExecuted,
+   startedAt,finishedAt}`；实测轮询首答即 `status:"completed"`，而父回合 7s 就收尾了）。
+   另有 `GET /api/chat/subagents?conversationId=<父>` 列整条会话的全部子代理。
+   **shim 处置**：`data-sub-async` 只登记，在 `run.finished` **之前**关闭 span
+   （status 如实写 `submitted`），**不合成 done**；终态接口不接进 §8——词汇表里没有
+   承载"异步终态"的事件类型，硬塞就是撑大框架词汇表（E5 反模式）。
+   顺带修掉一个**同步路径一直存在**的缺陷：`subagent.finished` 的 `parent_span_id`
+   原先指向 root，而 builder 按"配对 opening 的 event_id"配对（`builder.py:127`）——
+   找不到即按孤立 closing 忽略，span 永不闭合，`run.finished` 统一收口判 error
+   "span never closed (stream ended)"。**一次成功的子代理委派在报告里呈现为失败**，
+   真实 dump（`tmp/smoke/smoke-subagent.json`）重放同样复现；此前没被发现是因为
+   `harness.subagent_routing` 只读 span.name、C 类子代理用例也不断言 span 状态。
+2. **多轮会话是独立的两条 POST/流，上下文由平台按 conversationId 保留**。
+   三轮实测（每轮 4~9s、65~92 chunks）：每轮各有自己的 `start` chunk（新 messageId、
+   `parentMessageId` 指向上一轮）与自己的 `finish`，不重放上一轮事件、不共用流。
+   上下文保留实测成立：turn1 让 agent 记住 `ORBIT-42`（明令不得写文件），turn2 回复
+   `TURN2-ACK ORBIT-42`。C 类唯一那条 multi-turn case 的前提因此**已验证**（真机跑绿）。
+3. **`subagent.started` 的 name 由模型决定，不由平台决定**：
+   `data-sub-open.agentType` 就是 `agentType ?? 'auto'`（`agent-tool.ts:335`）。
+   同提示词重复采样：不指定 agentType → 9 次里 6 次 `auto` / 3 次 `fullstack-engineer`；
+   显式要求 `general-purpose` → 8 次全为 `general-purpose`。C 类
+   `chatbot.subagent.delegation` 首版提示词没钉死它，于是同一条 case 两次运行给出不同
+   name，一次被测成 `harness.subagent_routing` 失败——**用例把模型的自由度写进了断言**，
+   报告上却呈现为被测对象的失败。修法是让提示词钉死被断言的值（并收回
+   `allow_extra`），不是放宽断言；护栏见
+   `tests/test_chatbot_dataset.py::TestExpectationsArePinnedByThePrompt`。
+
+**第十轮实测（2026-09-30，审批答案注入落地）**：第七轮把通道形状测清了，但注入
+是手搓的（shim 不实现）——README「已知边界」里挂着"尚不实现"。第十轮做进 shim 并真机验证：
+
+- `--answers-file <json>` 提供答案，键支持**问题全文 / header / `#<序号>`** 三种写法，
+  发出去时**一律归一成问题全文**（第七轮实测：平台不校验键名，写 header 也照收，
+  只是 agent 按 `question` 全文查不到，表现为静默退化）。
+- 真机验证（`tmp/probe-async/probe_answers.py`：抓一轮真实审批流，再用**同一批 chunk**
+  驱动转译器、续跑消息真的 POST 出去，把 LLM 随机性压到只有首轮那次）：
+  不配置 → `answers:{}` 回显（第七轮行为回归）；键=问题全文 / 键=`#1` → 平台回填同一份
+  map；键写错 → 归一后 map 为空，**不发 reason**（不伪造一个空 map），平台仍回显 `{}`。
+- `--answers-policy strict`（默认）：agent 问了但没配到答案的问题 → 本轮流**带自述原因
+  失败**（`shim answers config incomplete: …`）且不发第二次 POST。理由与「超时归属必须
+  唯一」同源：缺口放过去，红的是 agent 的行为，报告里看不到真实原因。
+  `partial` 档 = 省略该答案 + stderr 告警（探索性运行的退路）。
+- 边界如实声明：答案是**进程级**配置，同一 shim 实例跑的所有 case 共用一份；
+  按 case 给不同答案要换实例（或用 `partial` + 用例自带兜底）。
+
+**第十一轮实测（2026-09-30，续跑消息必须回传推理片段）**：把 `database-core`
+的 `--tag smoke` 指向真实 SUT 时，`database.query.multi_turn_refine` 恒定在
+**审批续跑那一条 POST** 上以流内 error 收场：
+
+```text
+error: The `reasoning_content` in the thinking mode must be passed back to the API.
+```
+
+四次独立运行全中（`run_2b233d108f8c` / `run_607a29736c49` / `run_80b74be5445d` /
+`run_07090efcccf5`），形态是**一次成功的提问在报告里变成 agent 崩溃**。
+
+- **根因在 shim 的"丢方言"纪律上**：`reasoning-*` 整族被丢弃（不进 §8 流是对的——
+  词汇表里没有推理位置），但**丢掉之后没有留档**。续跑重建的 assistant 消息只带
+  text part + tool part，而平台在 thinking 模式下要求把 `reasoning_content` 原样
+  回传（openai-compatible provider 的 `convert-to-chat-messages.ts:206`：仅当
+  reasoning 非空时写入该字段），缺了直接 400。
+- **修法**：加一层叙述型 part 留档（`_narrative_parts`，按到达顺序记 `text` 与
+  `reasoning`），续跑时一起重建。reasoning part 的形状取 AI SDK 的 `ReasoningUIPart`
+  `{type, text, state}`——**没有 id 字段**（`ai/dist/index.d.ts:1706`），不凭空加键。
+- **顺带暴露的既有 bug**：part 文本原先取整步累加的 `_step_text`（`start-step` 才
+  重置）。实测 dump 里每 step 只有一个 text part，所以从未分开；一个 step 里有第二个
+  part 时它会被记成"前一个 part + 自己"——续跑重复回传文本，`_last_text`（最终回答）
+  也变成拼接值。现在 part 相关用途走新的 `_part_text`（`text-start` 重置），
+  `model.response` 的文本仍取整步值（那一处的语义是"这一步的响应"）。
+- **真机验证**（`run_3ea202b51732`）：修前是 `run.finished(status=error)` +
+  `native.status` fail；修后同一条 case `run.finished(status=success)`，
+  真正红的是 `native.performance`（13 次工具调用 > 上限 8）——行为差异，不是崩溃。
+
+**第十二轮实测（2026-09-30，运行期预算覆盖）**：做 `database-core` 的真实 SUT
+联调时暴露 `--timeout` **只改 session 总额**（`_drive_session` 取
+`cfg.timeout or case.execution.timeout`，而 `_run_turn` 自己又写一遍
+`... or case.execution.timeout`）——单轮 case 的两层预算都锁死在 case 声明上，
+覆盖是空头承诺，只能去改 40 份用例。
+
+- **修法**：收敛成一个 `_effective_case_timeout(case)`，两层都从它取值，语义定为
+  **下限**（`max(case 声明, 覆盖值)`，只抬不降），轮级声明走同一条规则——不在两层
+  开两种语义（那样读代码的人没法判断该信哪条）。实测：`--tag smoke` 无覆盖
+  `database.query.top_customers` 跑满 30s 判 timeout；`--timeout 240` 下 154s 跑完，
+  红的是真实行为差异（工具面不对）。
+- **由此定下 `database-core` 预算的处置：不改用例，改运行方式**。那份预算按
+  `fake://` / mock 的确定性脚本校准（实测延迟 0~1ms），对真实 LLM 本就差一个数量级；
+  按场景重定等于把"跑在哪个 SUT 上"烧死进用例。
+- **下限挡不住的**：覆盖值更大时同样会抬过"以超时为断言"的 case——
+  `error.recovery.timeout`（`timeout: 1` + `[slow]` sleep 3s，矛盾即断言）在
+  `--timeout 5` 下实测从红转绿。处置与 C 类安全 canary 同法：它不在默认 `smoke`
+  run 里（`--tag smoke` 选不到）。
+- **护栏两条**，并用临时打回旧行为/错语义证明会红（`tmp/prove_timeout_guard.py`）：
+  `test_runtime_timeout_override_reaches_the_turn_budget`、
+  `test_runtime_timeout_override_never_shrinks_a_declared_budget`。
 
 **（2026-09-30 扩展场景已关闭两项）**：`mcp` 场景（arxiv server）实测
 `mcp__arxiv__search_papers` 前缀逐字成立、`dynamic:true` 标记、MCP 协议输出形状

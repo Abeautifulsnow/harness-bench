@@ -266,6 +266,19 @@ session 总超时（execution.timeout）独立生效
 TraceBuilder 会给未收尾的 span 补一个 finish 时刻（"最后一条事件的时间"），
 对超时轮而言那是假值。
 
+**运行期覆盖的语义（实现修正，2026-09-30 联调实测）**：`--timeout <秒>` 是各层预算的
+**下限**，不是替换——有效预算为 `max(case 声明的, 覆盖值)`，轮级声明走同一条规则。
+理由是这个开关的用途只有一种：真实 SUT 比确定性脚本慢一个数量级，要整体放宽。
+若它能把预算**压小**，它就成了一个顺手改掉整份数据集预算的开关，而"这条 case 该给
+多少预算"是用例作者的判断（`error.recovery.timeout` 的 `timeout: 1` 更是断言本身）。
+两条护栏：`test_runtime_timeout_override_reaches_the_turn_budget`（覆盖必须走到轮层，
+否则单轮 case 的覆盖是空头承诺）、
+`test_runtime_timeout_override_never_shrinks_a_declared_budget`（压不小）。
+
+下限**挡不住**的情形要如实记下：覆盖值更大时，以"超时"为断言的 case 会被一抬而过。
+这不是语义缺陷，是这条断言与全局预算开关的固有冲突——这类 case 的处置与安全 canary
+同法（不进默认套件，见 §18 的同类条款），不要指望用预算语义解决它。
+
 session 级断言（expected.final）的聚合口径：
 
 ```text

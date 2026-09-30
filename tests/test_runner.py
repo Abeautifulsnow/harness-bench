@@ -373,9 +373,7 @@ class SlowTailAgent(FakeAgentAdapter):
         await asyncio.sleep(self.hold_s)  # 事件已发完，但这一轮永不结束
 
 
-async def test_timeout_preserves_the_evidence_collected_so_far(
-    evals_tree, fixtures_root
-) -> None:
+async def test_timeout_preserves_the_evidence_collected_so_far(evals_tree, fixtures_root) -> None:
     """超时（Spec §2.4）不得把已经跑掉的证据清零。
 
     联调实测缺陷：单轮 case 的 per-turn 预算 ≡ session 预算，外层 `asyncio.timeout`
@@ -413,6 +411,83 @@ async def test_timeout_preserves_the_evidence_collected_so_far(
     # 超时仍按 agent 失败归类（口径不变），只是不再"看起来什么都没做"
     assert result.failure_semantics == FailureSemantics.AGENT
     assert outcome.exit_code == 1
+
+
+async def test_runtime_timeout_override_reaches_the_turn_budget(evals_tree, fixtures_root) -> None:
+    """`--timeout` 必须替换 case 的**声明预算**，而不是只改 session 总额。
+
+    缺陷形态：轮层预算取自 `case.execution.timeout`，只有 session 层看 `cfg.timeout`。
+    单轮 case 的两层预算因此都锁死在 case 上，运行期覆盖不起作用——而真实 SUT 上
+    "这条用例的预算该给多少"恰恰只能由运行方决定（同一份 dataset 在 fake 与真实
+    LLM 下合理预算差一个数量级）。判据取墙钟：case 声明 2s、覆盖到 6s 时，超时必须
+    发生在 6s 附近（而不是 2s）。
+    """
+
+    evals_root, data_root = evals_tree
+    case = {
+        "id": "slow.override",
+        "version": 1,
+        "name": "慢尾（预算覆盖）",
+        "tags": ["scripted"],
+        "input": {"type": "single_turn", "prompt": "ping"},
+        "environment": {"fixture": "sales_v2"},
+        "execution": {"timeout": 2, "repeat": 1},
+        "expected": {"output": {"contains": ["QUERY COMPLETE"]}},
+    }
+    benchmark = add_scripted_dataset(evals_root, [case])
+    cfg = scripted_cfg(
+        evals_root,
+        data_root,
+        fixtures_root,
+        benchmark,
+        baseline_policy="NO_BASELINE",
+        timeout=6,
+    )
+    outcome, _, results = await _run_instrumented(cfg, SlowTailAgent(hold_s=30.0))
+    result = next(r for r in results if r.case_id == "slow.override")
+    assert result.turn_results[0].status == "timeout"
+    # 覆盖生效：跑满的是 6s，不是 case 声明的 2s
+    assert result.latency_ms >= 4000, f"运行期覆盖没有走到轮层：{result.latency_ms}ms"
+    assert outcome.exit_code == 1
+
+
+async def test_runtime_timeout_override_never_shrinks_a_declared_budget(
+    evals_tree, fixtures_root
+) -> None:
+    """覆盖只抬不降：`--timeout` 低于 case 声明时，声明值仍然生效。
+
+    这个方向性是刻意的。覆盖开关的用途是"真实 SUT 比确定性脚本慢一个数量级"，
+    只该往上开；一旦它能**压小**预算，它就成了一个能顺手改掉 40 份用例声明的开关，
+    而"这条 case 该给多少预算"是用例作者的判断（`error.recovery.timeout` 的
+    `timeout: 1` 更是断言本身：`[slow]` 脚本 sleep 3s 与它互相矛盾，这个矛盾就是
+    "超时真的会红"的唯一证据）。
+
+    判据取墙钟：声明 4s、覆盖 1s 时，`[slow]`（sleep 3s）应当跑完、判 PASS；
+    若被压到 1s，它会判 timeout/FAIL——两种结局可分辨。
+
+    附带说清下限语义**做不到**的事：覆盖值更大时，同样会把"以超时为断言"的 case
+    抬过去（它们本来就在 `smoke` 套件之外，正是为此）。下限只挡住"压小"这一个方向。
+    """
+    evals_root, data_root = evals_tree
+    case = {
+        "id": "slow.floor",
+        "version": 1,
+        "name": "预算下限",
+        "tags": ["scripted"],
+        "input": {"type": "single_turn", "prompt": "[slow] 慢慢想"},
+        "environment": {"fixture": "sales_v2"},
+        "execution": {"timeout": 4, "repeat": 1},
+        "expected": {"status": "success", "output": {"contains": ["QUERY COMPLETE"]}},
+    }
+    benchmark = add_scripted_dataset(evals_root, [case])
+    cfg = scripted_cfg(
+        evals_root, data_root, fixtures_root, benchmark, baseline_policy="NO_BASELINE", timeout=1
+    )
+    outcome, _, results = await _run_instrumented(cfg, FakeAgentAdapter())
+    result = next(r for r in results if r.case_id == "slow.floor")
+    assert result.turn_results[0].status != "timeout", "声明预算被覆盖值压小了"
+    assert result.status == CaseStatus.PASS
+    assert outcome.exit_code == 0
 
 
 async def test_workdir_reaches_agent_per_iteration(evals_tree, fixtures_root) -> None:

@@ -239,6 +239,19 @@ Gate。守住五条：
    后者只能靠人工记忆解释——硬门就退化成装饰品。同类 case 摘掉默认套件的标签，
    由 `--suite security` 单独执行（`database-core` 的既有分法），并在套件选中侧的
    测试里逐条登记例外 + 校验它真的被目标套件选中（区分"刻意排除"与"忘了挂标签"）。
+9. **断言不得把被测方的自由度写进去**（2026-09-30，C 类第九轮实测）。当被断言的
+   值由**模型**（而不是平台或配置）决定时，同一条 case 的两次运行会给出不同结果，
+   报告上呈现为被测对象失败——实际是用例把模型的自由度当成了确定性事实。
+   先例：`subagent.started` 的 `name` 来自 `data-sub-open.agentType`，即"模型填不填
+   那个可选参数"的后果（不指定：9 次里 6 次 `auto`、3 次 `fullstack-engineer`；
+   题面显式要求后：8 次全一致）。`chatbot.subagent.delegation` 首版提示词没钉它，
+   第二次全量跑里同一条 case 给出不同 name，判成 `harness.subagent_routing` 失败。
+   **修法是让题面钉死被断言的值**（并顺势把 `allow_extra` 收成集合恰好相等），
+   不是放宽断言、也不是靠 `allow_extra` 兜住随机性——放宽只是把"不确定"藏进阈值，
+   判别力跟着一起没了。机械护栏：
+   `tests/test_chatbot_dataset.py::TestExpectationsArePinnedByThePrompt` 要求每个
+   非 `auto` 的期望值都**字面出现**在题面里。推论：期望里出现 `auto` 这类"未指定"
+   哨兵本身就是缺陷信号——它断言的是模型的沉默，不是平台的行为。
 
 ## 断言有效性不变式（2026-09-23 review #I01–#I04 的教训）
 
@@ -315,6 +328,50 @@ python/git 读到 LF 而 ruff 报 E902 = 读取期问题，别动它。**
    的不对称不是设计选择，是遗漏（修复见 `native.py::_check_constraints` 的
    分量级观测标志）。同向的推论：口径（哪侧被观测）要进 `RunMetadata` 并参与
    基线守卫，否则口径漂移会被伪装成回归。
+4. **closing 必须挂在 opening 的 `event_id` 上，且不得替平台编造终局**（2026-09-30，
+   C 类第九轮）。§8 的配对规则是 `parent_span_id == opening.event_id`
+   （`trace/builder.py::_close_span`），不是"挂 root 就行"：挂错等于孤立 closing，
+   被静默忽略，span 永不闭合，`run.finished` 统一收口判 `error` /
+   `span never closed (stream ended)`——**一次成功的调用在报告里呈现为失败**。
+   先例：`subagent.finished` 原先挂 root，同步路径一直这么错着，只在真机 dump 重放
+   时才暴露（下游 metric 只读 `span.name`、用例又不断言 span 状态，两层都看不见）。
+   同源的第二条：**父流没有观测到的事实不许合成**——`data-sub-async`（异步委派受理）
+   只登记、在 `run.finished` 之前关闭并如实写 `status="submitted"`，不合成
+   `data-sub-done`；合成等于替平台宣布一个尚未发生的结果，而异步终态
+   （`status:"completed"`）要另查 `GET /api/chat/subagent-status`。终态查得到但
+   **不进 §8 流**：词汇表里没有承载它的位置，硬塞就是撑大框架词汇表（E5 反模式）。
+5. **配置缺口不得静默降级**（同上）。shim 侧每新增一个"可选配置"（如
+   `ask_user_question` 的答案注入 `--answers-file`）都要先回答"配置没覆盖到会怎样"：
+   默认必须**带自述原因失败**（`shim answers config incomplete: …`）且不发起第二次
+   POST。缺口放过去之后红的是 agent 的行为（它没收到答案，自然不会照答案做），
+   报告里看不到真实原因——与"超时归属必须唯一"同源。探索性运行提供显式降级档
+   （`--answers-policy partial`：省略该答案 + stderr 告警），**降级必须是选择，
+   不能是默认**。附带判定：平台**不校验**注入载荷的键名（写错的键被原样回显、
+   静默退化成"没收到答案"），所以归一化是 shim 的责任——三种写法（问题全文 /
+   header / 序号）统一成实测可用的**问题全文**再发。
+6. **"丢进 §8 流"与"可以不留档"是两件事**（2026-09-30，第十一轮真机实测）。
+   归一化纪律容易读成"方言一律丢弃 = 可以不看"，但有一类方言的用途不是**报告**，
+   而是**回话**：续跑要重建 assistant 消息时缺了它，模型侧直接拒收整条消息。
+   先例：`reasoning-*` 被当方言整族丢弃后，`ask_user_question` 的续跑 POST 恒定以
+   `The reasoning_content in the thinking mode must be passed back to the API` 收场
+   （四次独立运行全中），形态是**一次成功的提问在报告里变成 agent 崩溃**。
+   判据：丢一个事件类型之前先问"它是不是**平台侧协议**的一部分（请求体里要回传的
+   东西）"，而不是只看"§8 词汇表里有没有它的位置"。两者都否才可以丢。
+   同类推论：改这类"留档"代码要顺带核对**同一批状态量的粒度**——同一次改动暴露了
+   part 文本取整步累加值（`_step_text`）的既有 bug，一个 step 里有第二个 part 时
+   会被记成"前一个 + 自己"，续跑重复回传文本。实测 dump 里每 step 恰好一个 part，
+   所以它从未显形；**"没显形过"不等于"没有这个分支"**。
+7. **`--timeout` 一类的全局预算覆盖必须是下限**（2026-09-30，第十二轮）。覆盖开关的
+   用途只有一种：真实 SUT 比确定性脚本慢一个数量级，整体放宽。若它能**压小**预算，
+   它就成了一个顺手改掉整份数据集声明的开关，而"这条 case 该给多少预算"是用例作者的
+   判断。先例：`--timeout 5` 把 `error.recovery.timeout`（`timeout: 1` + `[slow]`
+   脚本 sleep 3s，**这个矛盾就是断言本身**）从红转绿。修复连带两条纪律：
+   (a) 语义只在**一处**规定，不在两层各写一套优先级（轮级=替换、case 级=下限这种
+   组合会让读代码的人无法判断该信哪条）；
+   (b) 覆盖的落点要**覆盖到每一层**——此前只改 session 总额、`_run_turn` 又自己写一遍
+   `case.execution.timeout`，单轮 case 的覆盖是空头承诺。
+   下限**挡不住**的情形要如实登记，不要假装解决了：预算本身作为断言的那些 case
+   （超时 canary）在更大的覆盖值下必然被抬过去；处置与安全 canary 同法（不进默认套件）。
 
 框架通用性的机制保障（change-plan E 类）落在 `tests/test_framework_boundary.py`：
 专有方言 deny-list 扫 `src/agent_eval/`、`SessionContext.extra` 保持不透明。
