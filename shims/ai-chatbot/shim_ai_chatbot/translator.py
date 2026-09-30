@@ -228,14 +228,26 @@ class TranslationSession:
             ]
         if kind == "bash":
             parsed = output if isinstance(output, dict) else {}
+            exit_code = parsed.get("exitCode")
+            # 实测（2026-09-30 联调第六轮，父级直连 bash）：非零退出**不走**
+            # tool-output-error，仍是 tool-output-available，只在载荷里加
+            # `error: true, message: "命令以退出码 7 结束"`（实测 `exit 7`）。无条件写
+            # status="ok" 会让一条失败命令在报告里同时呈现"退出码 7"与"调用成功"：
+            # builder 按这里的 status 决定 span 状态，而 exit_code 另有其用
+            # （Spec §19.4）。两个观测面都要如实。
+            failed = bool(parsed.get("error")) or (isinstance(exit_code, int) and exit_code != 0)
+            status = "error" if failed else "ok"
+            result_data: dict = {"status": status, "result": parsed}
+            if failed:
+                result_data["error"] = str(parsed.get("message") or f"exit code {exit_code}")
             result = self._event(
                 "tool.result",
-                {"status": "ok", "result": parsed},
+                result_data,
                 parent=(entry or {}).get("call_event_id"),
             )
             command_finished = self._event(
                 "command.finished",
-                {"status": "ok", "exit_code": parsed.get("exitCode")},
+                {"status": status, "exit_code": exit_code},
                 parent=(entry or {}).get("command_event_id"),
             )
             return [result, command_finished]
@@ -248,7 +260,11 @@ class TranslationSession:
         ]
 
     def _on_tool_output_error(self, chunk: dict) -> list[dict]:
-        # 防御分支：实测流未出现该类型（B2 标注待实测），出现时按错误结果转译
+        # 实测（2026-09-30 联调第六轮）：该类型**确实出现在流上**（第五轮"第一方源码
+        # 零命中"的静态结论再次被运行时推翻，与 tool-approval-request 同一类误判）。
+        # 非 bash 工具的执行失败走这里：载荷 {toolCallId, errorText}，没有 output，
+        # 原因在 errorText（实测例：连接器工具报 "Connector tool error: SQL query
+        # template is empty: ..."）。
         call_id = str(chunk.get("toolCallId", ""))
         entry = self._tools.get(call_id)
         event_type = "mcp.result" if (entry or {}).get("kind") == "mcp" else "tool.result"

@@ -78,9 +78,26 @@ baseline_mode             → NO_BASELINE（原因：本 dataset_version 下没�
 
 三条通用 case 仍判 FAIL，且**是真失败不是接入故障**：通用用例断言
 `execute_sql` / `database_schema` 工具与 "QUERY COMPLETE" 结尾，ai-chatbot 不产
-这些形状——这正是 C 类专用评测集存在的理由（见 change-plan）。
+这些形状（它把数据库工具叫 `pg-query-*_execute_query` 之类）——这正是 C 类专用评测集
+存在的理由（见 change-plan）。
 
-同一轮还暴露两条待办（不阻塞本 shim 的可用性）：
+同一轮的现场证据还暴露出两条**工具面**的接入问题，都已修：
+
+- **非零退出被报成成功**：父级直连 bash 的非零退出**不走** `tool-output-error`，
+  仍是 `tool-output-available`，只在载荷里加 `error:true, message:"命令以退出码 7
+  结束"`。原来的转译无条件写 `status="ok"`，于是报告上"退出码 7"与"调用成功"并存。
+  现在按 `exitCode≠0` 或 `error==true` 判 error（`tests/test_shim_translator.py`
+  四个新用例钉住两侧）。
+- **`tool-output-error` 确实在流上**（第五轮"第一方源码零命中"的静态结论又被运行时
+  推翻，与 `tool-approval-request` 同一类误判）：非 bash 工具的执行失败走它，
+  载荷 `{toolCallId, errorText}`。原先的实现把它标注成"防御分支、实测未出现"——
+  注释现在是事实，不再有未验证的路径被当成已验证。
+
+顺带确认：`data-connector-event`（连接器工具生命周期，第六轮新观测）丢弃是对的——
+它的信息已由 `tool-input-available` / `tool-output-available` / `tool-output-error`
+承载，透传只会重复计数。
+
+仍待联调的有两条（不阻塞本 shim 的可用性）：
 
 - `database.query.top_customers`（`execution.timeout: 30`）与
   `database.query.multi_turn_refine`（40）在 shim `CONCURRENCY=4` 下排队超时；

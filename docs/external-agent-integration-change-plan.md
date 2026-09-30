@@ -542,9 +542,9 @@ health 必须把这两件事的区别暴露出来。
 | --- | --- | --- |
 | `run.started` / `run.finished` | `start` chunk / `finish` chunk + `[DONE]` | **实测已验证**：`finish` 带 `finishReason`（正常="stop"，审批挂起="tool-calls"——shim 靠它判"这轮在等人"）；缺 `run.finished` 会被 `runner.py:892` 判 agent 失败，必须可靠发出 |
 | `tool.call` / `tool.result` | `tool-input-available` / `tool-output-available` | **实测已验证**：`input` 已是解析后的对象，直接作 `data.arguments`；前置的 `tool-input-start`/`tool-input-delta`（入参流式增量）可忽略；**参数类与安全类断言全靠它** |
-| `tool.result`(错误/被拒) | **待实测（第五轮修正）**：`tool-output-denied`/`tool-output-error` 在第一方源码**零命中**（与 `tool-approval-request` 同类误判）；契约文档的真实形态是 tool part **`state:'output-denied'`** + `approval:{approved:false, reason}`（落库/续跑流面，`zombie-approval-contracts.md` §25-47）。denied 的原因从 `approval.reason` 取回；**审批续跑（第二轮 POST）的流上形状未实测**，shim 开发期第一优先补测 |
+| `tool.result`(错误/被拒) | **执行失败已实测（第六轮）**：`tool-output-error` **确实存在**于流上（第五轮"第一方源码零命中"的静态结论再次被运行时推翻，与 `tool-approval-request` 同一类误判），载荷 `{toolCallId, errorText}`，无 `output`——实测例：连接器工具报 `"Connector tool error: SQL query template is empty: use query template or sql field"`。**被审批拒绝（denied）仍未实测**：契约文档的形态是 tool part `state:'output-denied'` + `approval:{approved:false, reason}`（`zombie-approval-contracts.md` §25-47），deny 的 reason 从 `approval.reason` 取回；**审批续跑（第二轮 POST）的流上形状未实测**，shim 开发期第一优先补测 |
 | `mcp.call` / `mcp.result` | `toolName` **实测**（第五轮扩展）形如 `mcp__arxiv__search_papers`，前缀逐字出现在 toolName | **必须拆成独立事件**，不得折叠进 `tool.call`；输出为 MCP 协议形状 `{content:[{type:'text', text:<JSON 字符串>}], isError}`——text 需二次解码；`tool-input-start/available` 带 **`dynamic:true`** 标记（动态注册工具；静态工具无此字段） |
-| `command.started` / `command.finished` | `bash` 工具调用 | **实测（子代理内路径）**：结果 JSON 含 `exitCode`/`stdout`/`stderr`/`command`，且 `result` 是**二次 JSON 编码的字符串**——shim 需解码后取 `exit_code`（Spec §19.4 唯一观测来源）；父级直连 bash 的 `tool-output-available.output` 形状待联调确认（预计同执行器同形） |
+| `command.started` / `command.finished` | `bash` 工具调用 | **实测（子代理内路径 + 第六轮父级直连）**：结果 JSON 含 `exitCode`/`stdout`/`stderr`/`command`；子代理内路径的 `result` 是**二次 JSON 编码的字符串**（shim 需解码后取 `exit_code`），**父级直连的 `output` 已是解析后的对象**（实测 `{stdout:"hello-from-bash\r\n", stderr:"", exitCode:0, command:"echo hello-from-bash"}`）。**关键修正**：非零退出**不走 `tool-output-error`**，仍是 `tool-output-available`，只在载荷里加 `error:true, message:"命令以退出码 7 结束"`（实测 `exit 7` → `{exitCode:7, error:true, message:"命令以退出码 7 结束"}`）。因此 `status` 不能无条件写 `ok`：`exitCode≠0` 或 `error==true` 时 `tool.result` / `command.finished` 都要按 error 报，否则报告上"退出码 7"与"调用成功"并存 |
 | `subagent.started` / `finished` | `data-sub-open` / `data-sub-done` | **实测已验证**：全事件族（open/text-delta/tool-call/tool-result/done）`id === toolCallId`；done 载荷含 `tokenUsage{input,output,total}`（A3：子代理侧的全量三分量）；中间事件族 `data-sub-text-delta`/`data-sub-tool-call`/`data-sub-tool-result` shim 可折叠或映射进子代理 span；另有 `data-sub-async`：父流不会再有 done，终态要查 `subagent_sessions`，shim 不得把它当丢事件 |
 | `skill.loaded` | `use_skill` 工具调用 | **实测已验证**（第五轮扩展）：走统一工具通道、无专用 chunk；入参 `{skillName, args?}`，输出含 `success/skillDir/workspace/_skillOutput`；shim 由 use_skill 的 tool.call **合成** `skill.loaded`，name 取 `input.skillName` |
 | `model.response.data.usage` | `data-context-usage` | **实测修正**：**每 step 一次**（finish-step 之后），非每轮/每 delta；载荷 12 键，`totalTokens` = 各分量 + `outputReserve`（预算总量，非输出观测），**无 outputTokens 分量** → A3"仅输入侧"维持且证据更强 |
@@ -557,13 +557,19 @@ health 必须把这两件事的区别暴露出来。
 `reasoning-end`（思考令牌）、`tool-approval-request`（**实测确为流上 chunk 类型**，
 载荷 `{approvalId, toolCallId}`——B3 的审批识别信号，映射见 B3）、
 `data-task`（静态核实：`{type:'data-task', id:'task-<revision>', data:{kind, tasks[], revision}}`，
-task_* 工具的任务面板快照，`packages/core/src/runtime/agent/tools.ts:106`）。
+task_* 工具的任务面板快照，`packages/core/src/runtime/agent/tools.ts:106`）、
+`data-connector-event`（**第六轮联调新观测**：连接器工具的调用生命周期，
+`{type:'connector.call.started'|'connector.call.succeeded'|'connector.call.failed',
+connectorId, toolName, requestId, toolCallId, durationMs?, error?}`。丢弃是对的——
+它的信息已由 `tool-input-available`/`tool-output-available`/`tool-output-error`
+承载，透传只会重复计数。**但要注意**：`connector.call.failed` 与紧随的
+`tool-output-error` 是同一件事的两条流上事件，shim 只认后者，不得两条都转成失败结果）。
 
 **第五轮未覆盖清单（shim 开发期补测，防止"已验证"被读成"全量已验证"）**：
 冒烟四场景只覆盖了当时的五条高风险未知项，**不是全工具面**。以下按优先级：
 1. **审批续跑闭环**：approve / deny 两条路径第二轮 POST 的流上形状（自动审批策略的实作前提）；deny 的 reason 在 `approval.reason`（静态）；
 2. **`data-sub-async`**（异步子代理）真实形状与 `subagent_sessions` 终态查询；**多轮会话**（同 conversationId 连续 POST）的流形状（多轮 case 前提）；
-3. **父级直连 bash** 的 `tool-output-available.output` 形状（当前 exitCode 证据来自子代理内路径）。
+3. ~~**父级直连 bash** 的 `tool-output-available.output` 形状~~ —— **第六轮已关闭**（见 B2 表 command 行；顺带修正了"非零退出走 error 通道"的错误预期）。
 
 **（2026-09-30 扩展场景已关闭两项）**：`mcp` 场景（arxiv server）实测
 `mcp__arxiv__search_papers` 前缀逐字成立、`dynamic:true` 标记、MCP 协议输出形状

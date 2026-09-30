@@ -179,6 +179,93 @@ def test_bash_double_encoded_result_is_decoded() -> None:
     assert command_finished["data"]["exit_code"] == 0
 
 
+def test_bash_nonzero_exit_is_reported_as_error_not_ok() -> None:
+    """实测（联调第六轮）：非零退出**不走** tool-output-error，仍走 available + error:true。
+
+    实收载荷（父级直连 `exit 7`）：
+    ``{"stdout":"(no output)","stderr":"","exitCode":7,"command":"exit 7",
+    "error":true,"message":"命令以退出码 7 结束"}``。无条件写 status="ok" 会让报告里
+    "退出码 7"与"调用成功"并存——builder 按 status 决定 span 状态，exit_code 另有其用。
+    """
+    session = make_session()
+    events = feed_all(
+        session,
+        bash_chunks(
+            {
+                "stdout": "(no output)",
+                "stderr": "",
+                "exitCode": 7,
+                "command": "exit 7",
+                "error": True,
+                "message": "命令以退出码 7 结束",
+            }
+        ),
+    )
+    result = next(e for e in events if e["type"] == "tool.result")
+    command_finished = next(e for e in events if e["type"] == "command.finished")
+    assert result["data"]["status"] == "error"
+    assert result["data"]["error"] == "命令以退出码 7 结束"
+    assert command_finished["data"]["status"] == "error"
+    assert command_finished["data"]["exit_code"] == 7
+
+
+def test_bash_nonzero_exit_without_error_flag_is_still_error() -> None:
+    """`error:true` 不是判据的唯一来源：只看 exitCode 也得判 error。
+
+    载荷形状可能不带 message（自愈/裁剪路径），只靠 error 标记就会漏。
+    """
+    session = make_session()
+    events = feed_all(session, bash_chunks({"stdout": "", "stderr": "boom", "exitCode": 3}))
+    result = next(e for e in events if e["type"] == "tool.result")
+    assert result["data"]["status"] == "error"
+    assert result["data"]["error"] == "exit code 3"
+
+
+def test_bash_zero_exit_stays_ok() -> None:
+    """正常退出不能因为这次修正被顺手标成 error（两侧都要钉）。"""
+    session = make_session()
+    events = feed_all(
+        session,
+        bash_chunks({"stdout": "hello-from-bash\r\n", "stderr": "", "exitCode": 0}),
+    )
+    result = next(e for e in events if e["type"] == "tool.result")
+    command_finished = next(e for e in events if e["type"] == "command.finished")
+    assert result["data"]["status"] == "ok"
+    assert command_finished["data"]["status"] == "ok"
+    assert command_finished["data"]["exit_code"] == 0
+
+
+def test_tool_output_error_is_translated_as_error_result() -> None:
+    """实测（联调第六轮）：`tool-output-error` 确实在流上（第五轮静态结论被推翻）。
+
+    实收载荷 `{toolCallId, errorText}`，无 output；实测例是连接器工具报
+    "Connector tool error: SQL query template is empty: ..."。
+    """
+    session = make_session()
+    events = feed_all(
+        session,
+        [
+            ev("start", messageId="msg-5"),
+            ev("start-step"),
+            ev(
+                "tool-input-available",
+                toolCallId="call_e1",
+                toolName="pg-query_describe_table",
+                input={},
+            ),
+            ev(
+                "tool-output-error",
+                toolCallId="call_e1",
+                errorText="Connector tool error: SQL query template is empty",
+            ),
+            ev("finish", finishReason="stop"),
+        ],
+    )
+    result = next(e for e in events if e["type"] == "tool.result")
+    assert result["data"]["status"] == "error"
+    assert "SQL query template is empty" in result["data"]["error"]
+
+
 # ---------------------------------------------------------------- 审批挂起与续跑
 
 
