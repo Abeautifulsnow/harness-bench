@@ -1,0 +1,90 @@
+name: chatbot-judge
+description: >
+  C 类**第二版** profile（change-plan §3 末段：「judge 指标留到第二版」）。与
+  chatbot-plain 的关系是"同一份确定性基线 + 语义判定层"，不是替换：
+
+  - 确定性部分（harness.* 六条）与 chatbot-plain **逐条一致**，包括
+    max_repeats: 8 这个实测校准值与两条观测面缺口条目（harness.retry /
+    harness.context_compaction）。两档若在缺口条目上漂移，"观测不到"的
+    skipped 就会来自不同理由，报告上不可分辨。
+  - 新增两条 judge：`agent.task_completion`（0.70）与 `agent.tool_correctness`
+    （0.80），带 native 兜底（change-plan §3 明写的口径）。阈值取 nightly 的同名值，
+    不自造第二套数字——同一指标在不同档里阈值不同会让跨档比对失去意义。
+  - 只放两条而不是 nightly 的六条：`agent.step_efficiency` / `agent.plan_quality` /
+    `agent.plan_adherence` 与 task_completion 要的输入**完全相同**
+    （`input` + `actual_output`，见 deepeval/metrics/*/schema 的 `_required_params`），
+    对"这一轮做完了没有"的判定是同一件事问三遍；`agent.argument_correctness`
+    只要工具调用、不给工具调用时只能落 skipped，在本数据集上没有独立信号。
+    本数据集真正**只有两条互补的判据**：任务完成度（要输出）与工具用法正确性
+    （要工具调用）。六条全开只会让报告行数翻三倍、信息量不变。
+
+  **为什么 judge 在这里是必须的（而不是"锦上添花"）**：C 类的确定性断言只能判
+  "调了哪个工具、参数对不对、输出里有没有某个串"，判不了"这轮任务究竟完成没有"。
+  首版实测里 `chatbot.database.env_snapshot` 那种 case，agent 完全可能读对了表结构
+  却答非所问——确定性断言全绿。judge 补的正是这一层。
+
+  **judge 的输入缺口必须如实留痕**（Spec §19.1.1 第三结局）。实测（第二版探针，
+  见 tests/test_deepeval_judge_metrics.py 与 tmp/probe_judge_params.py）：
+  chatbot-core 16 条 case 里 6 条不声明 `tools.required`、7 条没有
+  `expected.output`。`agent.tool_correctness` 在 `expected_tools` 为 None 时直接抛
+  `MissingTestCaseParamsError`，`agent.task_completion` / `agent.step_efficiency` /
+  `agent.plan_*` 在 `actual_output` 为空时抛同一个类。这三类都按 **skipped**
+  （`judge_input_unavailable`）记账——不是 pass（没判过就是没判过），也不是
+  error（error 会把整条 case 变成 EVALUATION_FAILURE、把 run 拉到 exit 2，
+  而 agent 什么都没做错）。
+
+  **凭据前置条件**：judge 需要模型凭据（deepeval 走 OpenAI 兼容入口，读
+  `OPENAI_API_KEY` / `OPENAI_BASE_URL`，或用 `--judge-model` 指定模型名）。
+  未配置时**不降级**：`--no-judge` 未开而 judge 不可用 → run 记 exit 2
+  （评估不可靠，Spec §6.1），比静默降级成 native 更能反映实情。
+  `fallback:` 只在 SDK **能力探测**失败（deepeval 未安装 / 形状不兼容）时生效，
+  与"凭据缺失"是两回事——这个区分由 probe 的契约定（见
+  deepeval_adapter.probe 的 docstring）。
+
+judge_concurrency: 2
+
+# E1：收尾档常开协议词汇 strict（未知事件类型 → exit 2），与 nightly / strict 同规。
+# 不复用 Gate 的 strict 字段（那是 blocking FAIL 阻断语义，Spec §15）。
+strict_protocol: true
+
+metrics:
+  # ---- judge 层：语义判定（带 native 兜底，change-plan §3 口径）----
+  - id: agent.task_completion
+    provider: deepeval
+    threshold: 0.70
+    blocking: false
+    fallback: native.output_checks
+
+  - id: agent.tool_correctness
+    provider: deepeval
+    threshold: 0.80
+    blocking: false
+    fallback: native.tool_sequence
+
+  # ---- 确定性层：与 chatbot-plain 逐条一致（diff 本文件与 chatbot-plain 应当
+  #      只剩上面两条 judge）。blocking=false 的理由见 chatbot-plain。----
+  - id: harness.loop
+    params:
+      max_repeats: 8
+    blocking: false
+
+  - id: harness.skill_load
+    blocking: false
+
+  - id: harness.mcp_permission
+    blocking: false
+
+  - id: harness.subagent_routing
+    blocking: false
+
+  # 观测面缺口的两条与 chatbot-plain 保持**逐字一致**（保留条目 + 由接入侧的
+  # 能力声明留痕）。删掉就分不清"本来就不打算测"与"忘了配"。
+  - id: harness.retry
+    params:
+      max_retries: 0
+    blocking: false
+
+  - id: harness.context_compaction
+    params:
+      max_compactions: 3
+    blocking: false

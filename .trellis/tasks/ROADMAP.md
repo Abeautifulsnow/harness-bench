@@ -174,6 +174,23 @@ shim 起在 8901、harness 指向它开跑之后，暴露的三个缺陷两个�
 | `chatbot.subagent.delegation` 1/2 失败，`failure_category=harness.subagent_routing` | 用例 | ✅ 修：这不是被测对象的失败，是**用例把模型的自由度写进了断言**（提示词没钉 agentType，同一条 case 两次运行给出不同 name）。改提示词钉死 + 收回 `allow_extra`（收紧而非放宽），并加结构护栏 |
 | `data-sub-error` 无处理函数（`event-broadcaster.ts:145` 声明，流上尚未观测到） | shim | ✅ 补：丢掉它会让子代理自己报的失败原因被降级成"span never closed"那句协议层猜测 |
 
+### C 类第二版：judge 指标（2026-09-30，change-plan §3 末段的"第二版"）
+
+首版按 change-plan §3 只做确定性部分（`--no-judge`），judge 留到第二版。
+第二版落地时**先撞上的不是判准问题，是"判分器根本没跑起来"**，三层逐条：
+
+| # | 现象 | 归属 | 处置 |
+| --- | --- | --- | --- |
+| 1 | 六个 `agent.*` 里四个在 SDK 4.2.5 下 `measure()` 返回 `None`（`return` 写在 `else` 分支，`async_mode` 那一支只有 `pass`）→ `float(None)` → case 判 `EVALUATION_FAILURE`、run 升 exit 2，报告上像 "agent 失败" | 框架侧（判分器入口） | 改走 `a_measure`；`None` 抛 infra 而**不折算 0 分**（0 分会显示成"agent 表现极差"）。护栏 2 条 |
+| 2 | 16 条 case 里 6 条不声明 `tools.required`、7 条没有 `expected.output`；SDK 对两者都抛 `MissingTestCaseParamsError`，按 infra 处理会让 run 升 exit 2 | 框架侧（结局归属） | 新增 `JudgeInputUnavailableError`（刻意不继承 infra），runner 落 `skipped` + `skipped_reason=judge_input_unavailable`。反方向钉住"判分器真坏仍是 error → exit 2" |
+| 3 | `--profile` **压过** case 的 `evaluation_profile`（`cfg.profile or case...`）→ 实测 `--profile chatbot-judge` 下 `chatbot.skill.load.negative` 判 **PASS**（harness.skill_load 判 FAIL 但 blocking=false），负向用例变回恒绿 | 运行期开关 | judge 档按 case 选，不用 `--profile` 全局压。护栏 2 条（judge 档不得是默认档、负向用例的 harness 期望必须在 blocking=true 的档上） |
+| 4 | **判得准不准：本轮无结论**。本机无 judge 凭据（`~/.deepeval` 空、无 `OPENAI_API_KEY`/`OPENAI_BASE_URL`） | 环境 | 连通性用本地 OpenAI 兼容 stub 验证（`run_49ed60607d33`：分数确实进了 `metric_means`、缺输入确实落 skipped），并如实登记"不替代真模型校准"；无凭据时的行为实测为 exit 2（`run_5d377a384cf9`，不静默降级） |
+
+新增交付：`evals/profiles/chatbot-judge.yaml`（两条 judge + 与 plain 逐条一致的
+确定性层；阈值抄 nightly 的先例值，不自造第二套数字）；`tests/test_deepeval_judge_metrics.py`
+（9 条，真实 SDK、不需要凭据）；`tests/test_chatbot_dataset.py` 33 条；
+`tests/test_judge_cost.py` 8 条；`tests/test_registry.py` 33 条。全量 595 passed。
+
 ### C 类实测回修（2026-09-30，跑完三轮真机全量后）
 
 C 类用例本身的问题逐条记在 change-plan §3「第五轮修订」；下表是**跑用例时反查出来的

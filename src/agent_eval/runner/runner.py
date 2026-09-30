@@ -29,7 +29,12 @@ from agent_eval.adapters.base import (
     AgentSession,
     SessionContext,
 )
-from agent_eval.errors import InfraError, InvalidCallError, MetricUnavailableError
+from agent_eval.errors import (
+    InfraError,
+    InvalidCallError,
+    JudgeInputUnavailableError,
+    MetricUnavailableError,
+)
 from agent_eval.evaluators.deepeval_adapter import DeepEvalCapabilityAdapter
 from agent_eval.evaluators.native import (
     EvalScope,
@@ -1198,6 +1203,29 @@ class Runner:
                         trace,
                         **({"model": ctx.judge_model} if ctx.judge_model else {}),
                     )
+            except JudgeInputUnavailableError as exc:
+                # 第三结局（Spec §19.1.1）：这份 trace 里没有该 metric 要的分量。
+                # 必须落 skipped 而不是 error —— error 会让整条 case 变成
+                # EVALUATION_FAILURE、把 run 拉到 exit 2，而 agent 什么都没做错。
+                # 记 ``skipped`` 也不落 pass：没判过就是没判过（§19.1.1 第一结局
+                # 只给"判过且满足"）。判据集中在下面这条分支，不散进各 metric。
+                result.metric_results.append(
+                    MetricResultModel(
+                        id=new_id("mr"),
+                        case_run_id=result.id,
+                        metric=spec.id,
+                        evaluator="deepeval",
+                        threshold=spec.threshold,
+                        verdict="skipped",
+                        blocking=False,
+                        reason=(f"观测不到输入：{exc}（Spec §19.1.1 judge_input_unavailable）"),
+                        metadata={
+                            "skipped_reason": "judge_input_unavailable",
+                            "deepeval_version": ctx.judge.version(),
+                        },
+                    )
+                )
+                continue
             except Exception as exc:  # Judge 失败 ≠ Agent 失败（PRD §46）
                 return f"judge metric '{spec.id}' failed: {exc}"
             result.metric_results.append(

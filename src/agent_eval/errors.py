@@ -42,6 +42,22 @@ class EvaluationInfraError(AgentEvalError):
     exit_code = EXIT_INFRA
 
 
+class JudgeInputUnavailableError(Exception):
+    """Judge 的输入在本次观测里不存在（Spec §19.1.1 第三结局：观测不到）。
+
+    **刻意不继承 ``EvaluationInfraError``**：二者在报告上是两种结论。
+    "判分器坏了"是基础设施故障（exit 2）；"这一次观测里根本没有判分器要的那个
+    分量"是观测不到（skipped）。并进 infra 会让一整条 case 变成
+    EVALUATION_FAILURE、整个 run 升到 exit 2——而 agent 可能什么都没做错。
+
+    实测来源（C 类第二版，2026-09-30）：本数据集 16 条 case 里 6 条不声明
+    ``tools.required``、7 条没有 ``expected.output``。SDK 的
+    ``check_llm_test_case_params`` 对 ``tools_called`` / ``expected_tools`` 为 None
+    抛 ``MissingTestCaseParamsError``，对空 ``actual_output`` 抛的是同一个类——
+    三者的语义都是"缺输入"，不是"判分器故障"。
+    """
+
+
 class MetricUnavailableError(InvalidCallError):
     """Profile metric needs a provider capability that is absent and has no fallback (§7.4)."""
 

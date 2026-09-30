@@ -2179,6 +2179,31 @@ PRD §91 的 `judge_model` 此前只被解析进配置，**从未传给 SDK**：
 对判定结果零影响。现在 `evaluate()` 支持 `model=`，`Runner` 按需透传
 （缺省不传，避免给第三方实现的签名强加参数）。
 
+**（C 类第二版回填，2026-09-30）判分器的调用入口与两类失败的分野。**
+
+`evaluate()` 必须走 ``a_measure``。SDK 4.2.5 的六个 ``agent.*`` 默认
+``async_mode=True``，而 ``measure()`` 的同步分支对其中四个（step_efficiency /
+tool_correctness / plan_quality / plan_adherence）只有 ``pass``、没有 ``return``
+—— ``self.score`` 只在 ``a_measure`` 里被赋上，``measure()`` 返回 ``None``，
+``float(None)`` 抛 TypeError。症状是整条 case 判 ``EVALUATION_FAILURE``、run 升
+exit 2，而报告上长得像"agent 失败"。``a_measure`` 返回 ``None`` 时抛
+``EvaluationInfraError`` 而**不得**折算成 0 分：0 分会显示成"agent 表现极差"。
+
+judge 的三类结局由此固定下来（对齐 §19.1.1）：
+
+```text
+判过且满足 / 判过不满足   → pass / fail（分数进 metric_means）
+SDK 的 MissingTestCaseParamsError（缺 tools_called / expected_tools / actual_output）
+                        → skipped（judge_input_unavailable；**不是** error，
+                          否则一次已声明的超时会额外把 run 抬到 exit 2）
+判分器自身故障（凭据缺失、网络、SDK 不兼容）
+                        → EvaluationInfraError → EVALUATION_FAILURE → exit 2
+```
+
+``fallback:`` 只在 probe 判不可用时生效；**凭据缺失不在 probe 的探测范围**
+（见 ``deepeval_adapter.probe`` 的 docstring），这是有意的分工——SDK 形状不兼容
+是"这条 metric 这台机器上不可用"，凭据缺失是"这次 run 不可信"。
+
 ## 22.2 `tool_arguments` 只判了第一次调用（§11.2）
 
 §11.2 的算法写的是"对**每个 occurrence** 取值判定"，实现只取了第一次匹配的

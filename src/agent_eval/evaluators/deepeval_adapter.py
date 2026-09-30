@@ -62,6 +62,23 @@ def _tool_calls_from_tree(tree: SpanTree) -> list[dict[str, Any]]:
     return calls
 
 
+def _is_missing_input(exc: BaseException) -> bool:
+    """该异常是不是"trace 里缺 metric 要的分量"（Spec §19.1.1 第三结局）。
+
+    按类名判而不是 ``isinstance``：``MissingTestCaseParamsError`` 在 deepeval 的
+    各版本里模块路径变过（``deepeval.errors`` / ``deepeval.metrics.utils``），
+    而这里的调用方已经隔了一层版本无关的适配器，不该再多绑一个内部路径。
+    兜底再匹配一次消息文本——SDK 的两条 ``error_str`` 都是固定措辞
+    （``cannot be None for the`` / ``cannot be empty for the``），
+    拿类名拿不到时仍有判据，比"一律按 infrastruct 处理"安全。
+    """
+    name = type(exc).__name__
+    if name == "MissingTestCaseParamsError":
+        return True
+    message = str(exc)
+    return "cannot be None for the" in message or "cannot be empty for the" in message
+
+
 class DeepEvalCapabilityAdapter:
     def __init__(self) -> None:
         self._module: Any | None = None
@@ -208,8 +225,38 @@ class DeepEvalCapabilityAdapter:
 
         ``model`` 是 PRD §91 的 Judge Model：必须落到 ``metric_cls(model=...)``
         才算"Judge 与 Agent 模型分离"。SDK 接受模型名字符串或 ``DeepEvalBaseLLM``。
+
+        **必须走 ``a_measure``，不能走 ``measure``**（C 类第二版实测回修）。
+        SDK 4.2.5 的六个 ``agent.*`` metric 默认 ``async_mode=True``，而
+        ``measure()`` 的同步分支对其中四个只有 ``pass``、**没有 return**：
+        ``self.score`` 只在 ``a_measure`` 里被赋上，``measure()`` 返回 ``None``，
+        于是 ``float(None)`` 抛 TypeError → 整条 case 判 EVALUATION_FAILURE。
+        实测（第二版探针，见 tests/test_deepeval_judge_metrics.py）：
+
+        ==================== ============== ==========
+        metric               measure()      a_measure()
+        ==================== ============== ==========
+        agent.task_completion   1.0            1.0
+        agent.step_efficiency   None           1.0
+        agent.tool_correctness  None           1.0
+        agent.argument_correctness 1.0         1.0
+        agent.plan_quality      None           1.0
+        agent.plan_adherence    None           1.0
+        ==================== ============== ==========
+
+        四个失灵的指标全部来自 ``nightly`` / ``strict`` 这类收尾档，症状还特别难读：
+        报告上是"agent 失败"，实际是判分器自己没返回。另一层理由是本产物本来就是
+        异步的——``measure()`` 在事件循环内会走 ``run_until_complete`` +
+        ``nest_asyncio`` 的重入 hack，``a_measure`` 才是 SDK 给异步调用方的入口。
+
+        **缺输入 ≠ 判分器故障。** SDK 的 ``MissingTestCaseParamsError`` 表示"这份
+        trace 里没有这个 metric 要的分量"（``tools_called`` / ``expected_tools`` 为
+        None，或 ``actual_output`` 为空），按 Spec §19.1.1 属于第三结局
+        （观测不到 → skipped），因此转成 ``JudgeInputUnavailableError`` 而不是
+        ``EvaluationInfraError``：后者会把整条 case 判成 EVALUATION_FAILURE，
+        把 run 拉到 exit 2，而 agent 可能什么都没做错。
         """
-        from agent_eval.errors import EvaluationInfraError
+        from agent_eval.errors import EvaluationInfraError, JudgeInputUnavailableError
 
         module = self._load()
         if module is None:
@@ -220,10 +267,20 @@ class DeepEvalCapabilityAdapter:
             metric_cls = getattr(metrics_mod, class_name)
             test_case = self._build_test_case(trace)
             metric = metric_cls(threshold=threshold, **({"model": model} if model else {}))
-            score = float(metric.measure(test_case))
-        except EvaluationInfraError:
+            raw = await metric.a_measure(test_case)
+            if raw is None:
+                # 不允许把"判分器没给分"折算成 0：0 分会让报告显示"agent 表现极差"，
+                # 而真因是判分器接口不匹配——正是本仓库反复要拦的"假红/假绿"同源问题。
+                raise EvaluationInfraError(
+                    f"deepeval metric '{metric_id}' returned None: "
+                    "该 metric 的 a_measure 未给出分数（判分器接口不匹配，不是 agent 的失败）"
+                )
+            score = float(raw)
+        except (EvaluationInfraError, JudgeInputUnavailableError):
             raise
         except Exception as exc:
+            if _is_missing_input(exc):
+                raise JudgeInputUnavailableError(str(exc)) from exc
             raise EvaluationInfraError(f"deepeval metric '{metric_id}' failed: {exc}") from exc
         reason = (
             "score above threshold"

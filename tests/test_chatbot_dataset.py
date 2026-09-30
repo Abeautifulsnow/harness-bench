@@ -249,10 +249,11 @@ class TestToolNamesMatchTheFrozenSurface:
 class TestProfileHandlesMissingObservationSurface:
     """change-plan §3.4：能力裁剪要**两条一起做**，缺一条就是假信号。"""
 
-    # 两档 profile 都要过同一组检查：观测面缺口是 run 级事实，不是某一档的私事。
-    # 之所以两档都要查，是因为 case 可以自由挑档（evaluation_profile），
-    # 只查默认档等于"另一档漏配条目就没人发现"。
-    PROFILES = ("chatbot-plain", "chatbot-strict")
+    # 三档 profile 都要过同一组检查：观测面缺口是 run 级事实，不是某一档的私事。
+    # 之所以三档都要查，是因为 case 可以自由挑档（evaluation_profile），
+    # 只查默认档等于"另一档漏配条目就没人发现"。judge 档（第二版）同样要过——
+    # 它的确定性层与 plain 逐条一致，缺口条目也必须一并保留。
+    PROFILES = ("chatbot-plain", "chatbot-strict", "chatbot-judge")
 
     def _surface_declaration(self) -> dict[str, bool]:
         if str(SHIM) not in sys.path:
@@ -301,9 +302,15 @@ class TestProfileHandlesMissingObservationSurface:
             f"观测面不存在的插件未在 {name} 里留痕（删条目 = 看不见的省略）：{quietly_dropped}"
         )
 
-    @pytest.mark.parametrize("name", PROFILES)
-    def test_profiles_declare_no_judge_metrics(self, name: str) -> None:
-        """首版口径是确定性基线（change-plan §3 末段）：judge 指标一律不进。"""
+    @pytest.mark.parametrize("name", ("chatbot-plain", "chatbot-strict"))
+    def test_first_version_profiles_declare_no_judge_metrics(self, name: str) -> None:
+        """首版口径是确定性基线（change-plan §3 末段）：这两档 judge 指标一律不进。
+
+        **这不是"judge 指标不能出现在本数据集"**（第二版新增了 ``chatbot-judge``），
+        而是"这两档必须是纯确定性基线"：它们承担的角色是**给 judge 档当参照**——
+        judge 的分数只有在同一条 case 的确定性结论已知时才能被解读（是 agent 真没
+        做完，还是判分器口味问题）。基线档里混进 judge，参照系本身就随模型漂移了。
+        """
         profile = load_profile(EVALS, name)
         judge = [
             spec.id
@@ -312,21 +319,125 @@ class TestProfileHandlesMissingObservationSurface:
         ]
         assert not judge, f"{name} 不得含 judge/外部 provider 指标：{judge}"
 
-    def test_both_profiles_run_the_same_metric_set(self) -> None:
-        """两档只该差在 blocking 上——指标集合漂移会让某档悄悄少测几个维度。"""
-        plain = load_profile(EVALS, "chatbot-plain")
-        strict = load_profile(EVALS, "chatbot-strict")
-        assert {spec.id for spec in plain.metrics} == {spec.id for spec in strict.metrics}
+    def test_judge_profile_really_declares_judge_metrics(self) -> None:
+        """反方向：judge 档不得悄悄退化成第三个确定性档。
+
+        "第二版做了没有"在报告上必须可分辨——一个只有 harness.* 的
+        ``chatbot-judge`` 与 ``chatbot-plain`` 跑出来的东西一模一样，但它占了
+        "第二版已交付"的名分。
+        """
+        profile = load_profile(EVALS, "chatbot-judge")
+        judge = [
+            spec.id
+            for spec in profile.metrics
+            if plugin_for(spec.id) is None and not spec.id.startswith("native.")
+        ]
+        assert judge, "chatbot-judge 没有声明任何 judge 指标（第二版没落地）"
+        for spec in profile.metrics:
+            if spec.id not in judge:
+                continue
+            assert spec.provider == "deepeval", f"{spec.id} 的 provider 必须显式声明"
+            assert spec.threshold is not None, f"{spec.id} 缺阈值（判定无基准）"
+
+    def test_judge_profile_thresholds_match_the_nightly_convention(self) -> None:
+        """阈值取 nightly 的同名值，不自造第二套数字。
+
+        同一指标在两档里阈值不同 → 跨档比对（"这次 judge 分数掉了"）失去意义：
+        差值是阈值差还是质量差说不清。
+        """
+        nightly = {spec.id: spec for spec in load_profile(EVALS, "nightly").metrics}
+        # 只查 judge 指标：nightly 按 PRD §40 是"六个 judge 指标全开"的档，
+        # 本来就不含 harness.* 插件——拿它要求本档的确定性条目会误报。
+        judge = [spec for spec in load_profile(EVALS, "chatbot-judge").metrics if spec.provider]
+        assert judge, "chatbot-judge 没有显式声明 provider 的 judge 指标"
+        for spec in judge:
+            reference = nightly.get(spec.id)
+            assert reference is not None, f"{spec.id} 不在 nightly 里（阈值无先例）"
+            assert spec.threshold == reference.threshold, (
+                f"{spec.id} 阈值 {spec.threshold} != nightly 的 {reference.threshold}"
+            )
+
+    def test_judge_profile_keeps_a_native_fallback(self) -> None:
+        """change-plan §3 明写"带 native 兜底"：judge 档不得裸奔。
+
+        兜底只在 SDK 能力探测失败时生效（凭据缺失走 exit 2，不降级——见
+        deepeval_adapter.probe 的 docstring），但声明必须在。
+        """
+        for spec in load_profile(EVALS, "chatbot-judge").metrics:
+            if spec.provider != "deepeval":
+                continue
+            assert spec.fallback, f"{spec.id} 没声明 fallback（§7.4 会 fail-fast）"
+            assert spec.fallback.startswith("native."), (
+                f"{spec.id} 的兜底 {spec.fallback!r} 必须是 native.*（点号命名空间）"
+            )
+
+    def test_all_profiles_run_the_same_deterministic_layer(self) -> None:
+        """三档的确定性层必须**逐条一致**（含参数与 blocking 的档位差异只许在
+        harness.* 的 blocking 上）——某档少一条就让它的覆盖面悄悄变窄。
+
+        与旧名 ``test_both_profiles_run_the_same_metric_set`` 的差别是：那次只比
+        两档的 id 集合；现在 judge 档也在内，而它的 id 集合**必然**多两条 judge，
+        因此比的是"非 judge 部分 + 参数"。
+        """
+
+        def deterministic(name: str) -> dict[str, dict]:
+            profile = load_profile(EVALS, name)
+            return {
+                spec.id: {"params": spec.params, "blocking": spec.blocking}
+                for spec in profile.metrics
+                if plugin_for(spec.id) is not None
+            }
+
+        plain = deterministic("chatbot-plain")
+        for name in ("chatbot-strict", "chatbot-judge"):
+            other = deterministic(name)
+            assert set(plain) == set(other), (
+                f"{name} 与 chatbot-plain 的 harness 指标集合不同：{set(plain) ^ set(other)}"
+            )
+            for metric_id, spec in plain.items():
+                assert other[metric_id]["params"] == spec["params"], (
+                    f"{name} 的 {metric_id} 参数与 chatbot-plain 漂移："
+                    f"{other[metric_id]['params']} != {spec['params']}"
+                )
 
     def test_case_profiles_resolve_to_existing_files(self) -> None:
         """evaluation_profile 写错名字不会报错，只会让整条 case 静默换档。"""
-        known = {spec for spec in ("chatbot-plain", "chatbot-strict")}
+        known = {"chatbot-plain", "chatbot-strict", "chatbot-judge"}
         stray = [
             (case.id, case.evaluation_profile)
             for case in _cases()
             if case.evaluation_profile is not None and case.evaluation_profile not in known
         ]
         assert not stray, f"case 引用了本数据集之外的 profile：{stray}"
+
+    def test_judge_profile_is_never_the_benchmark_default(self) -> None:
+        """judge 档不得成为默认档：默认档的可判性会随判分器可用性变化。
+
+        `RunConfig.profile`（CLI `--profile`）**压过** case 的 `evaluation_profile`
+        （`cfg.profile or case.evaluation_profile or benchmark.default_profile`）。
+        实测后果（run_f563e9a33e93）：`chatbot.skill.load.negative` 用
+        `--profile chatbot-judge` 跑时，`harness.skill_load` 判 FAIL 但
+        blocking=false → case 状态 **PASS** —— 负向用例又变回恒绿，与首跑
+        run_d487591757ca 暴露的是同一类，只是入口从"默认档选错"换成了"运行期
+        整份覆盖"。因此：默认档必须是纯确定性基线，judge 档要按 case 选。
+        """
+        assert load_benchmark(EVALS, BENCHMARK).default_profile == "chatbot-plain"
+
+    def test_negative_cases_with_harness_expectations_are_strict(self) -> None:
+        """带 harness 期望的负向 case 必须落在 blocking=true 的档上。"""
+        strict = {spec.id: spec for spec in load_profile(EVALS, "chatbot-strict").metrics}
+        problems: list[str] = []
+        for case in _cases():
+            if "negative" not in case.tags:
+                continue
+            for metric_id in case.metric_params:
+                spec = strict.get(metric_id)
+                if spec is None or not spec.blocking:
+                    problems.append(
+                        f"{case.id}: 负向用例声明了 {metric_id} 的期望，"
+                        "但 strict 档里它不阻断（负向用例必须真的红）"
+                    )
+        assert not problems, problems
 
 
 class TestAssertionsCanActuallyFail:

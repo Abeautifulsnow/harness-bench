@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from agent_eval.evaluators.deepeval_adapter import DeepEvalCapabilityAdapter
 from agent_eval.evaluators.native import EvalScope
 from agent_eval.evaluators.registry import MetricSpec
 from agent_eval.models.case import Case
@@ -130,6 +131,96 @@ class TestJudgeSkipWiring:
         assert judge_rows[0].verdict == "skipped"
         assert judge_rows[0].metadata.get("policy") == "skip_blocked"
         assert "PRD §92" in judge_rows[0].reason
+
+
+class TestJudgeInputUnavailable:
+    """judge 的输入在本次观测里不存在 → skipped，**不是** EVALUATION_FAILURE。
+
+    C 类第二版实测（2026-09-30）：`chatbot-core` 16 条 case 里 6 条不声明
+    `tools.required`、7 条没有 `expected.output`。SDK 的
+    `check_llm_test_case_params` 对这两种缺失直接抛 `MissingTestCaseParamsError`。
+    若把它当基础设施故障处理，整条 case 变成 EVALUATION_FAILURE、run 升到
+    exit 2 —— 而 agent 可能什么都没做错，只是这条用例本来就没给判分器参照。
+    两个方向都要钉住：缺输入落 skipped，判分器真坏仍落 error。
+    """
+
+    async def _run(self, judge: object) -> tuple[str, CaseRunResult]:
+        from agent_eval.runner.runner import _CaseContext, _ResolvedProfile
+
+        profile = MetricProfile.model_validate(
+            {"name": "p", "metrics": [{"id": "agent.task_completion", "provider": "deepeval"}]}
+        )
+        resolved = _ResolvedProfile(
+            profile=profile,
+            judge_specs=[MetricSpec(id="agent.task_completion", threshold=0.7)],
+            harness_specs=[],
+        )
+        ctx = _CaseContext(
+            resolved={"p": resolved},
+            case_profile={"c1": "p"},
+            case_by_id={},
+            judge=judge,
+            judge_sem=asyncio.Semaphore(1),
+            capabilities={},
+            degradations={},
+        )
+        case = Case.model_validate(
+            {
+                "id": "c1",
+                "version": 1,
+                "name": "c1",
+                "input": {"type": "single_turn", "prompt": "q"},
+            }
+        )
+        result = _result(blocked=False)
+        runner = Runner(
+            RunConfig(
+                evals_root=REPO / "evals",
+                fixtures_root=REPO / "fixtures",
+                data_root=REPO / ".agent-eval",
+                benchmark="database-core",
+                agent_endpoint="fake://",
+                suites=["smoke"],
+                baseline_policy="NO_BASELINE",
+            )
+        )
+        error = await runner._run_judge_metrics(
+            case, resolved, ctx, TraceBuilder().build(), _scope(), result
+        )
+        return error, result
+
+    async def test_missing_input_becomes_skipped_not_error(self) -> None:
+        from agent_eval.errors import JudgeInputUnavailableError
+
+        class MissingInputJudge(DeepEvalCapabilityAdapter):
+            """只替换 evaluate：convert/version 走真实现，形状与生产一致。"""
+
+            async def evaluate(self, *args: object, **kwargs: object) -> tuple[float, str]:
+                raise JudgeInputUnavailableError(
+                    "'tools_called' cannot be None for the 'Tool Correctness' metric"
+                )
+
+        error, result = await self._run(MissingInputJudge())
+
+        assert error == "", "缺输入不得把 case 拉成 EVALUATION_FAILURE（那会让 run 变 exit 2）"
+        rows = [m for m in result.metric_results if m.evaluator == "deepeval"]
+        assert len(rows) == 1
+        assert rows[0].verdict == "skipped", "没判过就是没判过，不得落 pass 也不得落 error"
+        assert rows[0].blocking is False
+        assert rows[0].metadata.get("skipped_reason") == "judge_input_unavailable"
+        assert "§19.1.1" in rows[0].reason
+
+    async def test_real_judge_failure_still_reads_as_infrastructure(self) -> None:
+        """反方向：判分器真坏了仍是 error → EVALUATION_FAILURE（PRD §46）。"""
+
+        class BrokenJudge(DeepEvalCapabilityAdapter):
+            async def evaluate(self, *args: object, **kwargs: object) -> tuple[float, str]:
+                raise RuntimeError("connection reset")
+
+        error, result = await self._run(BrokenJudge())
+
+        assert "failed" in error
+        assert not [m for m in result.metric_results if m.evaluator == "deepeval"]
 
 
 def _scope() -> EvalScope:

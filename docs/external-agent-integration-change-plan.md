@@ -920,6 +920,34 @@ token 成本与墙钟时间在写第一版 dataset 之前就要估出来（ai-ch
    并在注释里写明"这是把已知的、由题面导致的重复排除在信号之外，不是把 metric
    关掉"。
 
+**（第六轮修订，2026-09-30 实施记录）C 类第二版已落地**：新增 profile
+`chatbot-judge`（`agent.task_completion` 0.70 + `agent.tool_correctness` 0.80，
+带 native 兜底，与 `chatbot-plain` 的确定性层逐条一致），机械护栏扩到 33 条。
+三条实测结论，全部是"判分器没跑起来"而不是"判得不准"：
+
+1. **`measure()` 对四个 metric 返回 `None`**（SDK 4.2.5 的 `async_mode=True`
+   默认值下，`return` 写在 `else` 分支里）。症状是"agent 失败"——整条 case 判
+   `EVALUATION_FAILURE`、run 升 exit 2。修：走 `a_measure`；`raw is None` 时抛
+   infra（**不得**折算 0 分，那会显示成"agent 表现极差"）。
+2. **输入缺口 ≠ 判分器故障**。16 条 case 里 6 条不声明 `tools.required`、
+   7 条没有 `expected.output`；SDK 对两者都抛 `MissingTestCaseParamsError`。
+   新增 `JudgeInputUnavailableError` 并落 `skipped`
+   （`judge_input_unavailable`）。反方向也钉住了：判分器真坏仍是 error → exit 2。
+3. **`--profile` 会静默解开负向用例的阻断**（实测 `--profile chatbot-judge` 下
+   `chatbot.skill.load.negative` 判 **PASS**）。与首跑 `run_d487591757ca` 同类，
+   入口换成了运行期覆盖。处置：judge 档按 case 选；两条护栏钉住
+   （judge 档不得是默认档、负向用例的 harness 期望必须落在 blocking=true 的档）。
+
+**判得准不准，本轮没有结论。** 本机没有 judge 凭据（`~/.deepeval` 空、无
+`OPENAI_API_KEY`/`OPENAI_BASE_URL`），连通性用一个本地 OpenAI 兼容 stub 验证
+（只模拟传输层，deepeval 的 schema 提取与打分是真的）：`run_49ed60607d33` 里
+`agent.task_completion` / `agent.tool_correctness` 的分数**确实落进了报告**
+（`metric_means`），且不声明 required 工具的 case 上 tool_correctness 落
+`skipped`。**这条不能替代真模型校准**——阈值 0.70/0.80 是从 nightly 抄的先例值，
+本数据集自己的基线还没跑出来，因此 judge 档不进默认 run、不 pin 基线。
+无凭据时的行为也实测过了：`run_5d377a384cf9` 三条 case 全 EVALUATION_FAILURE、
+run `partial`、exit 2（不静默降级，符合 §6.1）。
+
 **一条不在计划里、但必须留在结论里的实测事实**：`chatbot.skill.load.negative`
 的两轮里，agent 有一次**拒绝调用** `use_skill`（它自己核对了技能清单、发现名字
 不存在，于是如实说明并不发起调用），那一轮 `harness.skill_load` 判的是 **pass**

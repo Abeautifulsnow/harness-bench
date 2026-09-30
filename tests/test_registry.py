@@ -254,6 +254,12 @@ def test_deepeval_evaluate_with_fake_module(monkeypatch) -> None:
             self.threshold = threshold
 
         def measure(self, test_case):
+            # 真 SDK 4.2.5 的六个 agent.* metric 默认 async_mode=True，其中四个的
+            # ``measure()`` 同步分支根本没有 return——替身必须**照样吐 None**，
+            # 否则这个假模块会替真 SDK 圆场，把"判分器不返回"这条硬伤藏起来。
+            return None
+
+        async def a_measure(self, test_case):
             return 0.9
 
     fake_metrics.TaskCompletionMetric = TaskCompletionMetric
@@ -279,6 +285,92 @@ def test_deepeval_evaluate_with_fake_module(monkeypatch) -> None:
     )
     assert score == 0.9
     assert "above" in reason
+
+
+@pytest.mark.real_judge
+def test_evaluate_does_not_fall_back_to_the_sync_measure(monkeypatch) -> None:
+    """走 ``a_measure`` 而不是 ``measure``（C 类第二版实测回修）。
+
+    症状极难读：报告上是"agent 失败"（EVALUATION_FAILURE），真因是判分器自己
+    返回 None。SDK 4.2.5 实测（``tmp/probe_judge_scores.py``）——
+    ``measure()`` 在默认 ``async_mode=True`` 下：task_completion 1.0、
+    argument_correctness 1.0，而 step_efficiency / tool_correctness /
+    plan_quality / plan_adherence **返回 None**（那四个的 ``return`` 写在
+    ``else`` 分支里）；六个的 ``a_measure()`` 全部返回 1.0。
+
+    替身特意让 ``measure`` 返回一个"看着正常"的分数：若实现退回同步入口，
+    断言会拿到 0.9 而不是 0.123，测试立刻红。
+    """
+
+    class MisleadingMetric:
+        def __init__(self, threshold=None, **kwargs):
+            self.threshold = threshold
+
+        def measure(self, test_case):
+            return 0.9
+
+        async def a_measure(self, test_case):
+            return 0.123
+
+    fake_metrics = types.ModuleType("deepeval.metrics")
+    fake_metrics.TaskCompletionMetric = MisleadingMetric
+    fake_test_case = types.ModuleType("deepeval.test_case")
+    fake_test_case.LLMTestCase = _FakeLLMTestCase
+    fake_test_case.ToolCall = _FakeToolCall
+    fake_pkg = types.ModuleType("deepeval")
+    fake_pkg.metrics = fake_metrics
+    fake_pkg.test_case = fake_test_case
+    monkeypatch.setitem(sys.modules, "deepeval", fake_pkg)
+    monkeypatch.setitem(sys.modules, "deepeval.metrics", fake_metrics)
+    monkeypatch.setitem(sys.modules, "deepeval.test_case", fake_test_case)
+
+    import asyncio
+
+    score, _reason = asyncio.run(
+        DeepEvalCapabilityAdapter().evaluate(
+            "agent.task_completion", 0.7, {"type": "llm", "input": "q"}
+        )
+    )
+    assert score == 0.123, "evaluate 必须走 a_measure（SDK 的异步入口）"
+
+
+@pytest.mark.real_judge
+def test_none_score_is_an_infra_error_not_a_zero(monkeypatch) -> None:
+    """判分器不给分 → EvaluationInfraError，**不得**折算成 0 分。
+
+    0 分进报告就是"agent 表现极差"，与真因（判分器接口不匹配）完全不同形；
+    本仓库反复拦的就是这一类"结论错在归属上"。
+    """
+
+    class NoneMetric:
+        def __init__(self, threshold=None, **kwargs):
+            self.threshold = threshold
+
+        async def a_measure(self, test_case):
+            return None
+
+    fake_metrics = types.ModuleType("deepeval.metrics")
+    fake_metrics.TaskCompletionMetric = NoneMetric
+    fake_test_case = types.ModuleType("deepeval.test_case")
+    fake_test_case.LLMTestCase = _FakeLLMTestCase
+    fake_test_case.ToolCall = _FakeToolCall
+    fake_pkg = types.ModuleType("deepeval")
+    fake_pkg.metrics = fake_metrics
+    fake_pkg.test_case = fake_test_case
+    monkeypatch.setitem(sys.modules, "deepeval", fake_pkg)
+    monkeypatch.setitem(sys.modules, "deepeval.metrics", fake_metrics)
+    monkeypatch.setitem(sys.modules, "deepeval.test_case", fake_test_case)
+
+    import asyncio
+
+    from agent_eval.errors import EvaluationInfraError
+
+    with pytest.raises(EvaluationInfraError, match="returned None"):
+        asyncio.run(
+            DeepEvalCapabilityAdapter().evaluate(
+                "agent.task_completion", 0.7, {"type": "llm", "input": "q"}
+            )
+        )
 
 
 @pytest.mark.real_judge

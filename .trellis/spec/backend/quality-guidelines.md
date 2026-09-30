@@ -252,6 +252,23 @@ Gate。守住五条：
    `tests/test_chatbot_dataset.py::TestExpectationsArePinnedByThePrompt` 要求每个
    非 `auto` 的期望值都**字面出现**在题面里。推论：期望里出现 `auto` 这类"未指定"
    哨兵本身就是缺陷信号——它断言的是模型的沉默，不是平台的行为。
+10. **judge 指标进档要同时成立三件事**（2026-09-30，C 类第二版实测）。加一条
+   `agent.*` 到 profile 不是"多一个信号"，它会改变三处行为：
+   **(a) 同一条 case 的其它档必须还是纯确定性基线**——judge 的分数只有在"确定
+   性结论已知"时才能被解读（是 agent 真没做完，还是判分器口味问题）；基线档里
+   混进 judge，参照系本身就随模型漂移。机械护栏：基线档**不得**含 judge 指标
+   （`test_first_version_profiles_declare_no_judge_metrics`），且 judge 档
+   **必须**真的含（否则"第二版已交付"只是名分，跑出来与基线档一模一样）。
+   **(b) 阈值抄先例值，不自造第二套数字**：同一指标在两档里阈值不同，跨档比对
+   （"这次分数掉了"）就没法区分是阈值差还是质量差。先例取 `nightly`。
+   **(c) 输入缺口要落 skipped，不能落 error**：判分器要的分量不在这次观测里
+   （`tools_called` / `expected_tools` / 非空 `actual_output`）是 Spec §19.1.1 的
+   第三结局。按 error 处理会把整条 case 变成 EVALUATION_FAILURE、把 run 拉到
+   exit 2，而 agent 什么都没做错——**一次已经由 case 自己声明的超时**（收尾输
+   出为空）尤其容易踩到。先例：`chatbot-core` 16 条里 6 条不声明 `tools.required`、
+   7 条没有 `expected.output`；判据集中在 `deepeval_adapter._is_missing_input`，
+   结局在 `runner._run_judge_metrics`，反方向（判分器真坏仍是 error → exit 2）
+   也必须有断言。
 
 ## 断言有效性不变式（2026-09-23 review #I01–#I04 的教训）
 
@@ -372,6 +389,22 @@ python/git 读到 LF 而 ruff 报 E902 = 读取期问题，别动它。**
    `case.execution.timeout`，单轮 case 的覆盖是空头承诺。
    下限**挡不住**的情形要如实登记，不要假装解决了：预算本身作为断言的那些 case
    （超时 canary）在更大的覆盖值下必然被抬过去；处置与安全 canary 同法（不进默认套件）。
+
+8. **全局换档开关不得改写用例作者写下的阻断意图**（2026-09-30，C 类第二版）。
+   `RunConfig.profile`（CLI `--profile`）的优先级是
+   `cfg.profile or case.evaluation_profile or benchmark.default_profile`——
+   运行期开关**压过** case 自己的声明。而 `blocking` 归 Profile（Spec §17.2），
+   于是"负向用例必须真的红"这条约束可以被一个命令行参数整份解开：实测
+   `--profile chatbot-judge` 跑 `chatbot.skill.load.negative` 时，
+   `harness.skill_load` 判 FAIL 而 blocking=false → case 状态 **PASS**，
+   恒绿的负向用例又回来了（与首跑 `run_d487591757ca` 同一类，入口从"默认档
+   选错"换成"运行期整份覆盖"）。两层处置：**(a)** 判据档按 case 选
+   （`evaluation_profile`），不用 `--profile` 全局压；**(b)** 默认档必须是纯
+   确定性基线，且负向用例的 harness 期望必须落在 blocking=true 的档上——
+   两条都做成机械护栏，因为"记得别这么跑"不是约束。
+   与第 7 条同源：**一个能整份覆盖用例声明的开关，都要问"它会不会顺手把某条
+   断言消解掉"**，并把挡不住的情形如实登记（不进默认套件 / 按 case 选档），
+   不要假装语义能修掉它。
 
 框架通用性的机制保障（change-plan E 类）落在 `tests/test_framework_boundary.py`：
 专有方言 deny-list 扫 `src/agent_eval/`、`SessionContext.extra` 保持不透明。

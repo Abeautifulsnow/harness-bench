@@ -353,6 +353,79 @@ step 里有第二个 part 时，它会被记成"前一个 part + 自己"——�
   单轮首事件延迟约 2.6s，4 路并发时第 4 个请求要等到 21s+。
 - 通用 case 的 timeout 预算对真实 LLM 太紧（15s 跑一格真实对话本就勉强）。
 
+### 第十三轮：judge 指标（C 类第二版）——两条硬伤 + 输入缺口的结局
+
+change-plan §3 末段把 judge 留到第二版（"需要先有稳定的确定性基线才能校准"）。
+第二版落地时暴露的问题**不是"judge 判得准不准"**，而是"judge 根本没跑起来"——
+三次真机/离线实测各暴露一层，逐层记：
+
+**1. `measure()` 在 SDK 4.2.5 下对四个 metric 返回 `None`。**
+六个 `agent.*` 默认 `async_mode=True`，而 `measure()` 的同步分支里
+`return self.score` 写在 `else` 里，`async_mode` 那一支只有 `pass`。实测
+（`tmp/probe_judge_scores.py`）：
+
+```text
+==================== ============== ==============
+metric               measure()      a_measure()
+==================== ============== ==============
+agent.task_completion    1.0            1.0
+agent.step_efficiency    None           1.0
+agent.tool_correctness   None           1.0
+agent.argument_correctness 1.0          1.0
+agent.plan_quality       None           1.0
+agent.plan_adherence     None           1.0
+==================== ============== ==============
+```
+
+于是 `float(None)` → TypeError → 整条 case 判 `EVALUATION_FAILURE`、run 升
+exit 2。**报告上的样子是"agent 失败"**，真因是判分器没返回——本仓库反复拦的
+"结论错在归属上"。修：走 `a_measure`（SDK 给异步调用方的入口），并在
+`raw is None` 时抛 `EvaluationInfraError`（**不得**折算成 0 分：0 分会显示成
+"agent 表现极差"）。护栏两条，替身特意让 `measure` 返回一个"看着正常"的分数。
+
+**2. 输入缺口必须落 skipped，不是 error。** 本数据集 16 条 case 里 6 条不声明
+`tools.required`、7 条没有 `expected.output`。SDK 的
+`check_llm_test_case_params` 对 `tools_called` / `expected_tools` 为 None 抛
+`MissingTestCaseParamsError`，对空 `actual_output` 抛**同一个类**——语义都是
+"这份 trace 里没有判分器要的分量"，属于 Spec §19.1.1 的第三结局（观测不到）。
+若按 infra 处理，一次**已经由 case 自己声明的超时**（收尾输出为空）会额外把
+run 抬到 exit 2。修：新增 `JudgeInputUnavailableError`（**刻意不继承**
+`EvaluationInfraError`），runner 侧逐条记 `verdict="skipped"` +
+`skipped_reason=judge_input_unavailable`。判据集中在 `_is_missing_input`
+一处，不散进各 metric。
+
+**3. 凭据缺失**不降级：`--no-judge` 未开而 judge 不可用 → exit 2（Spec §6.1）。
+实测（`run_5d377a384cf9`，无凭据跑 chatbot-judge）三条 case 全
+`EVALUATION_FAILURE / infra.evaluation_failure`、run `partial`、exit 2。
+`fallback:` 只在 **probe** 失败（SDK 未装 / 形状不兼容）时生效——探针的契约
+写在 `deepeval_adapter.probe` 的 docstring 里，"凭据缺失不在探测范围"是故意的。
+
+**端到端连通性验证**用的是一个本地 OpenAI 兼容 stub（`tmp/stub_judge_server.py`，
+只模拟**传输层**；deepeval 的 `a_measure`、schema 提取、打分、verdict 落盘全是真的）。
+它证明"接线通了、分数真的进了报告"，**不证明判得准**——判得准需要真模型，本机没有
+凭据，这条如实登记而不是用 stub 掩饰：
+
+```text
+run_49ed60607d33  --profile chatbot-judge --tag database（stub judge）
+  chatbot.database.env_snapshot   judge task_completion 1.0 pass / tool_correctness 1.0 pass
+  chatbot.database.sqlite_query   同上
+  chatbot.database.assertion.negative  tool_correctness **skipped**（该 case 不声明 required 工具）
+  报告 metric_means: {"agent.task_completion": 1.0, "harness.loop": 1.0, "native.database_state": 0.0}
+```
+
+**一条被这轮实测反查出来的运行期陷阱**：CLI 的 `--profile` **压过** case 的
+`evaluation_profile`（`cfg.profile or case.evaluation_profile or default`）。
+实测 `--profile chatbot-judge` 跑 `chatbot.skill.load.negative` 时，那条负向
+用例的 `harness.skill_load` 判 FAIL 但 blocking=false → case 状态 **PASS**，
+负向用例又变回恒绿（与首跑 `run_d487591757ca` 同一类，入口从"默认档"换成
+"运行期整份覆盖"）。处置：judge 档按 case 选，不要用 `--profile` 全局压；
+护栏两条（`test_judge_profile_is_never_the_benchmark_default`、
+`test_negative_cases_with_harness_expectations_are_strict`）。
+
+**`fallback` 在 judge 档里保留但不在本轮验证**：`native.output_checks` /
+`native.tool_sequence` 只在 probe 报不可用时接管，而本机 deepeval 4.2.5 装了
+且形状兼容，所以这条分支本轮只能靠既有单测（`test_registry`）覆盖。
+
 上面第一条在 C 类里**已按实测重定过预算**（不是改 shim）：C 类 16 条 case 的
 `execution.timeout` 全部 ≥ 60s，其中两条多轮 150s、子代理 240s。实测墙钟分布是
 单工具往返 6~18s、SQLite 探索 14~36s、子代理 24~43s，再叠加 `CONCURRENCY=4`
