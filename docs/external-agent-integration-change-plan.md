@@ -525,9 +525,9 @@ health 必须把这两件事的区别暴露出来。
 | --- | --- | --- |
 | `run.started` / `run.finished` | `start` chunk / `finish` chunk + `[DONE]` | **实测已验证**：`finish` 带 `finishReason`（正常="stop"，审批挂起="tool-calls"——shim 靠它判"这轮在等人"）；缺 `run.finished` 会被 `runner.py:892` 判 agent 失败，必须可靠发出 |
 | `tool.call` / `tool.result` | `tool-input-available` / `tool-output-available` | **实测已验证**：`input` 已是解析后的对象，直接作 `data.arguments`；前置的 `tool-input-start`/`tool-input-delta`（入参流式增量）可忽略；**参数类与安全类断言全靠它** |
-| `tool.result`(错误) | `tool-output-error` / `tool-output-denied` | `denied` 的载荷只有 `toolCallId`，part 本身**没有 reason 字段**；但原因可从该 part 的 **`approval.reason`** 取回（`zombie-approval-contracts.md` §1：审批终态只能落在 `approval.reason`，不得带 `output`/`errorText`）——shim 取它即可，不必"自行编" |
+| `tool.result`(错误/被拒) | **待实测（第五轮修正）**：`tool-output-denied`/`tool-output-error` 在第一方源码**零命中**（与 `tool-approval-request` 同类误判）；契约文档的真实形态是 tool part **`state:'output-denied'`** + `approval:{approved:false, reason}`（落库/续跑流面，`zombie-approval-contracts.md` §25-47）。denied 的原因从 `approval.reason` 取回；**审批续跑（第二轮 POST）的流上形状未实测**，shim 开发期第一优先补测 |
 | `mcp.call` / `mcp.result` | `toolName` 形如 `mcp__<server>__<tool>` | **必须拆成独立事件**，不得折叠进 `tool.call` |
-| `command.started` / `command.finished` | `bash` 工具调用 | 退出码在 output 对象的 `exitCode` 键里，需提到 `data.exit_code`（Spec §19.4 的唯一观测来源） |
+| `command.started` / `command.finished` | `bash` 工具调用 | **实测（子代理内路径）**：结果 JSON 含 `exitCode`/`stdout`/`stderr`/`command`，且 `result` 是**二次 JSON 编码的字符串**——shim 需解码后取 `exit_code`（Spec §19.4 唯一观测来源）；父级直连 bash 的 `tool-output-available.output` 形状待联调确认（预计同执行器同形） |
 | `subagent.started` / `finished` | `data-sub-open` / `data-sub-done` | **实测已验证**：全事件族（open/text-delta/tool-call/tool-result/done）`id === toolCallId`；done 载荷含 `tokenUsage{input,output,total}`（A3：子代理侧的全量三分量）；中间事件族 `data-sub-text-delta`/`data-sub-tool-call`/`data-sub-tool-result` shim 可折叠或映射进子代理 span；另有 `data-sub-async`：父流不会再有 done，终态要查 `subagent_sessions`，shim 不得把它当丢事件 |
 | `skill.loaded` | `use_skill` 工具调用 | 也可走 `skill.loaded` 显式事件 |
 | `model.response.data.usage` | `data-context-usage` | **实测修正**：**每 step 一次**（finish-step 之后），非每轮/每 delta；载荷 12 键，`totalTokens` = 各分量 + `outputReserve`（预算总量，非输出观测），**无 outputTokens 分量** → A3"仅输入侧"维持且证据更强 |
@@ -538,7 +538,21 @@ health 必须把这两件事的区别暴露出来。
 **第五轮实测新增的方言行（无 §8 对应，shim 一律丢弃，不得透传）**：
 `start-step` / `finish-step`（step 边界标记）、`reasoning-start` / `reasoning-delta` /
 `reasoning-end`（思考令牌）、`tool-approval-request`（**实测确为流上 chunk 类型**，
-载荷 `{approvalId, toolCallId}`——B3 的审批识别信号，映射见 B3）。
+载荷 `{approvalId, toolCallId}`——B3 的审批识别信号，映射见 B3）、
+`data-task`（静态核实：`{type:'data-task', id:'task-<revision>', data:{kind, tasks[], revision}}`，
+task_* 工具的任务面板快照，`packages/core/src/runtime/agent/tools.ts:106`）。
+
+**第五轮未覆盖清单（shim 开发期补测，防止"已验证"被读成"全量已验证"）**：
+冒烟四场景只覆盖了当时的五条高风险未知项，**不是全工具面**。以下按优先级：
+1. **审批续跑闭环**：approve / deny 两条路径第二轮 POST 的流上形状（自动审批策略的实作前提）；deny 的 reason 在 `approval.reason`（静态）；
+2. **MCP 工具流上形状**：`mcp__<server>__<tool>` 前缀是否如静态核实出现在 `toolName`（需本机配一个测试 MCP server）——B2 的"必须拆流"依赖它；
+3. **use_skill / slash-skill** 的流上形状（`skill.loaded` 的映射来源）；
+4. **`data-sub-async`**（异步子代理）真实形状与 `subagent_sessions` 终态查询；**多轮会话**（同 conversationId 连续 POST）的流形状（多轮 case 前提）；
+5. **父级直连 bash** 的 `tool-output-available.output` 形状（当前 exitCode 证据来自子代理内路径）。
+预计无需单独冒烟的：普通工具（grep/glob/ls/read_file/write_file/edit_file/web_search/
+save_report/cron/task_*/exit_plan_mode/connector_*）走统一的
+`tool-input-available → tool-output-available` 通道（AI SDK UIMessage stream 统一形状），
+`tool.call`/`tool.result` 映射天然覆盖——工具名与 registry 逐字一致即可（C 类硬约束 1）。
 
 **为什么把 MCP/command 单列**：`security/evaluator.py:209-223` 明确要求
 `tool_names` / `mcp_names` / `command_calls` 三路**逐条透传**，
