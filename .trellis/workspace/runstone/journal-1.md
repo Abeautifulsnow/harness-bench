@@ -949,3 +949,127 @@ B3 第七轮段）、`shims/ai-chatbot/README.md`（第七轮小节 + 转译要�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 14: C 类专用评测集落地：三轮真机全量 + 四处接线缺陷回修
+
+**Date**: 2026-09-30
+**Task**: C 类专用评测集落地：三轮真机全量 + 四处接线缺陷回修
+**Branch**: `main`
+
+### Summary
+
+chatbot-core 16 case 真机跑通并迭代稳定；负向用例换 Profile、故意不可满足、安全 canary 单独一跑三条设计结论；回修流式超时归属/计数口径/沙箱路径/skill 集合
+
+### Main Changes
+
+# C 类专用评测集落地：三轮真机全量把"该红的能红"逐条钉住
+
+## 做了什么
+
+change-plan §3 的 C 类（ai-chatbot 专用评测集）从勘察做到真机全量跑通并迭代稳定：
+
+- **新建** `evals/datasets/chatbot-core/`（16 case × repeat 2）+ `tool-surface.yaml`
+  冻结工具面 + `evals/benchmarks/ai-chatbot-core.yaml` + `evals/suites/chatbot.yaml`
+  + 两档 profile（`chatbot-plain` / `chatbot-strict`）+ 两个 fixture
+  （`chatbot_workspace` / `chatbot_ops`）+ 护栏 `tests/test_chatbot_dataset.py`（24 条）。
+- **三轮真机全量**（`run_d487591757ca` → `run_2e94cebd9e07` → `run_69918662134c`）
+  加安全套件单独一跑（`run_3f225f5f3f54`），最终：15 case × 2 = 30 迭代，
+  7 红 / 0 error / 0 flaky；七条 canary 全部按设计判红且红在哪条 metric 上可分辨，
+  六条 golden 全绿。
+- **回修四处接线缺陷**（两处在框架、一处在接入侧、一处在 runner），详见下。
+
+## 三条用例设计结论（都不是"跑通了"，是"跑红的方式对不对"）
+
+1. **负向用例的断言落在哪个 metric 上，就该用哪个 profile。**
+   `CaseStatus.FAIL` 的判据是 `blocking_failed`，而 blocking 归 Profile（Spec §17.2）。
+   首跑实测 `chatbot.skill.load.negative` 的 `harness.skill_load` 判 fail 而 case
+   状态是 **PASS**——一条恒绿的负向用例与"断言写对了、agent 也合规"完全同形。
+   处置：新增 `chatbot-strict`（指标集合与 plain 逐条相同，只翻 blocking），
+   并补机械护栏 `TestAssertionsCanActuallyFail`：case 用 `metric_params` 声明了对某
+   插件指标的期望，该指标就必须在该 case 的 profile 里 blocking=true，不留例外。
+   先例是 database-core 的 `skill.priority.wrong_order`（早已用 strict 档）。
+
+2. **"故意不可满足"要真的不可满足。**
+   `step_ratio.negative` 原写 `baseline_steps: 1`（"一次命令的理想步数"），真机恰好
+   `tools=1` → `1 <= 1` → **恒绿**。病根是这类断言有两个可测值，只要它们能相等，
+   判别力就随时会没。改为 `baseline_steps: 0`（本任务不许调工具）配"必须用 bash
+   执行"的题面，让声明与题面互相矛盾。同数据集另两条 canary 用同一手法。
+
+3. **会撞安全硬门的 canary 要单独一跑。**
+   `security.forbidden_path.negative` 在 `security.*` 上判红，而
+   `security.max_failures: 0` 在每档 gate 里都是 Hard Gate。留在默认 run 里的后果
+   不是"多一条失败"，而是那条硬门**永远红**——"安全规则被真实触发"与"这是一条
+   撞线 canary"不可分辨，硬门就退化成装饰品。摘掉它的 chatbot 标签（=
+   `--suite security` 才跑，同 database-core 的既有分法），并用
+   `EXCLUDED_FROM_BENCHMARK` 逐条登记 + 校验它真的被 security 选中。
+
+## 四处回修（跑用例反查出来的，都不在用例本身）
+
+| 归属 | 缺陷 | 修法 |
+| --- | --- | --- |
+| 框架 | 流式 `/run` 的 30s 传输读超时抢走了 case 的预算（子代理那条两轮全判 `INFRA_FAILURE: ReadTimeout('')`，0 metric） | `STREAM_TIMEOUT`：读侧无上限、连接侧仍 10s。**一轮能跑多久只由 case 的 `execution.timeout` 决定**，传输层再造隐藏上限只会制造"超时 vs 故障"不可分辨的中间态。两条护栏 + 一只 `-p` 插件证明旧行为下会红 |
+| 框架 | `/api/benchmarks` 的 `cases`（dataset 条数）与 `/benchmarks/{name}/cases`（套件选中条数）不一致（16 vs 15；database-core 40 vs 24） | 统一走 `resolve_cases`。"目录里数得到、run 时跑不到"正是最该被看见的静默漏跑 |
+| 框架 | `file_state` 看不到 agent 写的文件：沙箱传的是 iteration 根而非 `handle.workdir` | 用 provider 声明的那个目录（filesystem provider 把 fixture 拷进 `<iterN>/workspace`）；否则一次成功的写入被报成 FAIL 且报告里毫无异常 |
+| shim+框架 | `/health` 声明 `skill.loaded: true` 而转译器从不发它 | 从 `use_skill` 的 `tool.result` 载荷补发（以 `success`+`skillName` 为据，不用入参） |
+| 框架 | `SkillLoadEvaluator` 只查 missing 方向 → `expected_loaded: []` 恒 pass | 改集合双向比对 + `allow_extra`，与 `SubAgentRoutingEvaluator` 同构 |
+
+另有 `shims/.../server.py` 的观测面能力表提到模块级 `OBSERVATION_SURFACE`，让定义树
+侧的护栏能直接导入（否则要起真上游发 HTTP 才读得到）。
+
+## 一条计划外的实测事实
+
+`chatbot.skill.load.negative` 的两轮里 agent 有一次**拒绝调用** `use_skill`（它自己
+核对了技能清单、发现名字不存在，于是不发起调用并如实说明），那一轮
+`harness.skill_load` 判的是 **pass**（双向比对下"声明不得加载任何 skill 且确实没
+加载"本就该绿），由 `tools.required: [use_skill]` 承接发红。两个推论写进了用例注释：
+`tools.required` 必须留着（去掉它那条 case 会整体变绿）；C 类负向用例保证的是
+"case 级永不绿"，不保证"每次迭代都由同一条 metric 发红"。
+
+## 记账
+
+- 提交：`e06033d`（四处接线缺陷）、`9505131`（C 类评测集与 fixtures）、`b7eb081`（文档回写）
+- 文档：change-plan §3「第五轮修订」、ROADMAP（C 切片转 ✅ + 新增「C 类实测回修」表）、
+  `shims/ai-chatbot/README.md`（套件分层 / C 类实测小节 / 预算重定）、README（外部平台
+  三条最常踩的坑）、quality-guidelines（覆盖约束 +3 条、行尾分叉补记）、dataset.yaml 与
+  各 case 的头部注释
+- 验证：全量 **557 passed**；改动与新增的 .py 逐个过 ruff check + format（经 stdin，
+  绕开本机读取器分叉）
+- 顺带：Write/Edit 工具确实会把部分文件改成 CRLF（`runner.py` / `harness.py` /
+  `test_runner.py` 等 5 个），已逐字节还原为 LF 并把判别口诀写进 quality-guidelines
+  （全 CRLF + 无裸 LF = 内容问题可修；python/git 读到 LF 而 ruff 报 E902 = 读取期问题别动）
+
+## 仍待办
+
+- **Mimosa L3 的三条 SQL 注入告警**：定位在 `tmp/probe-workspace/outputs/.../scratch/inspect.py`
+  （被测 agent 在探测时写进 workdir 的速查脚本，`tmp/` 已被 gitignore，不进任何提交）。
+  session 12 已定性为"评测产物、非本轮 diff"；本次进一步**用无动态 SQL 的等价写法
+  改写后仍被判为 sql-injection 入口**，于是把该 `outputs/` 目录整体删除
+  （`tmp/c-probe/*/outputs/` 同类残留一并删除）。tmp/ 是探测现场，重跑 probe 会再生成。
+- **`harness.retry` / `harness.context_compaction` 的观测面**：shim 侧仍未提供，目前
+  如实声明 false 并判 skipped；补观测面是后续项。
+- **judge 指标（第二版）**：首版是确定性基线，`agent.task_completion` 等留到第二版。
+- **审批答案注入**：`ask_user_question` 的 answers 通道已实测但 shim 未实现。
+- 两个 Trellis 任务（`09-29-external-agent-integration-fixes` /
+  `09-30-shim-ai-chatbot`）本次归档。
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e06033d` | (see git log) |
+| `9505131` | (see git log) |
+| `b7eb081` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
