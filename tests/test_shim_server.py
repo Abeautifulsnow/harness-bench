@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 from collections.abc import Iterator
@@ -281,10 +282,69 @@ async def test_missing_timeout_setting_is_not_a_silent_empty_stream(upstream: di
         shim_server.SETTINGS.update(original)
 
 
-async def test_settings_have_a_value_for_every_read_key() -> None:
-    """每个被读的 SETTINGS 键都必须有默认值：`--timeout` 曾只有读点没有写点。"""
-    for key in ("upstream", "model", "policy", "timeout", "allow_public_upstream"):
-        assert key in shim_server.SETTINGS, key
+# 4. 终局事件三形态（PRD §6.2.1 义务 5）：不假绿纪律在 shim 侧的落点。
+async def test_normal_turn_reaches_a_documented_terminal_shape(
+    shim: str, upstream: dict
+) -> None:
+    """上游正常：事件链以 ``run.finished(status=success)`` 收尾，且**没有** error。
+
+    三种终局形态是互斥的（5xx+原因 / 流内 error+run.finished / 正常 finish），
+    任何一个都不能缺席。这一条钉住最容易被"补终局事件"的改动破坏的那一侧：
+    正常路径不许被顺手加上兜底的 error。
+    """
+    adapter, _, _, events = await _turn(shim)
+    try:
+        types = [e.type for e in events]
+        assert types[0] == "run.started"
+        assert types[-1] == "run.finished"
+        assert events[-1].data["status"] == "success"
+        assert "error" not in types
+        assert events[-1].data["output"] == "QUERY COMPLETE"
+    finally:
+        await adapter.aclose()
+
+
+async def test_terminal_event_failure_keeps_evidence_emitted_before_it(
+    shim: str, upstream: dict
+) -> None:
+    """首事件之后的失败：流内补终局事件时，**已经观测到的证据必须留在流里**。
+
+    这是"超时会掩盖它自己的现场"（ROADMAP 发现的 6）在接入侧的对应物：补终局事件
+    的正解是追加，不是把这一轮重写成"什么都没发生"。若 shim 选择丢弃已发出的
+    chunk，harness 的 token / 工具调用会一起归零，SUT 到底跑到哪一步就不可考了。
+    """
+    upstream["mode"] = "truncated"
+    adapter, _, _, events = await _turn(shim)
+    try:
+        types = [e.type for e in events]
+        assert "model.response" in types, "截断前已观测到的 token 证据不能丢"
+        assert events[-1].type == "run.finished"
+        assert events[-1].data["status"] == "error"
+    finally:
+        await adapter.aclose()
+
+
+async def test_settings_have_a_default_for_every_key_the_source_touches() -> None:
+    """源码里出现的每个 SETTINGS 键都必须在**模块级默认值**里存在。
+
+    不写死键名清单——从 server.py 源码扫出所有 ``SETTINGS["..."]`` 访问。写死清单
+    只挡得住已知的那个键，而这一类缺陷的形态恰恰是"新增了一个读点、忘了写点"：
+    ``--timeout`` 曾是只有读点没有写点的那个键，读点在请求处理中间、模块级又没有
+    默认值，于是每次 /run 都在头已发出之后抛 KeyError（联调实测的 200+空流）。
+
+    判据取"导入时的 SETTINGS"：CLI 的写点在 ``main()`` 里，只有真的从命令行启动
+    才执行——测试与嵌入用法都拿不到它，所以默认值必须是模块级的。
+    """
+    source = (REPO / "shims" / "ai-chatbot" / "shim_ai_chatbot" / "server.py").read_text(
+        encoding="utf-8"
+    )
+    touched = set(re.findall(r'''SETTINGS\["([a-z_]+)"\]''', source))
+    assert len(touched) >= 4, f"扫描逻辑失效：只扫出 {sorted(touched)}"
+    for key in sorted(touched):
+        assert key in shim_server.SETTINGS, (
+            f"SETTINGS[{key!r}] 在源码里被访问但没有模块级默认值"
+            "——联调实测的 200+空流就是这么来的"
+        )
 
 
 def test_cli_exposes_timeout_option() -> None:

@@ -11,9 +11,10 @@ harness-bench Runner ──四端点契约──▶ 本 shim ──POST /api/cha
 ```
 
 - `shim_ai_chatbot/translator.py`：转译状态机，**零第三方依赖**——
-  框架测试 `tests/test_shim_translator.py` 直接导入，用与真实冒烟 dump 同形的
+  框架测试 `tests/test_shim_translator.py`（12 条）直接导入，用与真实冒烟 dump 同形的
   synthetic chunks 驱动。
-- `shim_ai_chatbot/server.py`：四端点 HTTP 服务（纯标准库，同 `dev/mock_server` 先例）。
+- `shim_ai_chatbot/server.py`：四端点 HTTP 服务（纯标准库，同 `dev/mock_server` 先例）；
+  拼接面由 `tests/test_shim_server.py`（12 条，真 TCP + 假上游）覆盖。
 - 转译规则的唯一事实源：`docs/external-agent-integration-change-plan.md` §2 B2
   （第五轮实测校准，全部结论有 `tmp/smoke/*.json` 原始 chunk 证据）。
 
@@ -45,13 +46,46 @@ shim 是**被测方一侧**：它对 harness 说的每句话都是"被测事实"
 首事件之前失败 → 5xx + JSON 原因（harness 判 InfraError / exit 2，"环境没起来"）
 首事件之后失败 → 流内 error + run.finished(status=error)（判 agent 失败）
 上游 200 但无 finish chunk → 同上（协议违约，不静默 return 半截流）
+上游正常       → ... + run.finished(status=success)，且没有 error
 ```
 
-理由是一次真实事故：`SETTINGS["timeout"]` 只有读点没有写点，`/run` 每次在头发出后
-抛 `KeyError`，harness 收到"200 + 空流"，五个 case 全判 `AGENT_FAILURE`，
-**被测平台一次都没被调用**——报告上却写着它的名字。一条空流与真实的 agent 崩溃
-在 harness 侧完全同形。护栏在 `tests/test_shim_server.py`（真 TCP + 假上游，
-跨 `server.py` × `translator.py` 的拼接面；此前 12 条转译单测全绿而链路恒空流）。
+理由是两次真实事故，都出在"两个进程拼起来"的那一层：
+
+1. `SETTINGS["timeout"]` 只有读点没有写点，`/run` 每次在头发出后抛 `KeyError`，
+   harness 收到"200 + 空流"，五个 case 全判 `AGENT_FAILURE`，**被测平台一次都没
+   被调用**——报告上却写着它的名字。一条空流与真实的 agent 崩溃在 harness 侧完全
+   同形。补终局事件时**不能丢弃已观测到的证据**：截断前收到的 token / 工具调用
+   必须留在流里（与框架侧"超时掩盖它自己的现场"是同一类错误）。
+2. 请求体不是合法 UTF-8 时，`json.loads` 抛 `UnicodeDecodeError`（`ValueError` 的
+   子类，但不是 `JSONDecodeError`），异常冒出 `do_POST` 的结果是**不回任何响应**——
+   对端看到 "Empty reply from server"。
+
+护栏在 `tests/test_shim_server.py`：真 TCP + 假上游，覆盖三种终局形态、证据保留、
+workdir 回执、坏请求、未知路由，以及"源码里每个 SETTINGS 键都有模块级默认值"
+（从源码扫读点，不是写死键名清单——写死清单只挡得住已知的那一个键）。
+
+## 联调实测（2026-09-30，首个真实端到端信号）
+
+修完上面两处后，`database-core --tag smoke` 打真实 SUT 的实测结果：
+
+```text
+smoke.echo.basic          → 真实回显 "pong ✅…"（此前恒为空）
+token_usage_scope         → partial（如实：ai-chatbot 只报输入侧，无 output_tokens）
+agent_model               → platform-default
+baseline_mode             → NO_BASELINE（原因：本 dataset_version 下没有合格基线；
+                             fake:// 的历史 run 已被接入类型守卫正确排除）
+```
+
+三条通用 case 仍判 FAIL，且**是真失败不是接入故障**：通用用例断言
+`execute_sql` / `database_schema` 工具与 "QUERY COMPLETE" 结尾，ai-chatbot 不产
+这些形状——这正是 C 类专用评测集存在的理由（见 change-plan）。
+
+同一轮还暴露两条待办（不阻塞本 shim 的可用性）：
+
+- `database.query.top_customers`（`execution.timeout: 30`）与
+  `database.query.multi_turn_refine`（40）在 shim `CONCURRENCY=4` 下排队超时；
+  单轮首事件延迟约 2.6s，4 路并发时第 4 个请求要等到 21s+。
+- 通用 case 的 timeout 预算对真实 LLM 太紧（15s 跑一格真实对话本就勉强）。
 
 ## 转译要点（详见 change-plan B2/B3）
 
