@@ -28,12 +28,30 @@ cd shims/ai-chatbot
 uv run python -m shim_ai_chatbot --port 8901 --upstream http://localhost:3000 [--model <name>]
 
 # 3. 跑评测（harness-bench 仓根）
-uv run agent-eval benchmark run smoke --agent http://127.0.0.1:8901 --no-judge
+uv run agent-eval benchmark run database-core --tag smoke --agent http://127.0.0.1:8901 --no-judge
 ```
 
 选项：`--model <name>`（A4 显式模型，进 run 元数据；缺省=平台默认）、
 `--policy auto-approve`（B3 审批策略，当前唯一策略，经 /health `approval_policy` 上报）、
+`--timeout <秒>`（单轮上游读超时，缺省 300）、
 `--allow-public-upstream`（默认仅回环/私网上游）。
+
+## 不假绿纪律（联调实测教训）
+
+shim 是**被测方一侧**：它对 harness 说的每句话都是"被测事实"。所以任何一次
+`/run` 流都必须以 §8 的终局事件收场，**不得静默截断**——
+
+```text
+首事件之前失败 → 5xx + JSON 原因（harness 判 InfraError / exit 2，"环境没起来"）
+首事件之后失败 → 流内 error + run.finished(status=error)（判 agent 失败）
+上游 200 但无 finish chunk → 同上（协议违约，不静默 return 半截流）
+```
+
+理由是一次真实事故：`SETTINGS["timeout"]` 只有读点没有写点，`/run` 每次在头发出后
+抛 `KeyError`，harness 收到"200 + 空流"，五个 case 全判 `AGENT_FAILURE`，
+**被测平台一次都没被调用**——报告上却写着它的名字。一条空流与真实的 agent 崩溃
+在 harness 侧完全同形。护栏在 `tests/test_shim_server.py`（真 TCP + 假上游，
+跨 `server.py` × `translator.py` 的拼接面；此前 12 条转译单测全绿而链路恒空流）。
 
 ## 转译要点（详见 change-plan B2/B3）
 

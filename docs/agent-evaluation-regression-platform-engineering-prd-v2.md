@@ -305,6 +305,15 @@ class AgentAdapter(ABC):
    （`RunMetadata.token_usage_scope`：full / partial / 未观测）。单侧观测的
    run 与全量观测的 run 之间，token 类数值不可比——口径不明的基线会被
    模型漂移同类的"口径漂移"静默污染（Spec §4.3）。
+5. **终局事件不回退**（联调实测补充，2026-09-30）：任何一次 `/run` 流都必须以
+   `run.finished` 收场，**不得静默截断**。首事件之前失败时状态码还改得了，应当
+   直接给 5xx + JSON 原因（框架判 `InfraError` / exit 2——"环境没起来"）；首事件
+   之后失败时状态码已定，必须补一条流内 `error` + `run.finished(status=error)`
+   （框架判 agent 失败）。理由：一条"200 + 空流"或"半截流"在框架侧与**真实的
+   agent 崩溃不可分辨**——接入口自身的 bug（实测：shim 的 `SETTINGS["timeout"]`
+   只有读点没有写点，每次 `/run` 在头已发出后抛 KeyError，五个 case 全判
+   AGENT_FAILURE，被测平台一次都没被调用）会被完整伪装成"被测对象失败"，而
+   被测平台的名字正挂在报告上。SUT 一侧对 harness 说的每句话都是被测事实。
 
 ## 6.3 未来 Adapter
 

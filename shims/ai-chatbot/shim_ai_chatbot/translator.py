@@ -284,12 +284,7 @@ class TranslationSession:
                 self.suspended = True  # server 构造续跑请求后再次 POST，翻译继续
                 return []
             # 无策略/超轮数：如实按 error 收尾（不伪造成功）
-            error = self._event("error", {"message": f"approval suspended (finishReason={reason})"})
-            finished = self._event(
-                "run.finished", {"status": "error", "output": self._last_text}, parent=self._root_id
-            )
-            self.finished = True
-            return [error, finished]
+            return self.fail(f"approval suspended (finishReason={reason})")
         status = "error" if reason == "error" else "success"
         finished = self._event(
             "run.finished", {"status": status, "output": self._last_text}, parent=self._root_id
@@ -299,7 +294,21 @@ class TranslationSession:
 
     def _on_error(self, chunk: dict) -> list[dict]:
         message = chunk.get("errorText") or chunk.get("message") or "agent error"
-        error = self._event("error", {"message": str(message)})
+        return self.fail(str(message))
+
+    # ---- 终局出口（唯一） ----
+
+    def fail(self, message: str) -> list[dict]:
+        """以 error + run.finished(status=error) 收场（幂等）。
+
+        这是本转译器**唯一**的失败出口，server 层的三条路径（上游失败、审批续跑
+        构造失败、上游 200 但无 finish chunk）全部经由它，形状因此不可能漂移。
+        它存在的理由是不假绿：一条没有终局事件的 §8 流在 harness 侧只表现为
+        "流提前结束"，与真实的 agent 崩溃不可分辨（联调实测教训）。
+        """
+        if self.finished:
+            return []
+        error = self._event("error", {"message": message})
         finished = self._event(
             "run.finished", {"status": "error", "output": self._last_text}, parent=self._root_id
         )

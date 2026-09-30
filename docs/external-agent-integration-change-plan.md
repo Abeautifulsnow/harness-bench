@@ -574,6 +574,16 @@ save_report/cron/task_*/exit_plan_mode/connector_*）走统一的
 `tool-input-available → tool-output-available` 通道（AI SDK UIMessage stream 统一形状），
 `tool.call`/`tool.result` 映射天然覆盖——工具名与 registry 逐字一致即可（C 类硬约束 1）。
 
+**（2026-09-30 联调首跑暴露的接入侧缺陷，已修）**：端到端第一次跑通链路时，
+shim 每次 `/run` 都在 `SETTINGS["timeout"]` 上抛 `KeyError`——该键只有读点、
+没有写点（`--timeout` 参数压根不存在）。HTTP 头已发出，于是 harness 收到
+"200 + 空流"，五个 case 全判 `AGENT_FAILURE`，**被测平台一次都没被调用**。
+这类"接入口 bug 伪装成被测对象失败"的形态已写进 PRD §6.2.1 义务 5（终局事件
+不回退）：首事件前失败 → 5xx + JSON 原因（exit 2）；首事件后失败 → 流内
+`error` + `run.finished(status=error)`；上游 200 但无 finish chunk 同样补终局事件。
+护栏是 `tests/test_shim_server.py`（真 TCP + 假上游，跨 `server.py` × `translator.py`
+的拼接面）——原 12 条转译单测全绿而链路恒空流，正是"按模块算覆盖面"的盲区。
+
 **为什么把 MCP/command 单列**：`security/evaluator.py:209-223` 明确要求
 `tool_names` / `mcp_names` / `command_calls` 三路**逐条透传**，
 注释里写了原话 —— `forbidden_mcp` 曾因 runner 不传 `mcp_names` 而恒 pass。

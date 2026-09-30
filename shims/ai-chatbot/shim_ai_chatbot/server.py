@@ -10,17 +10,25 @@
 并发闸默认 4（< 被测平台 CHAT_MAX_CONCURRENCY=5，B4）。
 
 运行：uv run python shims/ai-chatbot/shim_ai_chatbot/server.py --port 8901 \
-        --upstream http://localhost:3000 [--model <name>] [--policy auto-approve]
+        --upstream http://localhost:3000 [--model <name>] [--policy auto-approve] [--timeout 300]
+
+不假绿纪律（联调实测教训）：shim 是**被测方一侧**，它对 harness 说的每句话都是
+被测事实。因此任何一条 /run 流都必须以 §8 的终局事件收场——
+  - 首个事件之前失败 → 5xx + JSON 原因（harness 判 InfraError / exit 2，运维看得到）
+  - 首个事件之后失败 → 流内 error + run.finished(status=error)（判 agent 失败）
+绝不出现"200 + 空流"：那与真实的 agent 失败在 harness 侧不可分辨。
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ipaddress
 import json
 import socket
 import threading
 import uuid
+from collections.abc import Iterator
 from http import HTTPStatus
 from http.client import HTTPConnection, HTTPSConnection
 from pathlib import Path
@@ -37,6 +45,10 @@ SETTINGS: dict = {
     "upstream": "http://localhost:3000",
     "model": None,  # 显式模型（A4：不依赖平台默认值）；None = 平台默认
     "policy": "auto-approve",  # 审批策略（B3：必须可追溯——本声明即策略的事实源）
+    # 单轮上游读超时（秒）。**必须有默认值**：早先只有 `--timeout` 的读点而无写点，
+    # 每次 /run 都在 `SETTINGS["timeout"]` 上抛 KeyError——头已发出，于是 harness 收到
+    # "200 + 空流"，五个 case 全判 AGENT_FAILURE，被测平台一次都没被调用（联调实测）。
+    "timeout": 300.0,
     "allow_public_upstream": False,
 }
 
@@ -202,10 +214,12 @@ def _iter_platform_events(body: dict, timeout: float):
     conn.close()
 
 
-def _run_stream(session: dict, message: str) -> dict | bytes:
+def _run_stream(session: dict, message: str) -> tuple[Iterator[bytes], TranslationSession]:
     """一个 turn：POST → 转译 →（审批挂起则续跑）→ 输出 §8 SSE 字节流。
 
-    返回 (status, generator)；generator 逐块产出 SSE bytes。
+    返回 ``(generator, translator)``；generator 逐块产出 SSE bytes。translator 一并
+    交回，是给调用方的兜底出口——流中途出任何意外都要能从它手里拿到终局事件
+    （见 ``TranslationSession.fail``），而不是让连接就这么断在半路。
     """
     translator = TranslationSession(
         trace_id=session["conversation_id"],
@@ -224,56 +238,55 @@ def _run_stream(session: dict, message: str) -> dict | bytes:
         if SETTINGS["model"]:
             # A4：显式模型，不依赖平台默认值
             chat_body["modelName"] = SETTINGS["model"]
-        rounds = 0
+        emitted = False  # 是否已经发出过事件——决定失败时还能不能改状态码
         while True:
-            rounds += 1
-            last_error: str | None = None
-            chunks = None
+            failure: Exception | None = None
             try:
                 chunks = _iter_platform_events(chat_body, timeout=float(SETTINGS["timeout"]))
                 for chunk in chunks:
                     for event in translator.feed(chunk):
+                        emitted = True
                         yield _sse(event)
                     if translator.finished:
                         break
-            except RuntimeError as exc:
-                last_error = str(exc)
+            except (OSError, RuntimeError) as exc:
+                # 上游非 200（402 license / 500…）、连接被拒、流中途断开、载荷不是 JSON。
+                failure = exc
             if translator.finished:
                 return
-            if last_error is not None:
-                # 上游非 200（402 license / 500…）：转成流内 error + run.finished(status=error)。
-                # harness 对流内 error 判 AGENT_FAILURE——license 类其实属基础设施，但 v1 的
-                # /health 已把 license 状态前置暴露（unhealthy → exit 2），此处兜底保证不假绿。
-                yield _sse(
-                    translator._event("error", {"message": last_error})  # noqa: SLF001
-                )
-                yield _sse(
-                    translator._event(
-                        "run.finished",
-                        {"status": "error", "output": ""},
-                        parent=translator._root_id,
-                    )
-                )
+            if failure is not None:
+                if not emitted:
+                    # 第一个事件都还没发出去：状态码仍可改，**向上抛**让调用方发 5xx。
+                    # license 无效、上游连不上都属基础设施故障——harness 该判 exit 2
+                    # （"环境没起来"），而不是把 SUT 判成"任务做失败了"。
+                    raise failure
+                # 已经发过事件：状态码改不了，只能如实补上流内终局事件。harness 对流内
+                # error 判 AGENT_FAILURE——不如 5xx 精确，但绝不假绿（B1 兜底语义）。
+                reason = f"upstream failure: {type(failure).__name__}: {failure}"
+                for event in translator.fail(reason):
+                    yield _sse(event)
                 return
             if translator.suspended:
                 translator.suspended = False
                 resume_message = translator.build_resume_message()
                 if resume_message is None:
-                    yield _sse(
-                        translator._event(
-                            "error",
-                            {"message": "approval suspended but cannot build resume message"},
-                        )
-                    )
+                    for event in translator.fail(
+                        "approval suspended but cannot build resume message"
+                    ):
+                        yield _sse(event)
                     return
                 chat_body = {
                     "conversationId": session["conversation_id"],
                     "message": resume_message,
                 }
                 continue
+            # 上游以 200 收场却没给 finish chunk：同样是协议违约。不静默 return——
+            # 一条没有终局事件的流在 harness 侧与"agent 崩了"不可分辨（不假绿）。
+            for event in translator.fail("upstream stream ended without a finish chunk"):
+                yield _sse(event)
             return
 
-    return generate()
+    return generate(), translator
 
 
 def _cancel(session: dict) -> tuple[int, dict]:
@@ -304,11 +317,24 @@ def build_handler_class():
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
-            self.wfile.write(payload)
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                # 对端可能已经不在了：harness 在 case 超时后立刻 cancel，响应写下时
+                # 连接已由它这一侧关掉（联调实测 WinError 10053）。控制权不在 shim，
+                # 也不影响任何判定——不值得让它变成一条 40 行的异常栈。
+                self.wfile.write(payload)
 
         def _session(self) -> dict | None:
             sid = self.path.split("/")[-2] if self.path.endswith(("/run", "/cancel")) else ""
             return SESSIONS.get(sid)
+
+        def _terminate_stream(self, translator: TranslationSession, exc: Exception) -> None:
+            """首事件之后的失败：补上终局事件（best-effort，对端已断则无所谓）。"""
+            with contextlib.suppress(
+                BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError
+            ):
+                for event in translator.fail(f"shim failure: {type(exc).__name__}: {exc}"):
+                    self.wfile.write(_sse(event))
+                    self.wfile.flush()
 
         def do_GET(self) -> None:  # noqa: N802
             if self.path == "/health":
@@ -318,11 +344,30 @@ def build_handler_class():
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802
+            # 兜底：do_POST 抛出的任何异常都会让 BaseHTTPRequestHandler 关连接而不回
+            # 响应——对端看到的是"Empty reply from server"。它正是本文件的头号禁令
+            # （"不许静默失败"）在**请求侧**的等价物：接入口崩了，被测方却背上嫌疑。
+            # 联调实测触发过一次：请求体不是 UTF-8 时 `json.loads` 抛的是
+            # `UnicodeDecodeError` 而不是 `JSONDecodeError`，只捕后者就漏了。
+            try:
+                self._handle_post()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                return  # 对端已断，没人收
+            except Exception as exc:  # noqa: BLE001
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"error": "shim internal error", "detail": f"{type(exc).__name__}: {exc}"},
+                )
+
+        def _handle_post(self) -> None:
             length = int(self.headers.get("Content-Length") or 0)
             try:
                 request = json.loads(self.rfile.read(length) or b"{}")
-            except json.JSONDecodeError:
-                self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid JSON"})
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid JSON body"})
+                return
+            if not isinstance(request, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "body must be a JSON object"})
                 return
             if self.path == "/api/agent/sessions":
                 code, body = _create_session(request)
@@ -335,6 +380,26 @@ def build_handler_class():
                     return
                 message = str(request.get("message", ""))
                 with _SEM:  # B4：并发压在被测平台容量之下
+                    stream, translator = _run_stream(session, message)
+                    # 首个事件之前不承诺 200：此时状态码还改得了，失败应当被 harness
+                    # 判成基础设施故障（exit 2）而不是"agent 失败了"。
+                    try:
+                        first = next(stream)
+                    except StopIteration:
+                        self._json(
+                            HTTPStatus.BAD_GATEWAY,
+                            {"error": "shim produced no events", "detail": "上游未产生任何 chunk"},
+                        )
+                        return
+                    except Exception as exc:  # noqa: BLE001 — 任何意外都不许伪装成空流
+                        self._json(
+                            HTTPStatus.BAD_GATEWAY,
+                            {
+                                "error": "shim upstream failure",
+                                "detail": f"{type(exc).__name__}: {exc}",
+                            },
+                        )
+                        return
                     self.send_response(HTTPStatus.OK)
                     self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Cache-Control", "no-cache")
@@ -342,11 +407,20 @@ def build_handler_class():
                     self.end_headers()
                     self.close_connection = True
                     try:
-                        for piece in _run_stream(session, message):
+                        self.wfile.write(first)
+                        self.wfile.flush()
+                        for piece in stream:
                             self.wfile.write(piece)
                             self.wfile.flush()
-                    except (BrokenPipeError, ConnectionResetError):
+                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                        # 对端已断（典型：case 超时后 harness 取消这一轮）。没有收件人，
+                        # 终局事件无处可送——这不是"静默截断"，是没人听了。
                         return
+                    except Exception as exc:  # noqa: BLE001 — 见下：终局事件必须留下
+                        # 首事件之后失败：头已发出，状态码改不了；用流内终局事件如实收场。
+                        # 「静默截断」在 harness 侧只表现为"流提前结束"，与真实 agent 失败
+                        # 不可分辨——shim 是 SUT 一侧，不许制造这种模糊。
+                        self._terminate_stream(translator, exc)
                 return
             if self.path.endswith("/cancel"):
                 session = self._session()
@@ -379,18 +453,28 @@ def main() -> None:
         "--policy", default="auto-approve", choices=["auto-approve"], help="审批策略（B3 可追溯）"
     )
     parser.add_argument(
+        "--timeout",
+        type=float,
+        default=SETTINGS["timeout"],
+        help="单轮上游读超时（秒），覆盖到下一个 chunk 的等待",
+    )
+    parser.add_argument(
         "--allow-public-upstream", action="store_true", help="允许公网上游（默认仅回环/私网）"
     )
     args = parser.parse_args()
     SETTINGS["upstream"] = args.upstream
     SETTINGS["model"] = args.model
     SETTINGS["policy"] = args.policy
+    SETTINGS["timeout"] = args.timeout
     SETTINGS["allow_public_upstream"] = args.allow_public_upstream
     candidates = _upstream_candidates(args.allow_public_upstream)
     server = serve(args.host, args.port)
     print(f"shim-ai-chatbot listening on http://{args.host}:{args.port} → {args.upstream}")
     print(f"upstream candidates: {candidates}")
-    print(f"approval policy: {args.policy}; model: {args.model or 'platform-default'}")
+    print(
+        f"approval policy: {args.policy}; model: {args.model or 'platform-default'}; "
+        f"turn timeout: {args.timeout:g}s"
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
