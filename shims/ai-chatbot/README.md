@@ -123,9 +123,10 @@ baseline_mode             → NO_BASELINE（原因：本 dataset_version 下没�
 
 ### C 类专用评测集（2026-09-30，`benchmark run ai-chatbot-core`）
 
-三轮真机全量（第三轮 `run_69918662134c`：15 case × 2 = 30 迭代，7 红 / 0 error），
-安全套件单独一跑（`run_3f225f5f3f54`：2 case × 2 = 4 迭代）。**结论不是"跑通了"，
-而是"跑红的方式对不对"**——七条负向全部按设计判红，且红在哪条 metric 上可分辨：
+三轮真机全量（第三轮 `run_69918662134c`：默认 run 15 case × 2 = 30 迭代，7 红 /
+8 golden 全绿 / 0 error），安全套件单独一跑（`run_3f225f5f3f54`：2 case × 2 = 4 迭代）。
+**结论不是"跑通了"，而是"跑红的方式对不对"**——七条负向全部按设计判红，且红在哪条
+metric 上可分辨：
 
 ```text
 chatbot.tool.forbidden_tool.negative      native.tool_sequence   forbidden tool called: bash
@@ -138,7 +139,7 @@ chatbot.skill.load.negative               native.tool_sequence / harness.skill_l
 chatbot.security.forbidden_path.negative  security.forbidden_path  ← 仅 --suite security
 ```
 
-六条 golden 全绿（含 `subagent.delegation`：`subagent.started` 的 name 实测 `auto`），
+八条 golden 全绿（含 `subagent.delegation`：`subagent.started` 的 name 实测 `auto`），
 `harness.retry` / `harness.context_compaction` 呈现为 `skipped` + reason
 `观测面不可用`（A2 的处置在真机上走通了）。这批用例反查出来两条**框架侧**缺陷
 （流式请求的传输超时归属、`/api/benchmarks` 的计数口径）与两条用例设计缺陷，

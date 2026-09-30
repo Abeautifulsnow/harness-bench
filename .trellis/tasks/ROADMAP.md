@@ -128,7 +128,7 @@ workdir 透传、基线守卫、文档条款、转译 shim、C 类专用评测�
 | A1 workdir 透传 | `_open_session` 经 `SessionContext.extra["workdir"]` 把 fixture 沙箱交给被测方（逐迭代独立）；http_adapter 响应体解析 `workdir_accessible` 回执：False → InfraError（exit 2），缺失 → run 级 warning（未知 ≠ 可达）；E4：extra 不透明，`project_dir` 类具名字段被边界测试禁止 | ✅ 本轮 |
 | D 文档条款 | PRD §3.2/§6.2.1/§6.3/§7.1/§7.2/§8、Spec §3.3/§4.3/§6.1/§12.1.1/§12.4/§17.3.1/§19.1.2、quality-guidelines 外部接入三条、README 外部平台最小路径、`docs/external-agent-integration-guide.md`（新增） | ✅ 本轮 |
 | B 转译 shim | ai-chatbot 侧测试组件（四端点契约 + §8 词汇归一化 + 审批策略 + 观测面声明）——已落地本仓 `shims/ai-chatbot/`（translator 零依赖可测 + 纯标准库四端点）；**联调已验证**：审批续跑闭环 approve/deny 两条路径（第七轮，见下）、父级直连 bash output、MCP/skill 流上形状（第六轮）。**已实现 auto-approve / auto-deny**；审批「答案」注入通道已实测但 shim 未实现（C 类需要时再补） | ✅ 落地 |
-| C 专用评测集 | `evals/datasets/chatbot-core/`（16 case × repeat 2）+ `evals/benchmarks/ai-chatbot-core.yaml` + `evals/suites/chatbot.yaml` + profile 两档（`chatbot-plain` / `chatbot-strict`）+ `tool-surface.yaml` 冻结工具面 + 护栏 `tests/test_chatbot_dataset.py`（24 条）。**三轮真机全量**（15 case 默认 run / 32 迭代）：七个可解释的 canary 全部按设计判红、六条 golden 全绿、观测面缺口呈现为 skipped+reason。五条实测结论见 change-plan §3「第五轮修订」 | ✅ 落地 |
+| C 专用评测集 | `evals/datasets/chatbot-core/`（16 case × repeat 2）+ `evals/benchmarks/ai-chatbot-core.yaml` + `evals/suites/chatbot.yaml` + profile 两档（`chatbot-plain` / `chatbot-strict`）+ `tool-surface.yaml` 冻结工具面 + 护栏 `tests/test_chatbot_dataset.py`（24 条）。**三轮真机全量**（默认 run 15 case × 2 = 30 迭代，7 条 canary 全红 / 8 条 golden 全绿；安全两条由 `--suite security` 单独跑）：观测面缺口呈现为 skipped+reason。五条实测结论见 change-plan §3「第五轮修订」 | ✅ 落地 |
 | 第 0 步冒烟 | 直连 `POST /api/chat` 的运行时行为验证（chunk 时序 / 402 时点 / 审批收尾 / `id===toolCallId` / usage 时机），shim 写码前的第一优先动作 | ✅ 已执行（`scripts/smoke-agent-protocol.py`，五条运行时行为已落定） |
 
 ### 联调首轮实测（2026-09-30，见下方「执行中的发现」5）
