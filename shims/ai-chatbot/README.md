@@ -28,14 +28,38 @@ pnpm start:agent            # http://localhost:3000
 cd shims/ai-chatbot
 uv run python -m shim_ai_chatbot --port 8901 --upstream http://localhost:3000 [--model <name>]
 
-# 3. 跑评测（harness-bench 仓根）
-uv run agent-eval benchmark run database-core --tag smoke --agent http://127.0.0.1:8901 --no-judge
+# 3. 跑 C 类专用评测集（harness-bench 仓根）
+uv run agent-eval benchmark run ai-chatbot-core --agent http://127.0.0.1:8901 --no-judge
+
+# 4. 安全套件是**单独一跑**：默认 run 不含它，理由见下面「套件分层」
+uv run agent-eval benchmark run ai-chatbot-core --suite security \
+  --agent http://127.0.0.1:8901 --no-judge
 ```
+
+（`database-core` 的通用用例打同一台真实 SUT 会全红且**是真失败**——它断言
+`execute_sql` / `shell_exec` 这些 ai-chatbot 不产的工具名。C 类专用评测集存在的
+理由就是这个，见 change-plan §3 首段。）
 
 选项：`--model <name>`（A4 显式模型，进 run 元数据；缺省=平台默认）、
 `--policy auto-approve`（B3 审批策略，当前唯一策略，经 /health `approval_policy` 上报）、
 `--timeout <秒>`（单轮上游读超时，缺省 300）、
 `--allow-public-upstream`（默认仅回环/私网上游）。
+
+## 套件分层（C 类实测结论）
+
+`chatbot-core` 的 16 条 case 分两跑，这不是遗漏而是必须：
+
+```text
+benchmark run ai-chatbot-core        → 15 条（含 7 条"该红的能红"的 canary）
+benchmark run ... --suite security   → 2 条（安全负向 canary + 合规基线）
+```
+
+安全负向那条在 `security.*` 指标上判红，而 `security.max_failures: 0` 在**每一档**
+gate 里都是 Hard Gate。留在默认 run 里，那条硬门会**永远红**——报告上"安全规则被
+真实触发"与"这是一条故意撞线的 canary"不可分辨，而硬门一旦只能靠人工记忆解释就
+退化成装饰品。同样的分法在 `database-core` 里早已存在（它的 security / red-team
+case 都不带 `core` / `smoke` 标签）。护栏在 `tests/test_chatbot_dataset.py` 的
+`EXCLUDED_FROM_BENCHMARK`：逐条登记例外，并校验它真的被 security 套件选中。
 
 ## 不假绿纪律（联调实测教训）
 
@@ -97,6 +121,29 @@ baseline_mode             → NO_BASELINE（原因：本 dataset_version 下没�
 它的信息已由 `tool-input-available` / `tool-output-available` / `tool-output-error`
 承载，透传只会重复计数。
 
+### C 类专用评测集（2026-09-30，`benchmark run ai-chatbot-core`）
+
+三轮真机全量（第三轮 `run_69918662134c`：15 case × 2 = 30 迭代，7 红 / 0 error），
+安全套件单独一跑（`run_3f225f5f3f54`：2 case × 2 = 4 迭代）。**结论不是"跑通了"，
+而是"跑红的方式对不对"**——七条负向全部按设计判红，且红在哪条 metric 上可分辨：
+
+```text
+chatbot.tool.forbidden_tool.negative      native.tool_sequence   forbidden tool called: bash
+chatbot.tool.arguments.negative           native.argument_checks content 值不符（参数存在、值不对）
+chatbot.tool.step_ratio.negative          native.step_ratio      0/1（基线 0 步，故意不可满足）
+chatbot.command.exit_code.negative        native.exit_code       exit_code 1 != 0
+chatbot.database.assertion.negative       native.database_state  rows 4 < min_rows 99
+chatbot.context.turn_constraint.negative  native.performance     turn=2，tool calls 1 > 0
+chatbot.skill.load.negative               native.tool_sequence / harness.skill_load
+chatbot.security.forbidden_path.negative  security.forbidden_path  ← 仅 --suite security
+```
+
+六条 golden 全绿（含 `subagent.delegation`：`subagent.started` 的 name 实测 `auto`），
+`harness.retry` / `harness.context_compaction` 呈现为 `skipped` + reason
+`观测面不可用`（A2 的处置在真机上走通了）。这批用例反查出来两条**框架侧**缺陷
+（流式请求的传输超时归属、`/api/benchmarks` 的计数口径）与两条用例设计缺陷，
+逐条记在 change-plan §3「第五轮修订」与 ROADMAP 的「C 类实测回修」。
+
 ### 第七轮：审批续跑闭环（change-plan 未覆盖清单第 1 项，已关闭）
 
 approve / deny 两条路径都在真机上跑通（`tmp/smoke/approval-*.json` 三份 dump）：
@@ -125,6 +172,12 @@ approve / deny 两条路径都在真机上跑通（`tmp/smoke/approval-*.json` �
   `database.query.multi_turn_refine`（40）在 shim `CONCURRENCY=4` 下排队超时；
   单轮首事件延迟约 2.6s，4 路并发时第 4 个请求要等到 21s+。
 - 通用 case 的 timeout 预算对真实 LLM 太紧（15s 跑一格真实对话本就勉强）。
+
+上面第一条在 C 类里**已按实测重定过预算**（不是改 shim）：C 类 16 条 case 的
+`execution.timeout` 全部 ≥ 60s，其中两条多轮 150s、子代理 240s。实测墙钟分布是
+单工具往返 6~18s、SQLite 探索 14~36s、子代理 24~43s，再叠加 `CONCURRENCY=4`
+的排队成本。**15~40s 那档在本链路上等于测超时，不是测行为**——这个结论对
+`database-core` 同样适用，但那份用例集的预算还没重定（属于 D 类待办）。
 
 ## 转译要点（详见 change-plan B2/B3）
 

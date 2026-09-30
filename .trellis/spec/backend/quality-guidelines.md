@@ -217,6 +217,28 @@ Gate。守住五条：
    用了会以 infra error 收场，不是"暂时没数据"。
 5. **维度扩展的顺序**：先想清楚"拿什么断言"，再动手加 case。写不出真断言的维度
    应标注为**受限覆盖**并记录缺口，不要造只会"输出里出现某个词"就算过的假覆盖。
+6. **负向 case 的断言落在哪个 metric 上，就该用哪个 profile**（2026-09-30，C 类实测）。
+   `CaseStatus.FAIL` 的判据是 `blocking_failed`，而 `blocking` 归 Profile 决定
+   （Spec §17.2）：一条负向 case 若把期望声明在 `harness.*` 上、却挂在
+   `harness.*` 全部 `blocking=false` 的档里，那条 metric 判 fail 而 **case 仍是
+   PASS**——恒绿的负向用例与"断言写对了、agent 也合规"在报告里完全同形，
+   是本条要拦的假绿换了个发生位置（从插件实现搬到了档位选择）。
+   先例：`database-core` 的 `skill.priority.wrong_order` 用 `strict` 档、
+   `chatbot-core` 的负向用 `chatbot-strict`。机械护栏：case 用 `metric_params`
+   声明了对某插件指标的期望，该指标就必须在该 case 的 profile 里 `blocking=true`
+   （`tests/test_chatbot_dataset.py::TestAssertionsCanActuallyFail`），不留例外——
+   有例外就没法机检。`native.*` 不在此列：它们的阻断权由平台固定。
+7. **"故意不可满足"要真的不可满足**（同上实测）。需要"理想值"的连续型断言
+   （`step_efficiency` 的 `baseline_steps`）只要理论值与实测值能相等，用例随时
+   失去判别力：ChatBot 的步数 canary 原写 `baseline_steps: 1`，真机恰好
+   `tools=1` → `1 <= 1` → **恒绿**。改法是让声明与被测方必须做的事互相矛盾
+   （`baseline_steps: 0` 配"必须用 bash 执行"的题面），而不是期待 agent 表现差。
+8. **会撞安全硬门的 canary 单独一跑**（同上）。`security.max_failures: 0` 在每档
+   gate 里都是 Hard Gate；一条故意违规的安全 case 留在默认 run 里会让那条硬门
+   **永远红**，报告上"安全规则被真实触发"与"这是一条撞线 canary"不可分辨，而
+   后者只能靠人工记忆解释——硬门就退化成装饰品。同类 case 摘掉默认套件的标签，
+   由 `--suite security` 单独执行（`database-core` 的既有分法），并在套件选中侧的
+   测试里逐条登记例外 + 校验它真的被目标套件选中（区分"刻意排除"与"忘了挂标签"）。
 
 ## 断言有效性不变式（2026-09-23 review #I01–#I04 的教训）
 
@@ -264,6 +286,14 @@ Read 工具、certutil）眼里是坏字节（`E902 stream did not contain valid
 `cat <file> | ruff check --stdin-filename <name> -`（cat 阵营读到的字节可信）；
 `ruff check .` 的 E902 若只落在内容已验证的文件上，不视为回归。若范围扩大，
 先跑 `chkdsk` 再怀疑代码。
+
+**2026-09-30 补记（同一现象的第二种成因，两者要分开）**：走 Write/Edit 工具改过的
+`runner.py` / `harness.py` / `test_runner.py` 等文件**真的变成了 CRLF**（
+`b.count(b"\r\n") == b.count(b"\n")`，全文件每一行都是 CRLF），与上面的"读取器
+分叉"不同——这次是内容问题，`git diff` 会显示"整文件重写"。修法是把字节里的
+`\r\n` 换成 `\n`（只对全 CRLF 文件做，断言无裸 LF）而不是用 Write 重建（重建会
+再走一遍同一个转换）。判别口诀：**全 CRLF 且有 `\r\n` = 内容问题，可修；
+python/git 读到 LF 而 ruff 报 E902 = 读取期问题，别动它。**
 
 ## 外部接入约束（2026-09-29，change-plan A2/A3/B2 的固化）
 

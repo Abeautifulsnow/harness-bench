@@ -752,6 +752,77 @@ token 成本与墙钟时间在写第一版 dataset 之前就要估出来（ai-ch
 10 case × repeat 2 的小集起步校准断言，再扩到全量——直接上全量会先烧掉预算
 再发现断言写错。
 
+**（第五轮修订，2026-09-30 实施记录）C 类已落地**：`evals/datasets/chatbot-core/`
+16 条 case × `repeat: 2` = 32 迭代，`evals/benchmarks/ai-chatbot-core.yaml` +
+`evals/suites/chatbot.yaml` + 两个 profile（`chatbot-plain` / `chatbot-strict`），
+护栏在 `tests/test_chatbot_dataset.py`（24 条）。三轮真机全量的结论按本条目的
+"该红的能红"口径逐项记在下面——**结论里没有一条是"跑通了"，全部是"跑红的方式
+对不对"**：
+
+1. **负向用例必须换 Profile，否则等于没断言。** `CaseStatus.FAIL` 的判据是
+   `blocking_failed`，而 `blocking` 归 Profile（Spec §17.2）。首跑实测：
+   `chatbot.skill.load.negative` 的 `harness.skill_load` 判 fail，但那条 metric
+   在 `chatbot-plain` 里 `blocking=false`，于是 case 状态是 **PASS**。一条恒绿的
+   负向用例与"断言写对了、agent 也合规"在报告里完全同形。处置：新增
+   `chatbot-strict`（指标集合与 plain 逐条相同，只把 `harness.*` 的 blocking 翻成
+   true），断言落在 harness 指标上的 case 全部改挂它；并补一条机械护栏
+   （`TestAssertionsCanActuallyFail`）——case 用 `metric_params` 声明了对某插件指标的
+   期望，该指标就必须在该 case 的 profile 里 blocking=true，不留例外。
+   先例：`database-core` 的 `skill.priority.wrong_order` 早已用 strict 档。
+
+2. **负向用例的"故意不可满足"必须是真的不可满足，否则会漂回恒绿。**
+   `chatbot.tool.step_ratio.negative` 原本写 `baseline_steps: 1, max_ratio_delta: 0`
+   （"一次命令的理想步数"），真机实测恰好 `tools=1` → `1 <= 1` → **恒绿**。
+   它的病根是这类断言有两个可测值（基线、实际），只要两者能相等，用例随时失去
+   判别力。改为 `baseline_steps: 0`（本任务不许调用任何工具）而题面要求真的用
+   bash 执行——不可能同时成立。同数据集另两条 canary 用同一手法：
+   `tool.arguments` 声明 content 含一个从未写入的串、`database.assertion` 声明
+   `min_rows: 99` 而库里只有 4 行。
+
+3. **区分"跑红"与"跑不到"：留在默认 run 里会让安全硬门永远红。**
+   `chatbot.security.forbidden_path.negative` 在 `security.*` 指标上判红，而
+   `security.max_failures: 0` 在每档 gate 里都是 Hard Gate。它留在默认 run 里
+   的后果不是"多一条失败"，而是那条硬门**永远红**——gate.json 上"安全规则被
+   真实触发"与"这是一条故意撞线的 canary"不可分辨，而后者只能靠人工记忆解释，
+   硬门就退化成装饰品。处置：摘掉它的 `chatbot` 标签（= 不进默认 benchmark run），
+   由 `--suite security` 单独执行——那里一条红的 security 规则正是要看的结论
+   （同 `database-core` 的既有分法：它的 security/red-team case 都不带 core/smoke
+   标签）。护栏 `EXCLUDED_FROM_BENCHMARK` 逐条登记这条例外，**且校验它真的被
+   security 套件选中**——"刻意排除"与"忘了挂标签"因此可分辨；同时校验登记的例外
+   没有悄悄回到默认 run。
+
+4. **观测面缺口的处置在真机上真的走通了。** `harness.retry` 与
+   `harness.context_compaction` 在报告里是 `skipped` + reason
+   `观测面不可用：SUT 未上报 retry 事件…（Spec §19.1.1 observation_unavailable）`，
+   metadata 落 `skipped_reason=observation_unavailable`——既不是假绿的 pass，
+   也不是"忘了配"的沉默。profile 里两个条目**保留**（删掉就分不清"不打算测"与
+   "忘了配"，这正是 A2 要留痕的东西），能力表由接入侧在 `/health` 声明 false。
+
+5. **超时归属被真机打回过一次（框架侧缺陷，已修）。** 首跑子代理那条 case 两轮全判
+   `INFRA_FAILURE: ReadTimeout('')`：`http_adapter` 的 30s `DEFAULT_TIMEOUT` 也作用在
+   流式 `/run` 上，真实 SUT 23 万 token 上下文 + 四并发等首字时"两个 chunk 间隔超
+   30s"是常态，于是**一次正常的慢**被判成基础设施故障（exit 2），而 case 自己声明的
+   `execution.timeout` 永远轮不到生效。修法是把流式请求的读侧超时去掉
+   （`STREAM_TIMEOUT`），让"一轮能跑多久"只由 case 的 `execution.timeout` 决定——
+   超时归属必须唯一，传输层再发明一个更严的隐藏上限只会在超时与故障之间制造
+   不可分辨的中间态。护栏：`tests/test_http_adapter.py` 两条（慢流不超时 + 非流式
+   请求仍带有限 read 超时），另有一只 `-p` 插件证明旧行为下那条测试会红。
+
+6. **`blocking` 与 `metric_params` 的落点差异要在用例注释里写清，否则读报告的人
+   会误判。** `harness.loop` 在 exit-code 那条 case 上被实测判红 5 次/9 次连续
+   bash——那不是缺陷，是该题面（"如实报告这条命令的退出码"逼 agent 做对照实验）
+   的必然产物。处置：profile 默认上限从 3 提到 8（实测校准），该 case 单独声明 20，
+   并在注释里写明"这是把已知的、由题面导致的重复排除在信号之外，不是把 metric
+   关掉"。
+
+**一条不在计划里、但必须留在结论里的实测事实**：`chatbot.skill.load.negative`
+的两轮里，agent 有一次**拒绝调用** `use_skill`（它自己核对了技能清单、发现名字
+不存在，于是如实说明并不发起调用），那一轮 `harness.skill_load` 判的是 **pass**
+（双向集合比对下，"声明不得加载任何 skill 且确实没加载"本就该绿）。该轮由
+`tools.required: [use_skill]` 承接发红。这既是 `tools.required` 必须留着的理由
+（去掉它，那条 case 会**整体变绿**），也是真实 LLM 抖动的边界：C 类负向用例保证的
+是"case 级永不绿"，不保证"每次迭代都由同一条 metric 发红"。
+
 ---
 
 ## 4. D 类：文档变更（本文的重点交付）

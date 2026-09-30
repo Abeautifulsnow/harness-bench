@@ -43,6 +43,24 @@ uv run agent-eval benchmark run <benchmark> --no-judge      # 先跑确定性指
 #    （warnings 里不应有协议违规；被观测面跳过的 metric 会标 skipped 而非 pass）
 ```
 
+现成的落地例子在本仓 `shims/ai-chatbot/`（转译 shim）与 `evals/datasets/chatbot-core/`
+（该平台的专用评测集）。**专用评测集不可省**：通用 case 假设的工具名与 fixture
+形状来自别的被测方，打在新 SUT 上会全红——而且是真失败，不是接入故障
+（原因见 [change-plan §3](docs/external-agent-integration-change-plan.md)）。
+
+写专用评测集时这三条最常踩（都有实测记录）：
+
+- **工具名逐字取自 SUT 的 registry**，并冻结成一份名单（`tool-surface.yaml`）
+  用测试核对：拼错的后果是 `required` 恒红（显性）或 `forbidden` 恒绿（隐性）。
+  运行期拼装的名字（MCP / connector）只登记为占位符，绝不逐字点名。
+- **负向用例必须真的红**，且不能恒绿。注意两个坑：断言落在 harness 指标上时，
+  它所在的 profile 必须把该指标设为 `blocking`，否则 metric 判 fail 而 case 仍是
+  PASS；"故意不可满足"的声明要真的不可满足（例如 `baseline_steps: 0` 配一个
+  必须调工具的题面），否则会随实测值漂回恒绿。
+- **会撞安全硬门的 canary 要单独一跑**（`--suite security`）。`security.max_failures: 0`
+  是每档 gate 的 Hard Gate，一条故意违规的 case 留在默认 run 里会让那条硬门永远红，
+  "规则被触发"与"撞线 canary"就分不清了。
+
 ## 开发
 
 ```bash

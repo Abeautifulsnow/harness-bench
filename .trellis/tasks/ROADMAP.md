@@ -113,8 +113,10 @@ GET /api/cases        100ms     53ms
 ## 外部 Agent 平台接入（2026-09-29 登记，change-plan `docs/external-agent-integration-change-plan.md`）
 
 需求源是评审已过的变更计划（四轮校准）。本次接入把框架侧缺陷一次性补齐，
-**框架侧全部落地**（观测面能力协商、性能三结局、词汇校验、边界机制、
-workdir 透传、基线守卫、文档条款）；接入侧两块不在本仓：
+**框架侧与接入侧全部落地**（观测面能力协商、性能三结局、词汇校验、边界机制、
+workdir 透传、基线守卫、文档条款、转译 shim、C 类专用评测集）。C 类跑完后
+**又回修了框架侧两处**（流式请求的传输超时归属、`/api/benchmarks` 的 case 计数
+口径），见下面「C 类实测回修」：
 
 | 切片 | 内容 | 状态 |
 | --- | --- | --- |
@@ -126,7 +128,7 @@ workdir 透传、基线守卫、文档条款）；接入侧两块不在本仓：
 | A1 workdir 透传 | `_open_session` 经 `SessionContext.extra["workdir"]` 把 fixture 沙箱交给被测方（逐迭代独立）；http_adapter 响应体解析 `workdir_accessible` 回执：False → InfraError（exit 2），缺失 → run 级 warning（未知 ≠ 可达）；E4：extra 不透明，`project_dir` 类具名字段被边界测试禁止 | ✅ 本轮 |
 | D 文档条款 | PRD §3.2/§6.2.1/§6.3/§7.1/§7.2/§8、Spec §3.3/§4.3/§6.1/§12.1.1/§12.4/§17.3.1/§19.1.2、quality-guidelines 外部接入三条、README 外部平台最小路径、`docs/external-agent-integration-guide.md`（新增） | ✅ 本轮 |
 | B 转译 shim | ai-chatbot 侧测试组件（四端点契约 + §8 词汇归一化 + 审批策略 + 观测面声明）——已落地本仓 `shims/ai-chatbot/`（translator 零依赖可测 + 纯标准库四端点）；**联调已验证**：审批续跑闭环 approve/deny 两条路径（第七轮，见下）、父级直连 bash output、MCP/skill 流上形状（第六轮）。**已实现 auto-approve / auto-deny**；审批「答案」注入通道已实测但 shim 未实现（C 类需要时再补） | ✅ 落地 |
-| C 专用评测集 | ai-chatbot 工具面/fixture 形态的 dataset + profile/gate/suite，在 ai-chatbot 仓（`evals/` 数据随本仓走，具体用例依赖 shim 先行） | ⬜ 接入侧 |
+| C 专用评测集 | `evals/datasets/chatbot-core/`（16 case × repeat 2）+ `evals/benchmarks/ai-chatbot-core.yaml` + `evals/suites/chatbot.yaml` + profile 两档（`chatbot-plain` / `chatbot-strict`）+ `tool-surface.yaml` 冻结工具面 + 护栏 `tests/test_chatbot_dataset.py`（24 条）。**三轮真机全量**（15 case 默认 run / 32 迭代）：七个可解释的 canary 全部按设计判红、六条 golden 全绿、观测面缺口呈现为 skipped+reason。五条实测结论见 change-plan §3「第五轮修订」 | ✅ 落地 |
 | 第 0 步冒烟 | 直连 `POST /api/chat` 的运行时行为验证（chunk 时序 / 402 时点 / 审批收尾 / `id===toolCallId` / usage 时机），shim 写码前的第一优先动作 | ✅ 已执行（`scripts/smoke-agent-protocol.py`，五条运行时行为已落定） |
 
 ### 联调首轮实测（2026-09-30，见下方「执行中的发现」5）
@@ -140,6 +142,19 @@ shim 起在 8901、harness 指向它开跑之后，暴露的三个缺陷两个�
 | `fake://` 的历史 run 被选成真实 SUT 首个 run 的基线 | 框架 | ✅ 修：`models/run.endpoint_kind()` + 解析期候选过滤（§4.2 实现修正三）+ 比较期守卫（§3.3）；compare 的守卫链改**并列列出**全部不可比原因（原先 last-wins，同时踩两条时前一条消失） |
 | `test_api.py::test_regression_between_two_runs` 间歇失败（此前记为"发现的 1 的残余、14 轮探针未复现"） | 框架 | ✅ 定位并修：wall-clock 绝对下限是 `max(两侧) < 1ms`，**恰好 1.0ms 的一侧**不满足严格不等号 → 掉进相对阈值分支，`1.0 ↔ 0.6ms` 判 `improved`（-40% > 20%）。负载下实测的 5-case 均值分布确有整毫秒值（`0.6 / 6.0 / 7.4 / 8.0`），不是不可复现的"随机"——是边界。改为 `|Δ| ≤ 1ms` 或 `min(两侧) < 1ms` 两条判据，并同源下沉到 case 级 `_performance_diff`（那条进 Gate）。见 Spec §24.1 |
 | 审批续跑闭环（change-plan 未覆盖清单第 1 项）**从未实测**；`tool-output-denied` 无处理函数（被当方言丢弃） | shim | ✅ 第七轮实测并修：approve/deny 两条路径都在真机跑通；deny 的 `tool-output-denied` 载荷**只有 toolCallId**（原因只在请求侧 `approval.reason`）；原先丢弃它 → 被审批工具永不闭合 → builder 补成 `span never closed`，**一次「用户拒绝」被报告成「工具调用失败」**。现转 `tool.result{status:"denied"}`（denied ≠ error：工具没失败，是策略拒绝执行），bash 被拒时同时补 `command.finished`。`--policy auto-deny` 落地，两条路径都真实续跑 POST |
+
+### C 类实测回修（2026-09-30，跑完三轮真机全量后）
+
+C 类用例本身的问题逐条记在 change-plan §3「第五轮修订」；下表是**跑用例时反查出来的
+框架/接入侧缺陷**——四条都不在用例本身，而三条在框架：
+
+| 项 | 归属 | 处置 |
+| --- | --- | --- |
+| 子代理 case 两轮全判 `INFRA_FAILURE: ReadTimeout('')`（0 metric、latency 0） | 框架 | ✅ 修：`http_adapter.DEFAULT_TIMEOUT` 的 30s 读超时也作用在流式 `/run` 上，而真实 SUT 23 万 token 上下文 + 四并发等首字时"chunk 间隔 > 30s"是常态 → **正常的慢被报成基础设施故障**，且 case 自己的 `execution.timeout` 永远轮不到生效（两层超时的外层被传输层抢走）。新增 `STREAM_TIMEOUT`（读侧无上限、连接侧仍 10s）——超时归属唯一：一轮能跑多久只由 case 决定。护栏：`test_http_adapter.py` 两条（慢流不超时、非流式请求仍带有限 read），并有 `-p` 插件证明旧行为下那条测试确实会红 |
+| `/api/benchmarks` 的 `cases` 计数与 `/api/benchmarks/{name}/cases` 不一致（16 vs 15） | 框架 | ✅ 修：前者数的是 dataset 里的条数，后者数的是**套件选中**的条数。两者不等的案例真实存在（database-core 40 vs 24）——"目录里数得到、run 时跑不到"正是最该被看见的静默漏跑，在列表页把它算成已覆盖等于把缺口藏起来。统一走 `resolve_cases` |
+| `test_api.py` 把 benchmark 名单写死成 `["database-core"]` | 框架 | ✅ 修：目录端点本该自动收录新定义，写死使每加一个 dataset 就假红一次；改为"包含 + 有序 + 逐个 benchmark 校验计数与 dataset_id 自洽"。另：`TestCatalog` 之前只校验了一个 benchmark，目录里其余有坏的定义仍会显示正常 |
+| `file_state` 断言看不到 agent 写的文件（沙箱路径取错） | 框架 | ✅ 修（前序）：交给被测方的 workdir 必须是 provider 声明的那个（`handle.workdir`），不是 iteration 根。filesystem provider 把 fixture 拷进 `<iterN>/workspace`，用 iteration 根当沙箱会让 agent 在 fixture 之外工作，而 `file_state` 读的是 fixture 侧——**一次成功的写入被报成 FAIL 且报告里毫无异常** |
+| `shim` 的 `/health` 声明 `skill.loaded: true` 却从不发该事件；`SkillLoadEvaluator` 只查 missing 方向（`expected_loaded: []` 恒 pass） | shim + 框架 | ✅ 修（前序）：转译器从 `use_skill` 的 `tool.result` 载荷补发 `skill.loaded`；集合比对改为双向。两条都补了可发红的单测——后者正是现在 `chatbot.skill.load.negative` 能判红的前提 |
 
 ---
 
