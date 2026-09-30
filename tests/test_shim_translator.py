@@ -414,3 +414,144 @@ def test_event_envelope_matches_trace_event_schema() -> None:
     events = feed_all(session, basic_chunks())
     for event in events:
         assert TraceEvent.model_validate(event)
+
+
+# ---------------------------------------------------------------- 审批拒绝（deny）
+
+def denied_resume_chunks() -> list[dict]:
+    """实测（2026-09-30 第七轮联调，approval-deny.json 同形）：
+    拒绝的续跑流以 `tool-output-denied` 开头，**只有 toolCallId**。
+    """
+    return [
+        ev("start", messageId="msg-4c"),
+        ev("tool-output-denied", toolCallId="call_a1"),
+        ev("start-step"),
+        ev("text-start", id="txt-1"),
+        ev("text-delta", id="txt-1", delta="好的，那我不追问了。"),
+        ev("text-end", id="txt-1"),
+        ev("finish-step"),
+        ev("finish", finishReason="stop"),
+    ]
+
+
+def test_tool_output_denied_closes_the_tool_span() -> None:
+    """拒绝必须落在流上：原先没这个处理函数 → 被当方言丢弃 → span 永不闭合。
+
+    builder 会把未闭合的 opening 在 run.finished 时收口成 "span never closed"，
+    于是一次"用户拒绝"被报告成"工具调用失败"。
+    """
+    session = make_session()
+    first = feed_all(session, approval_chunks())
+    session.suspended = False
+    resume = feed_all(session, denied_resume_chunks())
+
+    result = next(e for e in resume if e["type"] == "tool.result")
+    call = next(e for e in first if e["type"] == "tool.call")
+    assert result["parent_span_id"] == call["event_id"]  # 配对到原 tool.call
+    # denied 而非 error：工具没有失败，是策略拒绝了执行
+    assert result["data"]["status"] == "denied"
+
+    from agent_eval.models.events import TraceEvent
+    from agent_eval.trace.builder import TraceBuilder
+
+    builder = TraceBuilder(trace_id="t")
+    for raw in first + resume:
+        builder.feed(TraceEvent.model_validate(raw))
+    span = next(s for s in builder.build().spans if s.type == "tool")
+    assert span.status == "ok"  # 拒绝不是失败，不要把 span 判红
+    assert span.attributes["tool_status"] == "denied"  # 但事实必须可观测
+    assert span.finished_at is not None  # 已闭合，不是 "span never closed"
+
+
+def test_bash_denied_also_closes_the_command_span() -> None:
+    """bash 被拒时 command.* 是独立观测面，只补 tool.result 会留下永不闭合的 command span。"""
+    session = make_session()
+    events = feed_all(
+        session,
+        [
+            ev("start", messageId="msg-8"),
+            ev(
+                "tool-input-available",
+                toolCallId="call_b9",
+                toolName="bash",
+                input={"command": "rm -rf /tmp/x"},
+            ),
+            ev("tool-approval-request", approvalId="aitxt-z", toolCallId="call_b9"),
+            ev("finish", finishReason="tool-calls"),
+        ],
+    )
+    session.suspended = False
+    resume = feed_all(session, [ev("tool-output-denied", toolCallId="call_b9")])
+
+    command_finished = next(e for e in resume if e["type"] == "command.finished")
+    command_started = next(e for e in events if e["type"] == "command.started")
+    assert command_finished["parent_span_id"] == command_started["event_id"]
+    assert command_finished["data"]["status"] == "denied"
+    # 命令没跑 → 没有退出码。Spec §19.4：exit_code 断言据此判 skipped，不猜 0。
+    assert command_finished["data"]["exit_code"] is None
+
+
+def test_auto_deny_policy_produces_a_deny_resume_message() -> None:
+    """auto-deny：拒绝也走续跑 POST（拒绝是一次真实上游往返），消息里带 approved=false。"""
+    session = make_session(policy="auto-deny")
+    feed_all(session, approval_chunks())
+    assert session.suspended is True
+    assert session.decision == "deny"
+    message = session.build_resume_message()
+    assert message is not None
+    tool_part = next(p for p in message["parts"] if str(p.get("type", "")).startswith("tool-"))
+    assert tool_part["approval"]["approved"] is False
+    # reason 是拒绝原因的唯一落点：流上回来的 tool-output-denied 只有 toolCallId
+    assert "reason" in tool_part["approval"]
+
+
+def test_auto_approve_still_approves() -> None:
+    """两侧都要钉：新增 deny 分支不得把默认策略改掉。"""
+    session = make_session()
+    feed_all(session, approval_chunks())
+    assert session.decision == "approve"
+    message = session.build_resume_message()
+    tool_part = next(p for p in message["parts"] if str(p.get("type", "")).startswith("tool-"))
+    assert tool_part["approval"]["approved"] is True
+
+
+def test_second_approval_round_does_not_regress_the_first_tool_part() -> None:
+    """一轮里发生第二次审批时，第一次那个工具必须保持它的真实状态。
+
+    续跑消息是"整体覆盖"语义（平台按 part.state upsert），所以第二轮重建消息时，
+    已经执行完的工具必须是 `output-available`（带 output），**不能**因为遗留的
+    pending 条目被再次写成 `approval-responded`——那会让平台丢掉它的输出、
+    甚至重新执行一次。
+    """
+    session = make_session()
+    feed_all(session, approval_chunks())  # 第一轮：tool call_a1 挂起
+    first_message = session.build_resume_message()
+    assert first_message is not None
+
+    session.suspended = False
+    feed_all(
+        session,
+        [
+            ev("start", messageId="msg-4b"),
+            # 第一个工具批准后执行完
+            ev("tool-output-available", toolCallId="call_a1", output={"ok": True}),
+            # 第二个工具又要审批 → 再次挂起
+            ev(
+                "tool-input-available",
+                toolCallId="call_a2",
+                toolName="bash",
+                input={"command": "ls"},
+            ),
+            ev("tool-approval-request", approvalId="aitxt-def456", toolCallId="call_a2"),
+            ev("finish", finishReason="tool-calls"),
+        ],
+    )
+    assert session.suspended is True  # 第二轮挂起
+
+    message = session.build_resume_message()
+    assert message is not None
+    parts = {p.get("toolCallId"): p for p in message["parts"] if p.get("toolCallId")}
+    assert parts["call_a1"]["state"] == "output-available"
+    assert parts["call_a1"]["output"] == {"ok": True}
+    assert parts["call_a2"]["state"] == "approval-responded"
+    assert parts["call_a2"]["approval"]["id"] == "aitxt-def456"

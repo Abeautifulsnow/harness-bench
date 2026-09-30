@@ -542,7 +542,7 @@ health 必须把这两件事的区别暴露出来。
 | --- | --- | --- |
 | `run.started` / `run.finished` | `start` chunk / `finish` chunk + `[DONE]` | **实测已验证**：`finish` 带 `finishReason`（正常="stop"，审批挂起="tool-calls"——shim 靠它判"这轮在等人"）；缺 `run.finished` 会被 `runner.py:892` 判 agent 失败，必须可靠发出 |
 | `tool.call` / `tool.result` | `tool-input-available` / `tool-output-available` | **实测已验证**：`input` 已是解析后的对象，直接作 `data.arguments`；前置的 `tool-input-start`/`tool-input-delta`（入参流式增量）可忽略；**参数类与安全类断言全靠它** |
-| `tool.result`(错误/被拒) | **执行失败已实测（第六轮）**：`tool-output-error` **确实存在**于流上（第五轮"第一方源码零命中"的静态结论再次被运行时推翻，与 `tool-approval-request` 同一类误判），载荷 `{toolCallId, errorText}`，无 `output`——实测例：连接器工具报 `"Connector tool error: SQL query template is empty: use query template or sql field"`。**被审批拒绝（denied）仍未实测**：契约文档的形态是 tool part `state:'output-denied'` + `approval:{approved:false, reason}`（`zombie-approval-contracts.md` §25-47），deny 的 reason 从 `approval.reason` 取回；**审批续跑（第二轮 POST）的流上形状未实测**，shim 开发期第一优先补测 |
+| `tool.result`(错误/被拒) | **执行失败已实测（第六轮）**：`tool-output-error` **确实存在**于流上（第五轮「第一方源码零命中」的静态结论再次被运行时推翻，与 `tool-approval-request` 同一类误判），载荷 `{toolCallId, errorText}`，无 `output`——实测例：连接器工具报 `Connector tool error: SQL query template is empty: use query template or sql field`。**被审批拒绝（denied）已实测（第七轮）**：类型是 `tool-output-denied`，载荷**只有 `{toolCallId}`**——没有 `output`、没有 `errorText`、也没有 reason（reason 只回落在**请求侧**的 `approval.reason`）。它与 `tool-output-error` 是两件事：前者=策略拒绝执行（工具没有失败），后者=执行失败。shim 侧 status 取 `denied` 而非 `error`，否则一次「用户拒绝」会被报告成「工具调用失败」。**审批续跑（第二轮 POST）形状已实测**，见 B3 第七轮段 |
 | `mcp.call` / `mcp.result` | `toolName` **实测**（第五轮扩展）形如 `mcp__arxiv__search_papers`，前缀逐字出现在 toolName | **必须拆成独立事件**，不得折叠进 `tool.call`；输出为 MCP 协议形状 `{content:[{type:'text', text:<JSON 字符串>}], isError}`——text 需二次解码；`tool-input-start/available` 带 **`dynamic:true`** 标记（动态注册工具；静态工具无此字段） |
 | `command.started` / `command.finished` | `bash` 工具调用 | **实测（子代理内路径 + 第六轮父级直连）**：结果 JSON 含 `exitCode`/`stdout`/`stderr`/`command`；子代理内路径的 `result` 是**二次 JSON 编码的字符串**（shim 需解码后取 `exit_code`），**父级直连的 `output` 已是解析后的对象**（实测 `{stdout:"hello-from-bash\r\n", stderr:"", exitCode:0, command:"echo hello-from-bash"}`）。**关键修正**：非零退出**不走 `tool-output-error`**，仍是 `tool-output-available`，只在载荷里加 `error:true, message:"命令以退出码 7 结束"`（实测 `exit 7` → `{exitCode:7, error:true, message:"命令以退出码 7 结束"}`）。因此 `status` 不能无条件写 `ok`：`exitCode≠0` 或 `error==true` 时 `tool.result` / `command.finished` 都要按 error 报，否则报告上"退出码 7"与"调用成功"并存 |
 | `subagent.started` / `finished` | `data-sub-open` / `data-sub-done` | **实测已验证**：全事件族（open/text-delta/tool-call/tool-result/done）`id === toolCallId`；done 载荷含 `tokenUsage{input,output,total}`（A3：子代理侧的全量三分量）；中间事件族 `data-sub-text-delta`/`data-sub-tool-call`/`data-sub-tool-result` shim 可折叠或映射进子代理 span；另有 `data-sub-async`：父流不会再有 done，终态要查 `subagent_sessions`，shim 不得把它当丢事件 |
@@ -567,7 +567,7 @@ connectorId, toolName, requestId, toolCallId, durationMs?, error?}`。丢弃是�
 
 **第五轮未覆盖清单（shim 开发期补测，防止"已验证"被读成"全量已验证"）**：
 冒烟四场景只覆盖了当时的五条高风险未知项，**不是全工具面**。以下按优先级：
-1. **审批续跑闭环**：approve / deny 两条路径第二轮 POST 的流上形状（自动审批策略的实作前提）；deny 的 reason 在 `approval.reason`（静态）；
+1. ~~**审批续跑闭环**：approve / deny 两条路径第二轮 POST 的流上形状~~ —— **第七轮已关闭**（见 B3 第七轮段与 B2 表 `tool.result` 行）。
 2. **`data-sub-async`**（异步子代理）真实形状与 `subagent_sessions` 终态查询；**多轮会话**（同 conversationId 连续 POST）的流形状（多轮 case 前提）；
 3. ~~**父级直连 bash** 的 `tool-output-available.output` 形状~~ —— **第六轮已关闭**（见 B2 表 command 行；顺带修正了"非零退出走 error 通道"的错误预期）。
 
@@ -637,6 +637,41 @@ harness-bench 的协议里没有"等人"这个概念，`run.finished` 一到就�
 定一个自动策略（预置 `allow` 权限规则 / 自动批准 / 自动拒绝），并且：
 **策略必须写进 `SessionContext` 的 metadata 或 run 元数据，在报告里可追溯。**
 否则同一份用例在不同策略下测出来的是两个不同的系统，跨 run 比对失去意义。
+
+**（第七轮实测：审批续跑闭环，2026-09-30）** approve / deny 两条路径都在真机上跑通，
+四件事从推断变成事实：
+
+```text
+形状                      approve 路径                  deny 路径
+请求侧 approval           {id, approved: true}          {id, approved: false, reason}
+                          （无 reason 也被接受）         （reason 是本路径唯一落点）
+流上第一个 chunk          tool-output-available         tool-output-denied
+载荷                      {answers:{...}, timestamp}    {toolCallId}  ← 只有 id
+第二轮 finishReason       "stop"                        "stop"
+```
+
+三条实质结论：
+
+1. **续跑消息的形状正确且充分**：末条 assistant 消息 + `id`=start chunk 的 `messageId` +
+   `parts[]`（text part 带上 + tool part `state:'approval-responded'` + `approval:{id, approved}`）。
+   平台按 `approval.approved` 的**真假**分派两条路径——这就是被测平台 upsert 判据的运行时确认。
+   注意 `deny` 的 `reason` 不是可选项而是**唯一落点**：流上回来的 `tool-output-denied` 只有
+   toolCallId，拒绝原因在协议上只存在于请求侧。
+2. **拒绝不是失败，是正常路径**：deny 的续跑流以 `finish(finishReason="stop")` 干净收尾，
+   agent 随后如实降级作答（实测输出：「你选择了拒绝，所以我没有拿到任何答案，也不会擅自替你
+   假设输出格式」）。因此 §8 侧 `tool.result.status` 取 `denied`——builder 只在 `status=="error"`
+   时把 span 判红，denied 只落 `tool_status="denied"` 属性（可观测、不误判）。
+   原先 shim 没有这个处理函数 → 按方言丢弃 → 被审批工具永远等不到 closing 事件，builder 在
+   `run.finished` 时收口成 `span never closed (stream ended)`：一次「用户拒绝」被报告成「工具调用失败」。
+3. **挂起必须续跑，拒绝也是**：`auto-deny` 不是「跳过审批」——两条路径都要真实 POST 第二次
+   才能让上游接着跑完这一轮。把 deny 实现成「就地结束」会得到一条永远没有 agent 后续行为的流。
+
+**答案注入通道已实测**（B3 修订的实作验证）：`ask_user_question` 的答案经 `approval.reason`
+回传，形状 `JSON.stringify({answers})`，**`answers` 的键是问题全文**（`question` 字段）。
+实测两种键：用 `question` 全文作答 → 平台原样回显该 answers 对象、agent 按答案继续
+（实测输出把三个选择复述成表格）；用 `header`（短标题）作键 → 平台**同样原样回显**，
+不做键名校验。即：**写错键不会报错，只会得到一份「没收到答案」的降级行为**——用例作者按
+`header` 拼答案时会静默失效。这条要写进 C 类用例作者指南。
 
 **修订：审批的"答案"是测试输入，不只是执行策略。**
 `ask_user_question` 的回答会进入对话上下文并**改变 agent 的后续行为**——

@@ -855,3 +855,97 @@ Mimosa L2 复查把本轮 diff 里 3 行标为 SQL 注入，全部位于
 ### Next Steps
 
 - None - task complete
+
+
+## Session 13: 审批续跑闭环联调验证（change-plan 未覆盖清单第 1 项关闭）
+
+**Date**: 2026-09-30
+**Task**: 审批续跑闭环联调验证（change-plan 未覆盖清单第 1 项关闭）
+**Branch**: `main`
+
+### Summary
+
+approve/deny 两条路径真机跑通。实测：deny 的 tool-output-denied 载荷只有 toolCallId（原因只在请求侧 approval.reason）；shim 原先丢弃它 → 被审批工具永不闭合 → builder 补成 span never closed，一次「用户拒绝」被报告成「工具调用失败」。修：新增 _on_tool_output_denied 转 tool.result{status:denied}（denied≠error），bash 被拒补 command.finished；落地 --policy auto-deny（拒绝也是真实续跑）。答案注入通道实测：键必须是问题全文，用 header 不报错但静默失效。顺带修 build_resume_message 消费 _pending（第二轮审批不回退第一轮工具状态）。护栏 +7（含可红验证），全量 519 passed，ruff 绿。
+
+### Main Changes
+
+**交付**：change-plan §7 第五轮未覆盖清单第 1 项（审批续跑闭环）关闭 —— approve / deny 两条
+路径都在真机上跑通，并修掉顺带暴露的一个缺陷。
+
+### 实测发现（三份 dump 存档）
+
+| 形状 | approve 路径 | deny 路径 |
+| --- | --- | --- |
+| 请求侧 `approval` | `{id, approved: true}`（无 reason 也被接受） | `{id, approved: false, reason}` |
+| 流上第一个 chunk | `tool-output-available` | `tool-output-denied` |
+| 载荷 | `{answers:{...}, timestamp}` | `{toolCallId}` ← **只有 id** |
+| 第二轮 finishReason | `"stop"` | `"stop"` |
+
+1. **续跑消息的形状正确且充分**：末条 assistant 消息 + `id`=start chunk 的 `messageId` +
+   `parts[]`（text part 带上 + tool part `state:'approval-responded'` + `approval:{id, approved}`）。
+   平台按 `approval.approved` 的真假分派两条路径。`deny` 的 `reason` 不是可选项而是**唯一落点**
+   ——流上回来的 `tool-output-denied` 只有 toolCallId，拒绝原因在协议上只存在于请求侧。
+2. **`tool-output-denied` 原先被当方言丢弃 → 一次「用户拒绝」被报告成「工具调用失败」**：
+   被审批工具永远等不到 closing 事件，builder 在 `run.finished` 时收口成
+   `span never closed (stream ended)` 的 error span。修复：新增 `_on_tool_output_denied`
+   转成 `tool.result{status:"denied"}`（**denied ≠ error**：工具没有失败，是策略拒绝了执行；
+   builder 只在 `status=="error"` 时判红，denied 落 `tool_status` 属性）；bash 被拒时
+   同时补 `command.finished{exit_code:None}`（命令没跑，Spec §19.4 据此判 skipped）。
+3. **拒绝也是真实续跑**：`auto-deny` 不是「跳过审批」，两条路径都要 POST 第二次才能让上游
+   跑完这一轮。落地 `--policy auto-approve|auto-deny`（策略名随 /health 上报，B3 可追溯）。
+4. **答案注入通道已实测**：`ask_user_question` 的答案经 `approval.reason` 回传，形状
+   `JSON.stringify({answers})`，**键是问题全文**（`question`）。实测用 `header` 短标题作键时
+   平台**同样原样回显、不校验键名**——写错键不报错，只会静默退化成「没收到答案」。
+   shim 当前不注入答案（C 类需要时再补），平台回显空 answers、agent 降级追问属正常路径。
+
+### 顺带修的一处（推理所得，未在真实流上遇到）
+
+`build_resume_message` 现在**消费** `_pending`：不清空的话，一轮里发生第二轮审批时，
+第一轮那个工具会再次命中遗留 pending → 被重建为 `approval-responded`，而它真实状态已是
+`output-available`（平台整体覆盖该消息，会丢掉它的 output）。注释里明确标了"推理所得、
+第七轮只跑了单轮审批"——不把未验证的路径读成已验证。
+
+### 护栏与验证
+
+- `tests/test_shim_translator.py`：+5（denied 闭合 tool span / bash denied 闭合 command span /
+  auto-deny 产出拒绝消息 / auto-approve 不被改掉 / 第二轮审批不回退第一轮工具状态）= 21 条；
+- `tests/test_shim_server.py`：假上游新增 approval 模式（第一轮挂起、第二轮从续跑消息里读
+  `approved` 分派——复刻被测平台的 upsert 判据），+2 端到端（approve 单流单终局 / deny 报
+  denied 而非失败）= 14 条；
+- **可红验证**：把 `_on_tool_output_denied` 从类上摘掉（运行时 `delattr`，不改源码），
+  3 条新护栏立刻失败（`tool.result` 不出现、span 变 `span never closed` 的 error）——护栏不是
+  跟着实现写出来的装饰；
+- 全量 **519 passed**，ruff 四个改动文件全绿；
+- **真机复验**：重启 shim(8901) 后 approve 路径跑通；另起 `--policy auto-deny` 实例(8902)
+  跑通 deny 路径（agent 如实降级："ask_user_question 工具本次调用被系统的审批策略拦截了
+  （返回 `denied by shim approval policy`）"）；随后 harness `database-core --tag smoke`
+  回归，只有正确的 NO BASELINE 警告，`token_usage_scope=partial`、`agent_model=platform-default`、
+  无协议违规。
+
+### 记账
+
+`docs/external-agent-integration-change-plan.md`（B2 表 `tool.result` 行 / 未覆盖清单第 1 项关闭 /
+B3 第七轮段）、`shims/ai-chatbot/README.md`（第七轮小节 + 转译要点 + 已知边界）、
+`.trellis/tasks/ROADMAP.md`（接入表 B 行改为 ✅ 落地、联调实测表 +1 行、第 0 步冒烟行改为已执行）。
+
+### 仍待办（本次未动）
+
+`data-sub-async` / 多轮会话（未覆盖清单第 2 项）、C 类专用评测集、并发与 timeout 预算
+（`CONCURRENCY=4` 下单轮首事件 ~2.6s，第 4 个请求排队 21s+）。
+
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

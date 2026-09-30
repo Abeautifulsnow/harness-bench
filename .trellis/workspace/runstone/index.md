@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 12
+- **Total Sessions**: 13
 - **Last Active**: 2026-09-30
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~857 | Active |
+| `journal-1.md` | ~951 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 13 | 2026-09-30 | 审批续跑闭环联调验证（change-plan 未覆盖清单第 1 项关闭） | - | `main` |
 | 12 | 2026-09-30 | Mimosa L2 复查定性：3 条 SQL 注入告警是被测 agent 的评测产物，非本轮 diff | - | `main` |
 | 11 | 2026-09-30 | 联调实测修复：token usage scope 警告的真实根因链与两个额外缺陷 | `55d3db8`, `407c21e`, `3e4a515`, `a8a6fa9`, `ab9b74a` | `main` |
 | 10 | 2026-09-29 | §22.12 两项建议项收口：定义层解析开销与 junit skipped 覆盖 | `d1b3f4b` | `main` |

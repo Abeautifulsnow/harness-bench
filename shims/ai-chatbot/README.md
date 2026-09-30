@@ -97,7 +97,29 @@ baseline_mode             → NO_BASELINE（原因：本 dataset_version 下没�
 它的信息已由 `tool-input-available` / `tool-output-available` / `tool-output-error`
 承载，透传只会重复计数。
 
-仍待联调的有两条（不阻塞本 shim 的可用性）：
+### 第七轮：审批续跑闭环（change-plan 未覆盖清单第 1 项，已关闭）
+
+approve / deny 两条路径都在真机上跑通（`tmp/smoke/approval-*.json` 三份 dump）：
+
+- **续跑消息形状正确且充分**：末条 assistant 消息 + `id`=start chunk 的 `messageId` +
+  `parts[]`（text part 带上 + tool part `state:'approval-responded'` +
+  `approval:{id, approved}`）。平台按 `approved` 的真假分派两条路径——被测平台
+  upsert 判据的运行时确认。approve 不带 `reason` 也被接受。
+- **`tool-output-denied` 只在流上带 `toolCallId`**：没有 `output`、没有 `errorText`、
+  也没有 reason。拒绝原因在协议上**只存在于请求侧**的 `approval.reason`。
+  原先没有这个处理函数 → 按方言丢弃 → 被审批工具永远等不到 closing 事件，
+  builder 在 `run.finished` 时收口成 `span never closed (stream ended)`——
+  一次「用户拒绝」被报告成「工具调用失败」。现在转成 `tool.result{status:"denied"}`：
+  builder 只在 `status=="error"` 时判红，denied 落 `tool_status` 属性（可观测、不误判）。
+- **拒绝是正常路径，不是失败**：deny 的续跑流以 `finish(finishReason="stop")` 干净收尾，
+  agent 随后如实降级作答。因此 `auto-deny` 也要**真实 POST 第二次**——把 deny 实现成
+  「就地结束」会得到一条永远没有 agent 后续行为的流。
+- **答案注入通道**：`ask_user_question` 的答案经 `approval.reason` 回传，形状
+  `JSON.stringify({answers})`，键是**问题全文**（`question` 字段）。实测用 `header`
+  短标题作键时平台**同样原样回显、不校验键名**——即写错键不会报错，只会静默退化成
+  「没收到答案」。C 类用例作者按 `question` 全文拼答案。
+
+仍待联调的两条（都不是接入口缺陷，是**预算**问题，不阻塞本 shim 的可用性）：
 
 - `database.query.top_customers`（`execution.timeout: 30`）与
   `database.query.multi_turn_refine`（40）在 shim `CONCURRENCY=4` 下排队超时；
@@ -110,9 +132,13 @@ baseline_mode             → NO_BASELINE（原因：本 dataset_version 下没�
   MCP 输出 text 二次 JSON 编码需解码
 - `bash` 同时产 `tool.call/result` 与 `command.started/finished`（exit_code 唯一来源，
   命令名取命令行首词）；结果可能二次 JSON 编码需解码
-- `tool-approval-request` → 挂起 → 自动批准（重建 approval-responded part 续跑 POST）；
-  `finishReason="tool-calls"` 是判别信号。**续跑请求形状尚未实测**（change-plan
-  第五轮未覆盖清单第 1 项）——联调第一优先验证点
+- `tool-approval-request` → 挂起 → 按策略批准/拒绝（重建 approval-responded part
+  续跑 POST）；`finishReason="tool-calls"` 是判别信号。**续跑形状已实测**（第七轮，
+  见上）：approve 回 `tool-output-available`、deny 回 `tool-output-denied`（只有
+  toolCallId），两条路径都续跑
+- `tool-output-denied` → `tool.result{status:"denied"}`（**不是 error**：工具没有失败，
+  是策略拒绝了执行；只补 tool.result 会留下永不闭合的 command span，bash 被拒时
+  同时补 `command.finished{exit_code:None}`）
 - `data-context-usage` → `model.response` 的 usage **仅输入侧**（A3：无 output_tokens，
   max_tokens 自动判 skipped，口径 partial）
 - `skill.loaded` 由 `use_skill` 工具调用合成（无专用 chunk）
@@ -120,6 +146,9 @@ baseline_mode             → NO_BASELINE（原因：本 dataset_version 下没�
 
 ## 已知边界
 
-- 审批策略仅 `auto-approve`；deny 路径未实现（未覆盖清单第 1 项关闭后再扩）
+- 审批策略 `auto-approve` / `auto-deny`（`--policy`，随 /health 上报）；
+  策略的「答案」注入（`ask_user_question` 的 answers）尚不实现——当前续跑消息不带
+  `approval.reason`，平台因此回显空答案、agent 降级追问（实测行为，非缺陷）。
+  C 类用例需要「设计好的答案」时再补（通道与形状已实测，见上）
 - 会话表在内存（shim 重启即失）；并发闸 4 < 平台容量 5
 - `data-sub-async`（异步子代理）按"父流无 done"如实不合成 finished——终态查询属联调项

@@ -54,7 +54,7 @@ class TranslationSession:
         user_message: str,
         *,
         model: str | None = None,
-        policy: str = "auto-approve",
+        policy: str = "auto-approve",  # auto-approve | auto-deny（B3 策略名，进 /health）
         max_approval_rounds: int = MAX_APPROVAL_ROUNDS,
     ) -> None:
         self.trace_id = trace_id
@@ -64,6 +64,7 @@ class TranslationSession:
         self.max_approval_rounds = max_approval_rounds
         self.approval_rounds = 0
         self.suspended = False  # True = 审批挂起，server 应构造续跑请求再 POST
+        self.decision = "approve"  # 本次挂起的决定（B3 策略的产物，续跑消息据它构造）
         self.finished = False
 
         self._started = False
@@ -276,6 +277,43 @@ class TranslationSession:
             )
         ]
 
+    def _on_tool_output_denied(self, chunk: dict) -> list[dict]:
+        # 实测（2026-09-30 第七轮联调，审批 deny 路径）：用户拒绝时，续跑流上出现
+        # `{"type":"tool-output-denied","toolCallId":"call_00_…"}`——**只有 toolCallId**，
+        # 没有 output、没有 errorText、也没有 reason（reason 只回落在**请求侧**的
+        # approval 字段里，见 B3）。
+        # 原先没有这个处理函数 → 按方言丢弃 → 被审批工具永远等不到 closing 事件，
+        # builder 在 run.finished 时统一收口成 "span never closed (stream ended)" 的
+        # error span：一次"用户拒绝"被报告成"工具调用失败"。收口逻辑本身是对的，
+        # 错在转译器没把这条唯一的事实送上流。
+        # 语义取 `denied` 而非 `error`：工具**没有失败**，是策略拒绝了执行，agent 随后
+        # 的降级行为属正常路径。builder 只在 `status=="error"` 时把 span 判红，
+        # 因此 denied 不改 span 状态，只落 `tool_status="denied"`（可观测、不误判）。
+        call_id = str(chunk.get("toolCallId", ""))
+        entry = self._tools.get(call_id)
+        kind = (entry or {}).get("kind", "tool")
+        event_type = "mcp.result" if kind == "mcp" else "tool.result"
+        events = [
+            self._event(
+                event_type,
+                {"status": "denied", "result": {"denied": True}},
+                parent=(entry or {}).get("call_event_id"),
+            )
+        ]
+        if kind == "bash":
+            # 与 tool-output-available 的 bash 分支同构：command.* 是独立观测面，
+            # 只补 tool.result 会留下一个永不闭合的 command span。退出码取 None
+            # （命令没跑，没有退出码）——Spec §19.4 的 exit_code 断言据此判 skipped，
+            # 不猜成 0。
+            events.append(
+                self._event(
+                    "command.finished",
+                    {"status": "denied", "exit_code": None},
+                    parent=(entry or {}).get("command_event_id"),
+                )
+            )
+        return events
+
     # ---- 审批（B3：轮次即结束、等待在客户端、续跑重新 POST） ----
 
     def _on_tool_approval_request(self, chunk: dict) -> list[dict]:
@@ -295,8 +333,14 @@ class TranslationSession:
     def _on_finish(self, chunk: dict) -> list[dict]:
         reason = str(chunk.get("finishReason", "stop"))
         if reason == "tool-calls" and self._pending:
-            if self.policy == "auto-approve" and self.approval_rounds < self.max_approval_rounds:
+            if self.policy in ("auto-approve", "auto-deny") and (
+                self.approval_rounds < self.max_approval_rounds
+            ):
                 self.approval_rounds += 1
+                # B3：策略决定"批准还是拒绝"，但两条路径都走续跑 POST——拒绝也是
+                # 一次真实的上游往返（实测：deny 的续跑流以 tool-output-denied 开头，
+                # agent 随后降级作答）。策略名留痕在 self.policy，进 /health。
+                self.decision = "approve" if self.policy == "auto-approve" else "deny"
                 self.suspended = True  # server 构造续跑请求后再次 POST，翻译继续
                 return []
             # 无策略/超轮数：如实按 error 收尾（不伪造成功）
@@ -373,11 +417,25 @@ class TranslationSession:
                 part["type"] = f"tool-{entry['name']}"
             if pending is not None:
                 part["state"] = "approval-responded"
-                part["approval"] = {"id": pending["approval_id"], "approved": True}
+                # 实测（2026-09-30 第七轮）：approve 的 `{id, approved:true}` 被平台接受
+                # 并接着跑（无 reason 字段亦可）；deny 则必须带 `reason`——流上回来的
+                # `tool-output-denied` **只有 toolCallId**，拒绝原因的唯一落点是请求侧。
+                approval = {"id": pending["approval_id"], "approved": self.decision == "approve"}
+                if self.decision == "deny":
+                    approval["reason"] = "denied by shim approval policy (auto-deny)"
+                part["approval"] = approval
             elif "output" in entry:
                 part["state"] = "output-available"
                 part["output"] = entry["output"]
             else:
                 part["state"] = "input-available"
             parts.append(part)
+        # 消费语义：本方法产出的消息已把**当前**的全部 pending 渲染进去了。
+        # （此条为**推理**所得，未在真实流上遇到——第七轮只跑了单轮审批。
+        # 但代价为零而失效代价高：平台整体覆盖该消息，回退的 state 会丢掉已执行
+        # 工具的 output。）
+        # 不清空的话，一轮里发生第二轮审批时，第一轮那个工具会再次命中遗留 pending
+        # → 被重建为 `approval-responded`，而它真实的状态已是 `output-available`
+        # （平台按 part.state upsert，那会丢掉它的输出、甚至再执行一次）。
+        self._pending = []
         return {"id": self._message_id, "role": "assistant", "parts": parts}

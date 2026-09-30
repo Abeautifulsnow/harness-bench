@@ -125,9 +125,9 @@ workdir 透传、基线守卫、文档条款）；接入侧两块不在本仓：
 | E3/E4 边界机制 | `tests/test_framework_boundary.py`：专有方言 deny-list 扫 `src/agent_eval/`（基线零命中，防以后变脏）；`SessionContext.extra` 不透明冻结 | ✅ 本轮 |
 | A1 workdir 透传 | `_open_session` 经 `SessionContext.extra["workdir"]` 把 fixture 沙箱交给被测方（逐迭代独立）；http_adapter 响应体解析 `workdir_accessible` 回执：False → InfraError（exit 2），缺失 → run 级 warning（未知 ≠ 可达）；E4：extra 不透明，`project_dir` 类具名字段被边界测试禁止 | ✅ 本轮 |
 | D 文档条款 | PRD §3.2/§6.2.1/§6.3/§7.1/§7.2/§8、Spec §3.3/§4.3/§6.1/§12.1.1/§12.4/§17.3.1/§19.1.2、quality-guidelines 外部接入三条、README 外部平台最小路径、`docs/external-agent-integration-guide.md`（新增） | ✅ 本轮 |
-| B 转译 shim | ai-chatbot 侧测试组件（四端点契约 + §8 词汇归一化 + 审批策略 + 观测面声明）——**首版已落地本仓 `shims/ai-chatbot/`**（translator 零依赖可测 + 纯标准库四端点；12 条转译器测试以冒烟 dump 同形 chunks 驱动）；**联调期待验证**：审批续跑 POST 形状（change-plan 未覆盖清单第 1 项）、父级直连 bash output | 🔶 首版落地 |
+| B 转译 shim | ai-chatbot 侧测试组件（四端点契约 + §8 词汇归一化 + 审批策略 + 观测面声明）——已落地本仓 `shims/ai-chatbot/`（translator 零依赖可测 + 纯标准库四端点）；**联调已验证**：审批续跑闭环 approve/deny 两条路径（第七轮，见下）、父级直连 bash output、MCP/skill 流上形状（第六轮）。**已实现 auto-approve / auto-deny**；审批「答案」注入通道已实测但 shim 未实现（C 类需要时再补） | ✅ 落地 |
 | C 专用评测集 | ai-chatbot 工具面/fixture 形态的 dataset + profile/gate/suite，在 ai-chatbot 仓（`evals/` 数据随本仓走，具体用例依赖 shim 先行） | ⬜ 接入侧 |
-| 第 0 步冒烟 | 直连 `POST /api/chat` 的运行时行为验证（chunk 时序 / 402 时点 / 审批收尾 / `id===toolCallId` / usage 时机），shim 写码前的第一优先动作 | ⬜ 接入侧 |
+| 第 0 步冒烟 | 直连 `POST /api/chat` 的运行时行为验证（chunk 时序 / 402 时点 / 审批收尾 / `id===toolCallId` / usage 时机），shim 写码前的第一优先动作 | ✅ 已执行（`scripts/smoke-agent-protocol.py`，五条运行时行为已落定） |
 
 ### 联调首轮实测（2026-09-30，见下方「执行中的发现」5）
 
@@ -139,6 +139,7 @@ shim 起在 8901、harness 指向它开跑之后，暴露的三个缺陷两个�
 | `token_usage_scope` 全未观测被记成 `partial`（与字段注释/PRD §7.2 的 full/partial/未观测三态矛盾） | 框架 | ✅ 修：全 `none` → `None`；Spec §4.3 补三态口径与"partial 与 None 不可合并"的理由 |
 | `fake://` 的历史 run 被选成真实 SUT 首个 run 的基线 | 框架 | ✅ 修：`models/run.endpoint_kind()` + 解析期候选过滤（§4.2 实现修正三）+ 比较期守卫（§3.3）；compare 的守卫链改**并列列出**全部不可比原因（原先 last-wins，同时踩两条时前一条消失） |
 | `test_api.py::test_regression_between_two_runs` 间歇失败（此前记为"发现的 1 的残余、14 轮探针未复现"） | 框架 | ✅ 定位并修：wall-clock 绝对下限是 `max(两侧) < 1ms`，**恰好 1.0ms 的一侧**不满足严格不等号 → 掉进相对阈值分支，`1.0 ↔ 0.6ms` 判 `improved`（-40% > 20%）。负载下实测的 5-case 均值分布确有整毫秒值（`0.6 / 6.0 / 7.4 / 8.0`），不是不可复现的"随机"——是边界。改为 `|Δ| ≤ 1ms` 或 `min(两侧) < 1ms` 两条判据，并同源下沉到 case 级 `_performance_diff`（那条进 Gate）。见 Spec §24.1 |
+| 审批续跑闭环（change-plan 未覆盖清单第 1 项）**从未实测**；`tool-output-denied` 无处理函数（被当方言丢弃） | shim | ✅ 第七轮实测并修：approve/deny 两条路径都在真机跑通；deny 的 `tool-output-denied` 载荷**只有 toolCallId**（原因只在请求侧 `approval.reason`）；原先丢弃它 → 被审批工具永不闭合 → builder 补成 `span never closed`，**一次「用户拒绝」被报告成「工具调用失败」**。现转 `tool.result{status:"denied"}`（denied ≠ error：工具没失败，是策略拒绝执行），bash 被拒时同时补 `command.finished`。`--policy auto-deny` 落地，两条路径都真实续跑 POST |
 
 ---
 

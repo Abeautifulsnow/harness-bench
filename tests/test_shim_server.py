@@ -66,10 +66,67 @@ def _basic_chunks() -> list[dict]:
     ]
 
 
+def _resume_decision(body: dict | None) -> str:
+    """从续跑消息的 approval.approved 读决定（假上游复刻被测平台的 upsert 判据）。"""
+    message = (body or {}).get("message") or {}
+    for part in message.get("parts") or []:
+        approval = part.get("approval") or {}
+        if "approved" in approval:
+            return "approve" if approval["approved"] else "deny"
+    return "approve"
+
+
+def _approval_chunks() -> list[dict]:
+    """第一轮：触发审批 → 挂起。形状取自实测 dump（tmp/smoke/smoke-approval.json）。"""
+    return [
+        {"type": "start", "messageId": "msg-a1"},
+        {"type": "start-step"},
+        {"type": "text-start", "id": "txt-0"},
+        {"type": "text-delta", "id": "txt-0", "delta": "我先问一下。"},
+        {
+            "type": "tool-input-available",
+            "toolCallId": "call_a1",
+            "toolName": "ask_user_question",
+            "input": {"questions": [{"question": "要什么格式？", "options": ["md", "docx"]}]},
+        },
+        {"type": "tool-approval-request", "approvalId": "aitxt-a1", "toolCallId": "call_a1"},
+        {"type": "text-end", "id": "txt-0"},
+        {"type": "finish-step"},
+        {"type": "finish", "finishReason": "tool-calls"},
+    ]
+
+
+def _resume_chunks(decision: str) -> list[dict]:
+    """第二轮（续跑）：批准走 tool-output-available；拒绝走 tool-output-denied。
+
+    deny 的形状是实测的：``{"type":"tool-output-denied","toolCallId":"…"}``——只有 id，
+    没有 output、没有原因（原因只回落在请求侧的 approval.reason）。
+    """
+    first: dict = (
+        {"type": "tool-output-denied", "toolCallId": "call_a1"}
+        if decision == "deny"
+        else {
+            "type": "tool-output-available",
+            "toolCallId": "call_a1",
+            "output": {"answers": {}, "timestamp": 1},
+        }
+    )
+    return [
+        {"type": "start", "messageId": "msg-a2"},
+        first,
+        {"type": "start-step"},
+        {"type": "text-start", "id": "txt-1"},
+        {"type": "text-delta", "id": "txt-1", "delta": "懂了。"},
+        {"type": "text-end", "id": "txt-1"},
+        {"type": "finish-step"},
+        {"type": "finish", "finishReason": "stop"},
+    ]
+
+
 @pytest.fixture
 def upstream() -> Iterator[dict]:
     """假上游：/api/license/state 放行；/api/chat 按 ``mode`` 决定怎么答。"""
-    state: dict = {"mode": "normal", "chat_calls": 0, "got_body": None}
+    state: dict = {"mode": "normal", "chat_calls": 0, "got_body": None, "bodies": []}
 
     class Upstream(BaseHTTPRequestHandler):
         server_version = "fake-ai-chatbot/0"
@@ -98,9 +155,19 @@ def upstream() -> Iterator[dict]:
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            state["bodies"].append(state["got_body"])
             chunks = _basic_chunks()
             if mode == "truncated":
                 chunks = [c for c in chunks if c["type"] != "finish"]
+            elif mode == "approval":
+                # 第一轮挂起（审批）；第二轮**从续跑消息里读决定**——这正是被测平台
+                # 的判据（服务端按 approval.approved upsert），实测拒绝回
+                # tool-output-denied、批准回 tool-output-available。
+                chunks = (
+                    _approval_chunks()
+                    if state["chat_calls"] == 1
+                    else _resume_chunks(_resume_decision(state["got_body"]))
+                )
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Connection", "close")
@@ -389,3 +456,80 @@ async def test_unknown_route_gets_404_not_a_dropped_connection(shim: str) -> Non
 
     resp = httpx.post(f"{shim}/api/nope", json={}, timeout=10.0)
     assert resp.status_code == 404
+
+
+# 5. 审批续跑闭环（change-plan §7 第五轮未覆盖清单第 1 项）。
+#    这一层是 server.py 的 while 循环 + suspended 检查 + 续跑拼接——转译器单测
+#    覆盖不到，而联调首轮的教训正是"两个进程拼起来"的那一层会整体失守。
+async def test_approval_round_trip_is_one_stream_with_one_terminal_event(
+    shim: str, upstream: dict
+) -> None:
+    """挂起 → 自动批准 → 续跑 → 一条 §8 流收尾。
+
+    钉住四件事：
+      1. 上游被 POST **两次**（挂起不是终局，必须真去续跑）；
+      2. §8 流里只有一个 ``run.started``（第二条上游流的 start 不得重复上报）；
+      3. 只有一个 ``run.finished``，且为 success、没有 error；
+      4. 续跑消息的形状 = 末条 assistant + ``approval-responded`` + ``approved: true``
+         —— 这是被测平台 upsert 的唯一判据（实测：approve 不带 reason 也被接受）。
+    """
+    upstream["mode"] = "approval"
+    adapter, _, session, events = await _turn(shim)
+    try:
+        types = [e.type for e in events]
+        assert upstream["chat_calls"] == 2, "审批挂起后必须真的续跑（不是就地收尾）"
+        assert types.count("run.started") == 1
+        assert types.count("run.finished") == 1
+        assert "error" not in types
+        assert events[-1].data["status"] == "success"
+        # 跨两次上游 POST 的 span 配对：tool.result 指回第一条流的 tool.call
+        call = next(e for e in events if e.type == "tool.call")
+        result = next(e for e in events if e.type == "tool.result")
+        assert result.parent_span_id == call.event_id
+        assert call.data["name"] == "ask_user_question"
+
+        first_body, resume_body = upstream["bodies"]
+        assert first_body["conversationId"] == resume_body["conversationId"]
+        assert first_body["message"] == "ask"
+        message = resume_body["message"]
+        assert message["role"] == "assistant"
+        assert message["id"] == "msg-a1"  # start chunk 的 messageId
+        part = next(p for p in message["parts"] if p.get("state") == "approval-responded")
+        assert part["approval"]["approved"] is True
+        assert part["toolCallId"] == "call_a1"
+    finally:
+        await adapter.aclose()
+
+
+async def test_auto_deny_resume_is_reported_as_denied_not_as_a_failure(
+    shim: str, upstream: dict
+) -> None:
+    """拒绝路径：请求侧带 approved=false + reason，流上回 tool-output-denied。
+
+    语义必须落在 ``denied`` 而不是 ``error``：工具没有失败，是策略拒绝了执行，agent
+    随后的降级作答是正常路径。原先没有这个处理函数 → 按方言丢弃 → span 永不闭合，
+    builder 补成 "span never closed" —— 一次"用户拒绝"被报告成"工具调用失败"。
+    """
+    upstream["mode"] = "approval"
+    shim_server.SETTINGS["policy"] = "auto-deny"  # 策略是 SETTINGS 的事实源（B3 可追溯）
+    adapter, _, _, events = await _turn(shim)
+    try:
+        types = [e.type for e in events]
+        assert upstream["chat_calls"] == 2
+        assert types.count("run.finished") == 1
+        assert "error" not in types
+        assert events[-1].data["status"] == "success"
+        result = next(e for e in events if e.type == "tool.result")
+        assert result.data["status"] == "denied"
+
+        resume_body = upstream["bodies"][1]
+        part = next(
+            p
+            for p in resume_body["message"]["parts"]
+            if p.get("state") == "approval-responded"
+        )
+        assert part["approval"]["approved"] is False
+        # reason 是拒绝原因的唯一落点：流上回来的 tool-output-denied 只有 toolCallId
+        assert part["approval"]["reason"]
+    finally:
+        await adapter.aclose()

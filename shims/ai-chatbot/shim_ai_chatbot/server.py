@@ -44,7 +44,9 @@ _LOCK = threading.Lock()
 SETTINGS: dict = {
     "upstream": "http://localhost:3000",
     "model": None,  # 显式模型（A4：不依赖平台默认值）；None = 平台默认
-    "policy": "auto-approve",  # 审批策略（B3：必须可追溯——本声明即策略的事实源）
+    # 审批策略（B3：必须可追溯——本声明即策略的事实源，随 /health 上报）。
+    # auto-deny 不是"跳过审批"：拒绝同样要续跑 POST 才能让上游接着跑（实测）。
+    "policy": "auto-approve",
     # 单轮上游读超时（秒）。**必须有默认值**：早先只有 `--timeout` 的读点而无写点，
     # 每次 /run 都在 `SETTINGS["timeout"]` 上抛 KeyError——头已发出，于是 harness 收到
     # "200 + 空流"，五个 case 全判 AGENT_FAILURE，被测平台一次都没被调用（联调实测）。
@@ -450,7 +452,10 @@ def main() -> None:
     parser.add_argument("--upstream", default=SETTINGS["upstream"], help="被测平台基址")
     parser.add_argument("--model", default=None, help="显式模型名（A4；缺省=平台默认）")
     parser.add_argument(
-        "--policy", default="auto-approve", choices=["auto-approve"], help="审批策略（B3 可追溯）"
+        "--policy",
+        default="auto-approve",
+        choices=["auto-approve", "auto-deny"],
+        help="审批策略（B3 可追溯；两条路径都要真实续跑 POST，见 translator）",
     )
     parser.add_argument(
         "--timeout",
