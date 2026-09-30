@@ -51,22 +51,28 @@ class HttpAgentAdapter(AgentAdapter):
     async def health_check(self) -> HealthStatus:
         try:
             resp = await self._client_for().get("/health", timeout=self._health_timeout)
-            resp.raise_for_status()
+        except (httpx.HTTPError, OSError) as exc:
+            return HealthStatus(ok=False, detail=f"health unreachable: {exc}")
+        try:
             body = resp.json()
-            return HealthStatus(
-                ok=body.get("status") == "ok",
-                detail=str(body),
-                # A2/E2 + A4：观测面能力表（事件名 → bool）与实际生效模型在 health
-                # 阶段整份上报；形状不对时按"未声明"处理（空表 = 按具备，不猜）。
-                observation_surface=(
-                    {str(k): bool(v) for k, v in body["observation_surface"].items()}
-                    if isinstance(body.get("observation_surface"), dict)
-                    else {}
-                ),
-                agent_model=(str(body["agent_model"]) if body.get("agent_model") else None),
-            )
-        except (httpx.HTTPError, OSError, ValueError) as exc:
-            return HealthStatus(ok=False, detail=str(exc))
+        except ValueError:
+            body = {"raw": resp.text[:300]}
+        # 非 2xx 的 body 必须进 detail（B1：health 要把"不可达"与"license 无效"的
+        # 区别暴露给运维）——先 raise_for_status 会把 shim 给出的原因吞掉。
+        detail = str(body) if resp.is_success else f"HTTP {resp.status_code}: {body}"
+        ok = resp.is_success and body.get("status") == "ok"
+        return HealthStatus(
+            ok=ok,
+            detail=detail,
+            # A2/E2 + A4：观测面能力表（事件名 → bool）与实际生效模型在 health
+            # 阶段整份上报；形状不对时按"未声明"处理（空表 = 按具备，不猜）。
+            observation_surface=(
+                {str(k): bool(v) for k, v in body["observation_surface"].items()}
+                if isinstance(body.get("observation_surface"), dict)
+                else {}
+            ),
+            agent_model=(str(body["agent_model"]) if body.get("agent_model") else None),
+        )
 
     async def create_session(self, context: SessionContext) -> AgentSession:
         # A1：SessionContext.extra 原样透传进 metadata（扩展键，E4 不透明）——

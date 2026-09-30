@@ -149,3 +149,21 @@ async def test_health_without_surface_fields_defaults_to_undeclared() -> None:
     health = await adapter.health_check()
     assert health.observation_surface == {}
     assert health.agent_model is None
+
+
+async def test_health_non_2xx_body_lands_in_detail() -> None:
+    """B1：health 非 2xx 时 body 里的原因（unreachable / license-invalid）必须进 detail——
+    先 raise_for_status 会把 shim 给运维的排查信息吞掉。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(
+                503, json={"status": "license-invalid", "detail": "upstream license state"}
+            )
+        return httpx.Response(404)
+
+    adapter = HttpAgentAdapter("http://mock", client=_mock_client(handler))
+    health = await adapter.health_check()
+    assert health.ok is False
+    assert "license-invalid" in health.detail
+    assert "503" in health.detail
