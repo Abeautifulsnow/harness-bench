@@ -49,7 +49,3 @@ uv run agent-eval benchmark run <benchmark> --no-judge      # 先跑确定性指
 uv run pytest        # 测试
 uv run ruff check .  # lint
 ```
-
-## GitLab 仓库
-
-远端：`http://192.100.30.115:9000/siact/tools/harness-bench.git`（main）
