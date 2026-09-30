@@ -504,6 +504,63 @@ async def test_workdir_writer_makes_file_state_judgeable(evals_tree, fixtures_ro
     assert outcome.exit_code == 1
 
 
+async def test_filesystem_fixture_workdir_is_the_fixture_dir_not_the_iter_root(
+    evals_tree, fixtures_root
+) -> None:
+    """filesystem provider 的沙箱是 `<iterN>/workspace`，不是 iteration 根。
+
+    缺陷（C 类勘察发现）：`_open_session` 一直把 iteration 根当沙箱交给被测方，
+    而 `FilesystemFixture` 把 fixture 拷进 `<iterN>/workspace` 并把它作为
+    `handle.workdir`；`file_state` 读的正是后者。于是 agent 的写入落在 fixture
+    之外，一条"agent 确实写了这个文件"的断言恒 FAIL，且报告里看不出任何异常
+    （sqlite 下两者恰好同路径，所以这个缺陷长期没被暴露）。
+
+    这条测试用 filesystem fixture 走完整链路：agent 把文件写进**收到的 workdir**，
+    `file_state` 必须看得见——即两者是同一个目录。
+    """
+
+    class WorkspaceWriter(InstrumentedAgent):
+        async def create_session(self, context: SessionContext) -> AgentSession:
+            workdir = context.extra.get("workdir")
+            if workdir:
+                Path(workdir).mkdir(parents=True, exist_ok=True)
+                (Path(workdir) / "agent_output.txt").write_text("agent was here", encoding="utf-8")
+            return await super().create_session(context)
+
+    evals_root, data_root = evals_tree
+    fx = fixtures_root if fixtures_root.exists() else fixtures_root.parent / "fixtures"
+    (fx / "plain_files").mkdir(parents=True, exist_ok=True)
+    (fx / "plain_files" / "seed.txt").write_text("fixture seed", encoding="utf-8")
+    case = {
+        "id": "fs.workdir.is.fixture.dir",
+        "name": "filesystem 沙箱 = fixture 目录",
+        "version": 1,
+        "tags": ["scripted"],
+        "input": {"type": "single_turn", "prompt": "write the file"},
+        "environment": {"fixture": "plain_files", "database": "filesystem"},
+        "execution": {"timeout": 30, "repeat": 1},
+        "expected": {
+            "file_state": {
+                "files": {
+                    # fixture 自带的文件（证明 agent 落在 fixture 目录里）
+                    "seed.txt": {"exists": True, "contains": ["fixture seed"]},
+                    # agent 的写入（证明"交给被测方的目录"就是被断言的目录）
+                    "agent_output.txt": {"contains": ["agent was here"]},
+                }
+            }
+        },
+    }
+    benchmark = add_scripted_dataset(evals_root, [case])
+    cfg = scripted_cfg(
+        evals_root, data_root, fixtures_root, benchmark, baseline_policy="NO_BASELINE"
+    )
+    outcome, _, results = await _run_instrumented(cfg, WorkspaceWriter(receipt=True))
+    result = next(r for r in results if r.case_id == "fs.workdir.is.fixture.dir")
+    verdict = next(m for m in result.all_metric_results if m.metric == "native.file_state")
+    assert verdict.verdict == "pass", verdict.reason
+    assert outcome.exit_code == 0
+
+
 async def test_usage_scope_full_when_both_sides_observed(evals_tree, fixtures_root) -> None:
     evals_root, data_root = evals_tree
     cfg = make_cfg(evals_root, data_root, fixtures_root, tag_filter=["smoke"], repeat=1)

@@ -24,6 +24,20 @@ from agent_eval.models.events import TraceEvent
 
 DEFAULT_TIMEOUT = httpx.Timeout(30.0)
 
+# 逐轮流式请求的传输超时：**读侧不设上限**（联调实测，C 类首次真机全量跑）。
+#
+# 起因是一次真实的误判：首跑里子代理那条 case 两轮全判
+# `INFRA_FAILURE: ReadTimeout('')`——30s 的读超时先于用例自己的预算到期。
+# 真实 SUT 的输入上下文可以到 23 万 token，四个并发会话同时等首字（TTFT）时，
+# "两个 chunk 之间超过 30s"是常态而非故障；此时平台把一次**正常的慢**报成
+# 基础设施故障（exit 2），既冤枉了被测方，又让用例声明的 timeout 永远轮不到生效。
+#
+# 超时归属必须唯一：**一轮能跑多久由 case 的 `execution.timeout` 决定**，
+# 由 `_drive_session`/`_run_turn` 的 asyncio.timeout 收场（它手里有这一轮的事件
+# 与用量，超时能如实落账）。传输层再发明一个更严的上限，只会在超时与故障之间
+# 制造一个不可分辨的中间态。连接侧仍设上限：连不上是另一回事，等它没有意义。
+STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0)
+
 
 class HttpAgentAdapter(AgentAdapter):
     def __init__(
@@ -112,6 +126,8 @@ class HttpAgentAdapter(AgentAdapter):
                 "POST",
                 f"/api/agent/sessions/{session.session_id}/run",
                 json=request.model_dump(),
+                # 读侧不设上限：一轮的预算归 case（见 STREAM_TIMEOUT 的来由）。
+                timeout=STREAM_TIMEOUT,
             ) as resp:
                 if resp.status_code >= 400:
                     body = await resp.aread()

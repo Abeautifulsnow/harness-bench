@@ -252,13 +252,38 @@ class TranslationSession:
                 parent=(entry or {}).get("command_event_id"),
             )
             return [result, command_finished]
-        return [
-            self._event(
-                "tool.result",
-                {"status": "ok", "result": output},
-                parent=(entry or {}).get("call_event_id"),
-            )
-        ]
+        result = self._event(
+            "tool.result",
+            {"status": "ok", "result": output},
+            parent=(entry or {}).get("call_event_id"),
+        )
+        events = [result]
+        if (entry or {}).get("name") == "use_skill":
+            events.extend(self._skill_loaded(output, result["event_id"]))
+        return events
+
+    def _skill_loaded(self, output: object, parent: str) -> list[dict]:
+        """`use_skill` 工具结果 → `skill.loaded`（第八轮：此前是**假声明**）。
+
+        实测（2026-09-30 C 类评测集勘察）：ai-chatbot 的技能加载**就是一次普通工具
+        调用**（`toolName="use_skill"`，入参 `{skillName}`），上游流上没有任何
+        `skill.*` 方言 chunk——`packages/core/src/runtime/tools/skill.ts` 里
+        loadSkills 的结果只从 tool-output 回。但 /health 的观测面表把
+        `skill.loaded` 声明为 **true** 而转译器从不发它：`harness.skill_load` 的
+        `required_events` 因此得到满足（没被能力表否决），插件按"加载了 0 个 skill"
+        判 **FAIL** —— 一次成功的技能加载被报成失败（假红，与"假绿"同源：声明与事实
+        不符）。二选一（真发事件 / 声明为 false）里选前者，因为这条事实是**可观测且
+        有权威来源**的：`tool.result` 的载荷里有 `success` 与 `skillName`。
+
+        以**结果**而非入参为据：入参表达的是"想加载谁"，技能名不存在时平台返回
+        `success: false` + `availableSkills`，把它记成"已加载"同样是不实。
+        """
+        if not (isinstance(output, dict) and output.get("success")):
+            return []
+        name = str(output.get("skillName", ""))
+        if not name:
+            return []
+        return [self._event("skill.loaded", {"name": name}, parent=parent)]
 
     def _on_tool_output_error(self, chunk: dict) -> list[dict]:
         # 实测（2026-09-30 联调第六轮）：该类型**确实出现在流上**（第五轮"第一方源码

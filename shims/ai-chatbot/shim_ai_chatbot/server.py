@@ -54,6 +54,30 @@ SETTINGS: dict = {
     "allow_public_upstream": False,
 }
 
+# E2 观测面能力表（事件名 → bool）：**实测事实**（change-plan B2/A2）——
+# provider 重试只写日志不上协议流、压缩只有预算数字无起止事件。
+#
+# 必须是模块级常量而不是 `_health_payload` 里的字面量：定义树侧要按它判"哪些
+# metric 的观测面不存在"（C 类 profile 的裁剪依据），而唯一能读到它的方式不该是
+# 起一个真上游再发 HTTP（tests/test_chatbot_dataset.py 的护栏直接导入它）。
+# 声明与事实必须同源：这里改一个字，护栏与 /health 一起变。
+OBSERVATION_SURFACE: dict[str, bool] = {
+    "run.started": True,
+    "run.finished": True,
+    "tool.call": True,
+    "tool.result": True,
+    "mcp.call": True,
+    "mcp.result": True,
+    "command.started": True,
+    "command.finished": True,
+    "subagent.started": True,
+    "subagent.finished": True,
+    "skill.loaded": True,
+    "retry": False,
+    "context.compaction.started": False,
+    "context.compaction.finished": False,
+}
+
 
 # ------------------------------------------------------------------ upstream
 
@@ -136,24 +160,8 @@ def _health_payload() -> tuple[int, dict]:
         }
     return HTTPStatus.OK, {
         "status": "ok",
-        # E2 观测面能力表（事件名 → bool）：实测事实（change-plan B2/A2）——
-        # provider 重试只写日志不上协议流、压缩只有预算数字无起止事件。
-        "observation_surface": {
-            "run.started": True,
-            "run.finished": True,
-            "tool.call": True,
-            "tool.result": True,
-            "mcp.call": True,
-            "mcp.result": True,
-            "command.started": True,
-            "command.finished": True,
-            "subagent.started": True,
-            "subagent.finished": True,
-            "skill.loaded": True,
-            "retry": False,
-            "context.compaction.started": False,
-            "context.compaction.finished": False,
-        },
+        # E2 观测面能力表：定义在模块级（OBSERVATION_SURFACE），与护栏同源。
+        "observation_surface": dict(OBSERVATION_SURFACE),
         # A4：实际生效模型。shim 配置了显式模型则上报之；否则如实声明平台默认。
         "agent_model": SETTINGS["model"] or "platform-default",
         "approval_policy": SETTINGS["policy"],  # B3：策略可追溯

@@ -568,7 +568,15 @@ class Runner:
                     completed=False,
                 )
 
-            session = await self._open_session(case, iteration, result, workdir=workdir)
+            # A1 修订五：交给被测方的沙箱是**provider 声明的那个目录**，不是
+            # iteration 根。两者在 sqlite 下相同（库就建在 iteration 根），但
+            # filesystem provider 把 fixture 拷进 `<iterN>/workspace` 并把它作为
+            # handle.workdir —— 此时用 iteration 根当沙箱会让 agent 在 fixture
+            # 之外工作，而 `file_state`（读 handle.workdir）永远看不到它写的文件：
+            # 一次成功的写入被报成 FAIL，且报告里毫无异常。
+            session = await self._open_session(
+                case, iteration, result, workdir=handle.workdir
+            )
             if session is None:
                 return _AgentPhase(
                     _error(
@@ -589,7 +597,7 @@ class Runner:
                     _error(
                         result,
                         FailureSemantics.INFRA,
-                        f"agent reported fixture workdir not accessible: {workdir}",
+                        f"agent reported fixture workdir not accessible: {handle.workdir}",
                     ),
                     None,
                     None,

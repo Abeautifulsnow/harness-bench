@@ -266,6 +266,96 @@ def test_tool_output_error_is_translated_as_error_result() -> None:
     assert "SQL query template is empty" in result["data"]["error"]
 
 
+# ---------------------------------------------------------------- skill 加载
+
+
+def skill_chunks(result_output: dict) -> list[dict]:
+    """`use_skill` 的一次真实往返（实测 2026-09-30 第八轮，载荷取自真实 dump）。"""
+    return [
+        ev("start", messageId="msg-6"),
+        ev("start-step"),
+        ev(
+            "tool-input-available",
+            toolCallId="call_sk1",
+            toolName="use_skill",
+            input={"skillName": "SQL执行流程"},
+        ),
+        ev(
+            "tool-output-available",
+            toolCallId="call_sk1",
+            output=result_output,
+        ),
+        ev("finish", finishReason="stop"),
+    ]
+
+
+def test_use_skill_result_emits_skill_loaded() -> None:
+    """实际加载的 skill 必须出现在 `skill.loaded` 上（第八轮修正）。
+
+    ai-chatbot 的技能加载是一次普通工具调用（`toolName="use_skill"`），上游流上
+    没有 `skill.*` 方言；此前转译器不发该事件，而 /health 把 `skill.loaded` 声明为
+    true —— `harness.skill_load` 于是按"加载了 0 个"判 FAIL：一次成功的加载被报成
+    失败。这条测试钉住"声明的观测面必须真的有事件"。
+    """
+    session = make_session()
+    events = feed_all(
+        session,
+        skill_chunks(
+            {
+                "success": True,
+                "skillName": "SQL执行流程",
+                "skillDir": "C:/skills/sql-execution-workflow",
+                "workspace": ["SKILL.md"],
+            }
+        ),
+    )
+    loaded = [e for e in events if e["type"] == "skill.loaded"]
+    assert len(loaded) == 1
+    assert loaded[0]["data"]["name"] == "SQL执行流程"
+    # 挂在 tool.result 之下（父级 = 该工具的 call span），不另建 span
+    result = next(e for e in events if e["type"] == "tool.result")
+    assert loaded[0]["parent_span_id"] == result["event_id"]
+
+
+def test_failed_skill_load_emits_no_skill_loaded() -> None:
+    """以**结果**而非入参为据：技能名不存在时平台回 success=false + availableSkills。
+
+    把入参当事实源会记成"已加载"——那是另一种不实，且方向是**假绿**（断言在
+    一个没加载成功的技能上通过）。
+    """
+    session = make_session()
+    events = feed_all(
+        session,
+        skill_chunks({"success": False, "error": "skill not found", "availableSkills": ["docx"]}),
+    )
+    assert [e for e in events if e["type"] == "skill.loaded"] == []
+
+
+def test_other_tool_results_do_not_emit_skill_loaded() -> None:
+    """护栏：只有 `use_skill` 的结果能产生 `skill.loaded`（避免误报成"加载了技能"）。"""
+    session = make_session()
+    events = feed_all(
+        session,
+        [
+            ev("start", messageId="msg-7"),
+            ev("start-step"),
+            ev(
+                "tool-input-available",
+                toolCallId="call_r1",
+                toolName="read_file",
+                input={"filePath": "SKILL.md"},
+            ),
+            ev(
+                "tool-output-available",
+                toolCallId="call_r1",
+                output={"success": True, "skillName": "看起来像技能的东西"},
+            ),
+            ev("finish", finishReason="stop"),
+        ],
+    )
+    assert [e for e in events if e["type"] == "skill.loaded"] == []
+
+
 # ---------------------------------------------------------------- 审批挂起与续跑
 
 

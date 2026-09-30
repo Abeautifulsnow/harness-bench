@@ -86,7 +86,12 @@ def _benchmark_row(
     try:
         info, cases = load_dataset(root, definition.dataset)
         row.version = info.version
-        row.cases = len(cases)
+        # 计数口径必须与 `/benchmarks/{name}/cases` 一致：**套件选中**的条数，
+        # 不是 dataset 里的条数。两者不等的案例真实存在（database-core 是
+        # 40 vs 24：challenge 与 security 套件不在它的 suites 里，那 16 条 case
+        # 因此永远不会被这个 benchmark 执行）。"目录里数得到、run 时跑不到"正是
+        # 最该被看见的静默漏跑；在列表页把它算成已覆盖，等于把缺口藏起来。
+        row.cases = len(resolve_cases(definition, load_suites(root), cases))
     except AgentEvalError:
         pass
     if last is not None:

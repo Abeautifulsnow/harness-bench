@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import pytest
@@ -167,3 +171,102 @@ async def test_health_non_2xx_body_lands_in_detail() -> None:
     assert health.ok is False
     assert "license-invalid" in health.detail
     assert "503" in health.detail
+
+
+# --------------------------------------------------------------- 流式读超时
+
+
+def _slow_sse_server(delay: float) -> tuple[ThreadingHTTPServer, str]:
+    """起一个真实 HTTP 服务：SSE 响应在发出头之后**静默 delay 秒**才给首个事件。
+
+    用它而不是 MockTransport，是因为要验的正是"两个 chunk 之间的等待"——
+    MockTransport 一次性返回整个 body，构造不出这段静默。
+    """
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt: str, *args: object) -> None:  # quiet
+            pass
+
+        def do_GET(self) -> None:  # noqa: N802
+            self._json({"session_id": "sess_slow", "workdir_accessible": True})
+
+        def do_POST(self) -> None:  # noqa: N802
+            # 必须先读干请求体：keep-alive 下未消费的 body 会被 HTTP/1.1 解析器
+            # 当成下一条请求的请求行（表现为 501 Unsupported method，而服务端
+            # 根本没收到第二次请求——排查一次踩坑的现场记录）。
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
+            if self.path == "/api/agent/sessions":
+                self._json({"session_id": "sess_slow", "workdir_accessible": True})
+                return
+            body = b""
+            for event in (_evt("e1", "run.started"), _evt("e2", "run.finished")):
+                body += f"data: {json.dumps(event.model_dump(mode='json'))}\n\n".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            time.sleep(delay)  # 头已发出，静默：读超时若存在就会在这里触发
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                self.wfile.write(body)
+
+        def _json(self, payload: dict) -> None:
+            raw = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                self.wfile.write(raw)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[:2]
+    return server, f"http://{host}:{port}"
+
+
+async def test_stream_survives_silence_longer_than_the_default_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """一轮能跑多久由 case 的预算决定，不由传输层决定（联调实测缺陷的护栏）。
+
+    红的方式（修之前）：`DEFAULT_TIMEOUT` 的 30s 读上限被套在流式调用上，
+    于是"两个 chunk 之间静默过久"被判成 **INFRA_FAILURE（exit 2）**——
+    一次正常的慢被报成基础设施故障，而 case 声明的 timeout 永远轮不到生效。
+    这里把默认值缩到 0.2s 放大同一根因，服务端静默 0.6s：读侧若继承默认值，
+    这个流必然断在静默里。
+    """
+    from agent_eval.adapters import http_adapter as adapter_mod
+
+    monkeypatch.setattr(adapter_mod, "DEFAULT_TIMEOUT", httpx.Timeout(0.2))
+    server, base = _slow_sse_server(delay=0.6)
+    adapter = HttpAgentAdapter(base)
+    try:
+        session = await adapter.create_session(SessionContext(eval_run_id="r", case_id="c"))
+        events = [e async for e in adapter.run(session, AgentRequest(message="hi"))]
+    finally:
+        await adapter.aclose()
+        server.shutdown()
+        server.server_close()
+    assert [e.type for e in events] == ["run.started", "run.finished"]
+
+
+async def test_create_session_keeps_a_finite_read_timeout() -> None:
+    """反过来：非流式请求**不得**继承"读侧无上限"——它会静默挂死。
+
+    读侧不设上限只对逐轮流式调用成立（那条路径上有 case 级 asyncio.timeout 兜底）。
+    create_session 没有别的兜底，挂死就是整次 run 挂死。
+    """
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(request.extensions.get("timeout") or {})
+        return httpx.Response(200, json={"session_id": "s1"})
+
+    adapter = HttpAgentAdapter("http://mock", client=_mock_client(handler))
+    await adapter.create_session(SessionContext(eval_run_id="r", case_id="c"))
+    assert seen.get("read") is not None, seen

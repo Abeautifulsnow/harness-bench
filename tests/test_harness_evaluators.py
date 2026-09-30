@@ -21,6 +21,7 @@ from agent_eval.evaluators.harness import (
     LoopEvaluator,
     MCPPermissionEvaluator,
     RetryEvaluator,
+    SkillLoadEvaluator,
     SubAgentRoutingEvaluator,
     longest_consecutive_run,
 )
@@ -263,6 +264,109 @@ class TestSubAgentRoutingEvaluator:
             )
         )
         assert lenient.verdict == "pass"
+
+
+def _skill_events(loaded: list[str], discovered: list[str] | None = None) -> list[TraceEvent]:
+    events = [
+        TraceEvent(event_id=f"evt_s{i}", trace_id="t1", type="skill.loaded", data={"name": name})
+        for i, name in enumerate(loaded)
+    ]
+    events += [
+        TraceEvent(
+            event_id=f"evt_d{i}", trace_id="t1", type="skill.discovered", data={"name": name}
+        )
+        for i, name in enumerate(discovered or [])
+    ]
+    return events
+
+
+class TestSkillLoadEvaluator:
+    """C 类勘察修正：``expected_loaded`` 是**集合**声明，两个方向都要能红。
+
+    修正前只查 ``missing``，于是 ``expected_loaded: []``（"本条不得加载任何 skill"，
+    仓库里既有用例就是这么写的）恒 pass —— 一条怎么都不会红的声明。下面的
+    "多加载了"方向就是钉这个缺陷的。
+    """
+
+    async def test_undeclared_params_are_skipped(self) -> None:
+        plugin = SkillLoadEvaluator()
+        metric = await plugin.evaluate(
+            _ctx(events=_skill_events(["sql_optimizer"]), params={}, metric_id=plugin.name)
+        )
+        assert metric.verdict == "skipped"
+        assert metric.blocking is False
+
+    async def test_declared_set_matches_passes(self) -> None:
+        plugin = SkillLoadEvaluator()
+        metric = await plugin.evaluate(
+            _ctx(
+                events=_skill_events(["sql_optimizer", "schema_reader"]),
+                params={"expected_loaded": ["sql_optimizer", "schema_reader"]},
+                metric_id=plugin.name,
+            )
+        )
+        assert metric.verdict == "pass"
+
+    async def test_missing_skill_fails(self) -> None:
+        plugin = SkillLoadEvaluator()
+        metric = await plugin.evaluate(
+            _ctx(
+                events=_skill_events(["schema_reader"]),
+                params={"expected_loaded": ["sql_optimizer"]},
+                metric_id=plugin.name,
+            )
+        )
+        assert metric.verdict == "fail"
+        assert "未加载" in metric.reason
+
+    async def test_extra_skill_fails(self) -> None:
+        """``expected_loaded: []`` 是"不得加载任何 skill"——加载了就红。"""
+        plugin = SkillLoadEvaluator()
+        metric = await plugin.evaluate(
+            _ctx(
+                events=_skill_events(["generic_helper"]),
+                params={"expected_loaded": []},
+                metric_id=plugin.name,
+            )
+        )
+        assert metric.verdict == "fail"
+        assert metric.metadata["unexpected"] == ["generic_helper"]
+
+    async def test_extra_skill_allowed_when_declared(self) -> None:
+        plugin = SkillLoadEvaluator()
+        metric = await plugin.evaluate(
+            _ctx(
+                events=_skill_events(["sql_optimizer", "helper"]),
+                params={"expected_loaded": ["sql_optimizer"], "allow_extra": True},
+                metric_id=plugin.name,
+            )
+        )
+        assert metric.verdict == "pass"
+
+    async def test_first_loaded_order_is_judged(self) -> None:
+        plugin = SkillLoadEvaluator()
+        metric = await plugin.evaluate(
+            _ctx(
+                events=_skill_events(["generic_helper", "sql_optimizer"]),
+                params={"expected_first": "sql_optimizer", "allow_extra": True},
+                metric_id=plugin.name,
+            )
+        )
+        assert metric.verdict == "fail"
+        assert "首个加载" in metric.reason
+
+    async def test_no_extra_check_when_set_not_declared(self) -> None:
+        """只声明 ``max_loaded`` 时不该冒出"未声明的 skill"——那时没有集合可比。"""
+        plugin = SkillLoadEvaluator()
+        metric = await plugin.evaluate(
+            _ctx(
+                events=_skill_events(["anything"]),
+                params={"max_loaded": 2},
+                metric_id=plugin.name,
+            )
+        )
+        assert metric.verdict == "pass"
+        assert metric.metadata["unexpected"] == []
 
 
 class TestRegistration:

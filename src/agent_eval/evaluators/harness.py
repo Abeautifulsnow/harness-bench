@@ -216,14 +216,26 @@ class SkillLoadEvaluator(EvaluatorPlugin):
     "多个 skill 同时匹配时哪个该赢"在事件流里就是 ``skill.loaded`` 的顺序。
 
     只判"加载了谁/谁在前"，不判"该不该加载"：后者需要语义判断（PRD §110-3）。
-    三个参数都未声明时判 skipped。
+    四个参数都未声明时判 skipped。
+
+    ``expected_loaded`` 声明后按**集合双向**比对（C 类勘察修正）：少了判"未加载"，
+    多了判"未声明的 skill"（``allow_extra: true`` 可放宽）。修正前的实现只查
+    ``missing``，于是 ``expected_loaded: []`` —— 本文件与 `skill.fallback.no_skill`
+    都写明它是"本条不得加载任何 skill"的真断言 —— 实际**恒 pass**：一条怎么都不会
+    红的声明正是 §19.1 要拦的假绿。集合比对是既有先例（``SubAgentRoutingEvaluator``
+    的 ``allow_extra``），两个插件现在同构。
     """
 
     name = "harness.skill_load"
     description = "实际加载/首个加载的 skill 符合声明（params.expected_loaded / expected_first）"
     # 三个参数缺省 None：`expected_loaded: []`（不得加载任何 skill）与"没声明"必须
     # 可区分，否则前者会退化成 skipped——那正是"该红的时候不红"。
-    default_params = {"expected_loaded": None, "expected_first": None, "max_loaded": None}
+    default_params = {
+        "expected_loaded": None,
+        "expected_first": None,
+        "max_loaded": None,
+        "allow_extra": False,
+    }
     required_events = ("skill.loaded",)
 
     async def evaluate(self, context: EvaluationContext) -> MetricResultModel:
@@ -231,6 +243,7 @@ class SkillLoadEvaluator(EvaluatorPlugin):
         expected = [str(name) for name in (declared_loaded or [])]
         first = context.param("expected_first")
         max_loaded = context.param("max_loaded")
+        allow_extra = bool(context.param("allow_extra", False))
         loaded = [str(event.data.get("name", "")) for event in context.events_of("skill.loaded")]
         loaded = [name for name in loaded if name]
         discovered = sorted(
@@ -248,6 +261,15 @@ class SkillLoadEvaluator(EvaluatorPlugin):
         missing = [name for name in expected if name not in loaded]
         if missing:
             problems.append(f"未加载：{', '.join(missing)}")
+        # 未声明的加载只在**声明了集合**时才判：没声明集合就没有"多出来的"这回事
+        # （与 subagent_routing 一致——那时只判 expected_first / max_loaded）。
+        unexpected = (
+            [name for name in loaded if name not in expected]
+            if declared_loaded is not None
+            else []
+        )
+        if unexpected and not allow_extra:
+            problems.append(f"出现未声明的 skill：{', '.join(unexpected)}")
         if first is not None and (not loaded or loaded[0] != str(first)):
             actual_first = loaded[0] if loaded else "-"
             problems.append(f"首个加载的 skill 应为 '{first}'，实际 '{actual_first}'")
@@ -258,6 +280,7 @@ class SkillLoadEvaluator(EvaluatorPlugin):
             "discovered": discovered,
             "expected_loaded": expected,
             "expected_first": first,
+            "unexpected": unexpected,
         }
         if problems:
             return context.result("fail", score=0.0, reason="；".join(problems), metadata=metadata)

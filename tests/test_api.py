@@ -70,13 +70,32 @@ class TestReadOnlyContract:
 class TestCatalog:
     def test_benchmarks_and_cases(self, client: TestClient) -> None:
         benchmarks = client.get("/api/benchmarks").json()
-        assert [b["name"] for b in benchmarks] == ["database-core"]
-        assert benchmarks[0]["cases"] > 0
+        # 这个端点是"列目录"，不是"列某一个 benchmark"：写死名单会让目录接口
+        # 每加一个 DataSet 就假红一次，而它本该自动收录新定义。
+        names = [b["name"] for b in benchmarks]
+        assert "database-core" in names, names
+        assert names == sorted(names), f"benchmark 列表应当有序：{names}"
+        assert all(b["cases"] > 0 for b in benchmarks), names
 
         cases = client.get("/api/benchmarks/database-core/cases").json()
         assert cases, "benchmark 应解析出 case"
         assert {c["dataset_id"] for c in cases} == {"database-core"}
         assert any("tools" in c["mount_points"] for c in cases)
+
+    def test_every_benchmark_resolves_its_own_cases(self, client: TestClient) -> None:
+        """逐个 benchmark 校验，不是只校一个：目录里有一个坏的，其余仍会显示正常。
+
+        `cases` 的口径是**套件选中**的条数（与 `/cases` 端点同一实现）：不等于
+        dataset 条数的情形真实存在（database-core 40 → 24），而"数得到却跑不到"
+        的 case 必须在这两个端点上给出同一个数，否则缺口会在列表页被藏起来。
+        """
+        for bench in client.get("/api/benchmarks").json():
+            cases = client.get(f"/api/benchmarks/{bench['name']}/cases").json()
+            assert cases, f"{bench['name']} 解析不出 case"
+            assert len(cases) == bench["cases"], f"{bench['name']} 计数与解析结果不一致"
+            # `dataset` 是 "<id>@<version>" 引用，case 行给的是 <id>：比对前半段
+            expected_id = str(bench["dataset"]).partition("@")[0]
+            assert {c["dataset_id"] for c in cases} == {expected_id}
 
     def test_case_detail_returns_assertions(self, client: TestClient) -> None:
         cases = client.get("/api/cases", params={"q": "echo"}).json()
