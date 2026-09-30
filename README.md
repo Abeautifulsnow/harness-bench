@@ -10,7 +10,7 @@ Agent 工程质量平台：Benchmark / Experiment / Evaluation / Regression / Fa
 
 ```bash
 uv sync                                # 安装依赖（judge 引擎：uv sync --extra judge）
-uv run agent-eval benchmark run smoke  # 对内置 fake agent 跑通 smoke（无需真实 Agent）
+uv run agent-eval benchmark run database-core --tag smoke  # 对内置 fake agent 跑通 smoke（无需真实 Agent）
 ```
 
 评测定义位于 `evals/`（datasets/suites/benchmarks/profiles），夹具数据位于 `fixtures/`，
@@ -21,7 +21,7 @@ uv run agent-eval benchmark run smoke  # 对内置 fake agent 跑通 smoke（无
 ```bash
 export AGENT_EVAL_AGENT_ENDPOINT=http://127.0.0.1:8802
 uv run python -m agent_eval.dev.mock_server --port 8802   # 内置 mock agent
-uv run agent-eval benchmark run smoke
+uv run agent-eval benchmark run database-core --tag smoke
 ```
 
 ### 评价一个外部 Agent 平台
