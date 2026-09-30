@@ -357,6 +357,8 @@ async def test_workdir_reaches_agent_per_iteration(evals_tree, fixtures_root) ->
     outcome, meta, _ = await _run_instrumented(cfg, adapter)
     assert adapter.created
     assert all("workdir" in ctx.extra for ctx in adapter.created)
+    # 跨进程句柄必须绝对路径：SUT 进程的 CWD 与 harness 无关（联调实测缺陷）
+    assert all(Path(ctx.extra["workdir"]).is_absolute() for ctx in adapter.created)
     assert len({ctx.extra["workdir"] for ctx in adapter.created}) == len(adapter.created)
     assert outcome.exit_code == 0
     assert meta.warnings == []  # 明确回执可达 → 无告警

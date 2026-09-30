@@ -673,8 +673,10 @@ class Runner:
                         iteration=iteration,
                         # A1：fixture 沙箱 handle 在 prepare（本 case 之前执行）时
                         # 就已就绪，这里补上断掉的一环——把环境交给被测方。
+                        # 跨进程句柄必须**绝对路径**：SUT 进程的 CWD 与本进程无关
+                        # （联调实测：相对路径让回执"不可达"真实触发，A1 修订二生效）。
                         # E4：extra 保持不透明透传，框架只约定键名、不解释语义。
-                        extra={"workdir": str(workdir)} if workdir is not None else {},
+                        extra={"workdir": str(workdir.resolve())} if workdir is not None else {},
                     )
                 )
             except InfraError as exc:
