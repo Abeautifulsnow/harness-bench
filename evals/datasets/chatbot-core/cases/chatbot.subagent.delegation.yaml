@@ -1,0 +1,62 @@
+# 维度：Tool（子代理路由）——`subagent.started` 事件与 `harness.subagent_routing`。
+#
+# 判定对象是"把子任务交给了谁"，不是"交得好不好"（后者是语义判断，留给 judge，
+# 见 SubAgentRoutingEvaluator 的注释）。实测（tmp/probe_c_cases.py subagent）：
+# prompt 要求用 agent 工具委托时，流上出现 `tool.call agent` 与恰好一个
+# `subagent.started`，其 name 是 `auto` —— 那是 ai-chatbot 在调用方未指定
+# agentType 时的缺省标识（`agentType ?? 'auto'`），不是工具名。
+#
+# 因此参数这样定：
+#   expected: ["auto"]       —— 至少路由到了缺省代理（少路由会红）；
+#   allow_extra: true        —— 允许它另外起 `general-purpose` 之类的专用代理
+#                               （实测在别的提示词下确实会先起 auto 再起它，
+#                               用 allow_extra 换掉随机变红的风险）。
+# 这是"集合断言在非确定性 SUT 上的正确用法"：**确定的那一侧**写死，
+# 不确定的那一侧显式放宽，而不是把整条断言退化成一个宽松的词匹配。
+id: chatbot.subagent.delegation
+version: 1
+name: 子代理委托与路由（Tool 正向）
+tags:
+  - chatbot
+  - tool-use
+  - subagent
+  - golden
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    请用 agent 工具把这件事委托给一个子代理：让它统计当前工作目录里 handbook.md 的字符数。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 240
+  repeat: 2
+
+expected:
+  status: success
+  output:
+    contains:
+      - "handbook.md"
+  tools:
+    required:
+      - agent
+  constraints:
+    max_tool_calls: 6
+  file_state:
+    absent:
+      - notes.txt
+
+# strict 档：本 case 的路由断言落在 harness.subagent_routing 上，而 plain 档里
+# harness.* 一律 blocking=false——那会让这条 golden 变成"路由错了也照样绿"，
+# 与它存在的理由（证明 subagent.started 被观测到且名字对得上）直接矛盾。
+evaluation_profile: chatbot-strict
+
+metric_params:
+  harness.subagent_routing:
+    expected:
+      - auto
+    allow_extra: true

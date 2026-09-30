@@ -1,0 +1,14 @@
+# ai-chatbot-core：C 类 benchmark（change-plan §3）。
+#
+# 与 database-core 并存，互不影响：后者的 case 假设的工具名是 execute_sql /
+# shell_exec、fixture 是 sales_v2，对 ai-chatbot 不可复用（§3 首段）。
+#
+# suites 只声明 chatbot 一个套件——**这就是"首版只做确定性部分"的落点**：
+# 换档（把 judge 类 case 收进同一套件）由 profile 决定，不由 benchmark 决定。
+name: ai-chatbot-core
+description: ai-chatbot 专用评测集（C 类，change-plan §3）：确定性断言首版
+owner: agent-platform
+dataset: chatbot-core@1.0.0
+suites:
+  - chatbot
+default_profile: chatbot-plain

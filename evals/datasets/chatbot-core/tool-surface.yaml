@@ -1,0 +1,134 @@
+# 被测方（ai-chatbot）工具面的冻结快照 —— C 类 case 的工具名唯一比对基准。
+#
+# 为什么需要这份文件：C 类第一条硬约束是"case 里的工具名必须与 SUT 实际发出的
+# `toolName` 逐字一致"（change-plan §3.1）。拼错的后果是不对称的——`tools.required`
+# 恒 FAIL（显性、容易被当成 agent 坏），`tools.forbidden` 恒 pass（隐性、看起来
+# 一切正常）。靠人工核对挡不住这个，所以把权威名单**冻结进本仓库**，
+# 由 tests/test_chatbot_dataset.py 对 case 逐名核对。
+#
+# 关于"权威"：唯一权威是 ai-chatbot 的 registry 本身，不是任何文档清单
+# （change-plan §3 第四轮校准：文档各列了不同子集）。这份快照是**从 registry 读
+# 出来的**，登记了出处与刷新命令；它不是第二事实源，是"读的那一刻"的复印件。
+#
+# 刷新（在被测仓库根执行，然后逐条比对 registry 与下面两份清单）：
+#   rg -n "name: '" packages/core/src/runtime/tools/index.ts        # 内置工具元数据
+#   rg -n "TASK_TOOL_NAMES" packages/core/src/runtime/tasks/tools.ts
+#   rg -n "tools\.(agent|resume_subagent|check_subagent)" packages/core/src/runtime/agent/tools.ts
+source_repo: ai-chatbot
+read_at: "2026-09-30"
+version_hint: "5e99159 前后（harness-bench 侧）；ai-chatbot 以工作树为准"
+
+# stability 的两个取值，含义是"能否被 case 逐字点名"：
+#   exact   —— 名字是静态字面量，可以（也应该）写进 tools.required / tool_arguments
+#   dynamic —— 名字在运行期由配置拼出来，禁止写进 required（见 change-plan §3.1 的下半句）
+tools:
+  # --- 内置工具（packages/core/src/runtime/tools/index.ts:39-56 的元数据，
+  #     工厂里的 name 字面量在各自文件中；15 个）---
+  read_file:
+    stability: exact
+    source: packages/core/src/runtime/tools/read.ts
+  write_file:
+    stability: exact
+    source: packages/core/src/runtime/tools/write.ts
+  edit_file:
+    stability: exact
+    source: packages/core/src/runtime/tools/edit.ts
+  save_report:
+    stability: exact
+    source: packages/core/src/runtime/tools/save-report.ts
+  bash:
+    stability: exact
+    source: packages/core/src/runtime/tools/bash.ts
+  grep:
+    stability: exact
+    source: packages/core/src/runtime/tools/grep.ts
+  glob:
+    stability: exact
+    source: packages/core/src/runtime/tools/glob.ts
+  ls:
+    stability: exact
+    source: packages/core/src/runtime/tools/ls.ts
+  web_search:
+    stability: exact
+    source: packages/core/src/runtime/tools/exa-search.ts
+  ask_user_question:
+    stability: exact
+    source: packages/core/src/runtime/tools/ask-user-question.ts
+  use_skill:
+    stability: exact
+    source: packages/core/src/runtime/tools/skill.ts
+  create_cron:
+    stability: exact
+    source: packages/core/src/runtime/tools/create-cron.ts
+  list_cron:
+    stability: exact
+    source: packages/core/src/runtime/tools/create-cron.ts
+  edit_cron:
+    stability: exact
+    source: packages/core/src/runtime/tools/create-cron.ts
+  delete_cron:
+    stability: exact
+    source: packages/core/src/runtime/tools/create-cron.ts
+
+  # --- 任务工具（packages/core/src/runtime/tasks/tools.ts，TASK_TOOL_NAMES）---
+  task_create:
+    stability: exact
+    source: packages/core/src/runtime/tasks/tools.ts
+  task_update:
+    stability: exact
+    source: packages/core/src/runtime/tasks/tools.ts
+  task_list:
+    stability: exact
+    source: packages/core/src/runtime/tasks/tools.ts
+  task_get:
+    stability: exact
+    source: packages/core/src/runtime/tasks/tools.ts
+
+  # --- 子代理工具（packages/core/src/runtime/agent/tools.ts 的合并点；
+  #     resume_subagent / check_subagent 仅在宿主注入 persistence 时存在）---
+  agent:
+    stability: exact
+    source: packages/core/src/extensions/subagents/agent-tool.ts
+  resume_subagent:
+    stability: exact
+    source: packages/core/src/extensions/subagents/resume-tool.ts
+  check_subagent:
+    stability: exact
+    source: packages/core/src/extensions/subagents/check-tool.ts
+
+  # --- 计划模式专有（仅 plan mode 激活时注册）---
+  exit_plan_mode:
+    stability: exact
+    source: packages/core/src/runtime/tools/plan-mode.ts
+
+  # --- MCP：`mcp__<server>__<tool>`，server/tool 段经 sanitize 后拼装。
+  #     名字可逐字写，但**取决于被测实例挂了哪些 MCP server**，所以 case 里
+  #     点名它等于把断言绑到"这台机器上的配置"。C 类首版不覆盖 MCP 维度，
+  #     原因见 dataset.yaml。---
+  "mcp__<server>__<tool>":
+    stability: dynamic
+    source: packages/core/src/extensions/mcp/registry.ts
+
+  # --- connector：`<connectorId>_<tool.name>`，**无分隔符、无 sanitize**。
+  #     实测同一次联调里出现过 `PG-192-100-6-55_*` 与 `pg-query-192-100-6-55_*`
+  #     两种大小写/形态，因此永远不进 tools.required。---
+  "<connectorId>_<tool>":
+    stability: dynamic
+    source: packages/core/src/extensions/connector/tool-adapter.ts
+
+  # --- 宿主注入的自定义工具（apps/sime-agent 的 customTools）---
+  search_knowledge:
+    stability: exact
+    source: apps/sime-agent/lib/ai/tools/knowledge-base.ts
+  generate_image:
+    stability: exact
+    source: apps/sime-agent/lib/ai/tools/image-generation.ts
+  analyze_image:
+    stability: exact
+    source: apps/sime-agent/lib/ai/tools/vision-analysis.ts
+  save_asset:
+    stability: exact
+    source: apps/sime-agent/lib/ai/tools/asset-save.ts
+  create_platform_capability:
+    stability: exact
+    source: apps/sime-agent/lib/ai/tools/create-platform-capability.ts

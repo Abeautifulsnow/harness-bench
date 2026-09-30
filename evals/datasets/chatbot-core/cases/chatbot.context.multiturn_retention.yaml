@@ -1,0 +1,70 @@
+# 维度：Context（多轮正向上的跨轮保留）——轮级挂载点与"上一轮说的话还算数"。
+#
+# 这是首版唯一的 multi_turn 正向 case，它同时盖两件此前没盖到的事：
+#
+#   turn 级挂载点（input.turns[i].expect）—— Spec §2.5，判定只在 turn 内成立；
+#   expected.final 的 session 级断言 —— Spec §2.3，只在 multi_turn 上合法。
+#
+# turn1 明确说"只记住，不要写进任何文件"，turn2 只要求"用 bash 执行 echo 并带上代号"。
+# 于是被测的是三件事：turn2 真的调了 bash（turn 级 required）、没有顺手把上下文里的
+# 东西写进磁盘（session 级 file_state.absent），以及 ORBIT-42 跨轮活了下来
+# （final.output.contains）。
+#
+# final 层的 output 断言判的正是**跨轮保留**：ORBIT-42 只在 turn1 出现过，
+# 是语境里的一个纯 token，没有别的地方可查（不能靠读文件补回来——那正是 turn1
+# 禁止的事）。所以它是一条真的会话级断言，不是把 turn2 的断言抄一遍。
+#
+# 它原先带 `negative` 标签，现已摘掉：实测两轮真机（run_d487591757ca、
+# run_2e94cebd9e07）它都全绿，说明它是一条"期望 agent 做到"的**正向**检查，
+# 而不是"故意撞线的 canary"。挂着 negative 会让读者以为它该红，而它不红——
+# 那正是 §19.1 说的不可区分。context 维度的负向改由同目录的
+# `chatbot.context.turn_constraint.negative` 承担（turn 级挂载点的失败路径）。
+id: chatbot.context.multiturn_retention
+version: 1
+name: 多轮上下文保留（Context 正向）
+tags:
+  - chatbot
+  - context
+  - golden
+difficulty: medium
+
+input:
+  type: multi_turn
+  turns:
+    - user: |
+        请记住代号 ORBIT-42（只记住，不要写进任何文件），然后回复一行 `ACK`。
+      expect:
+        output:
+          contains:
+            - "ACK"
+    - user: |
+        现在请用 bash 工具执行 `echo ready`，并在回报里带上我上一条消息给你的那个代号。
+      expect:
+        tools:
+          required:
+            - bash
+          forbidden:
+            - write_file
+        constraints:
+          max_tool_calls: 4
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 150
+  repeat: 2
+
+expected:
+  final:
+    status: success
+    output:
+      contains:
+        - "ORBIT-42"
+  file_state:
+    absent:
+      - notes.txt
+      - memory.md
+
+evaluation_profile: chatbot-plain

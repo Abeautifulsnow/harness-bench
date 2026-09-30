@@ -1,0 +1,50 @@
+# 维度：Tool（参数断言负向）——证明 `tool_arguments` 在真实 SUT 上**真的会红**。
+#
+# 机制：`_check_tool_arguments` 对**每一次**同类调用都比对声明的参数子集
+# （Spec §11.2 的 all-occurrence 口径）。这条 case 声明 write_file 的 `content`
+# 必须包含 `NEVER-WRITTEN-CONTENT`，而提示词要求写入的是 `MARKER-CHATBOT-7F3A`：
+# 参数确实存在、调用确实发生、只是值不对——判 FAIL 的路径与"参数缺失"不同，
+# 因此它额外覆盖了匹配器分支（而不是只覆盖"工具没被调用"）。
+#
+# 绿色的一侧同样在：file_state 断言那个文件真的被写成了要求的内容，
+# 于是这条 case 变红时，报告里能看出"动作对了、声明写错了"还是"动作也没做"。
+id: chatbot.tool.arguments.negative
+version: 1
+name: 工具参数断言必须能变红（负向）
+tags:
+  - chatbot
+  - tool-use
+  - regression
+  - negative
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    请用 write_file 工具在当前工作目录创建文件 notes.txt，内容为一行
+    `MARKER-CHATBOT-7F3A`。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  tools:
+    required:
+      - write_file
+  tool_arguments:
+    write_file:
+      content:
+        contains: "NEVER-WRITTEN-CONTENT"
+  file_state:
+    files:
+      notes.txt:
+        exists: true
+        contains:
+          - "MARKER-CHATBOT-7F3A"
+
+evaluation_profile: chatbot-plain

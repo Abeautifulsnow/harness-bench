@@ -1,0 +1,67 @@
+# 维度：Context（多轮负向）——turn 级挂载点的**失败路径**必须真的能走通。
+#
+# 断言落在 turn[2] 上，`constraints.max_tool_calls: 0`（那一轮不许调用任何工具），
+# 而 turn2 的提示词明确要求"用 bash 工具执行 echo ready"——两者不可能同时成立，
+# 于是 `native.performance` 在 turn[2] 上必然判红。这与同数据集另外两条 canary
+# （`tool.step_ratio.negative` 的 baseline 0 步、`database.assertion.negative` 的
+# min_rows: 99）是同一手法：该红的能红，靠的是一条**故意不可满足**的声明。
+#
+# 为什么必须专门有一条：轮级挂载点是 Spec §2.5 的独立判决入口，而
+# quality-guidelines 的"断言有效性不变式"第 1 条要求**全部挂载点参与判决**
+# （case 级 expected、session 级 expected.final、turn 级 expect 都要进
+# `all_metric_results`，由 `blocking_failed` 统一消费）。这条不变式此前只有
+# 正向证据（turn 级断言在两条真机 run 里都判 pass）；一条从不判红的挂载点与
+# "压根没接进聚合视图"在报告里长得一样——后者会让"turn 级约束"变成装饰品。
+# 本 case 把它反过来钉住：**红必须真的是红，且必须带 turn[2] 的归属**。
+#
+# 报红的 reason 形如 `turn[2] ... tool calls 1 > max_tool_calls 0`：既能看到是
+# 哪一轮，也能看到实际步数。选 max_tool_calls 而不是 `forbidden: [bash]` 来撞线，
+# 是为了让红不依赖"agent 恰好选了哪个工具"——prompt 要求做一件事，任何工具选择都
+# 会撞过上限 0，撞线原因是可预测的。
+#
+# 其余断言（turn1 的 ACK、final 的代号保留）都是已知会绿的：报告里判红的 reason
+# 只指向 turn[2] 那一条，读者能区分"轮级约束被触发"与"整段会话崩了"。
+#
+# 与所有负向用例一样，它只作为"断言机制可用"的证据存在于 regression 套件，
+# 绝不进 golden（否则 release 档的 `required_pass_rate: 1.0` 永远不满足）。
+id: chatbot.context.turn_constraint.negative
+version: 1
+name: 轮级约束断言必须能变红（Context 负向）
+tags:
+  - chatbot
+  - context
+  - regression
+  - negative
+difficulty: medium
+
+input:
+  type: multi_turn
+  turns:
+    - user: |
+        请记住代号 VECTOR-88（只记住，不要写进任何文件），然后回复一行 `ACK`。
+      expect:
+        output:
+          contains:
+            - "ACK"
+    - user: |
+        现在请用 bash 工具执行 `echo ready`，并在回报里带上我上一条消息给你的那个代号。
+      expect:
+        constraints:
+          max_tool_calls: 0
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 150
+  repeat: 2
+
+expected:
+  final:
+    status: success
+    output:
+      contains:
+        - "VECTOR-88"
+
+evaluation_profile: chatbot-plain

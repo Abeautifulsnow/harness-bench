@@ -1,0 +1,67 @@
+# 维度：Skill（负向）——`expected_loaded: []` 必须真的会红。
+#
+# 这条用例**故意点名一个不存在的技能**并允许 agent 加载任何东西。它证明的是
+# `SkillLoadEvaluator` 的集合比对是双向的：声明"不得加载任何 skill"而 agent
+# 加载了（哪怕加载错了对象）→ FAIL。
+#
+# 它正是第八轮修掉的那个缺陷的护栏：修正前 `expected_loaded: []` 只查 missing
+# 方向，missing 恒空 → 这条 case **恒 pass**。一条怎么都不会红的声明是 §19.1
+# 要拦的假绿，而不是"安全的保守默认"。
+#
+# 为什么不让 agent 加载 `chatbot-probe` 而改点 `chatbot-ghost-skill`：实测
+# （probe skill_ghost）agent 会对一个不存在的技能名照样发起 use_skill，只是
+# use_skill 的**模糊匹配**（目标 SUT 的四段匹配里含子串匹配）会命中平台主目录下
+# 某个含 "skill" 的技能并返回 success:true。于是"agent 尝试了、平台加载了别的"
+# 这个真实路径被覆盖到，而 expected_loaded: [] 对它是红的——负向用例要的正是
+# 这个可区分性。
+#
+# `tools.required: [use_skill]` 是**必须留着**的那一条，理由与"canary 不得变绿"
+# 直接相关：第三跑（run_69918662134c）实测到它的另一半作用。两次迭代里 agent
+# 一次**拒绝调用**（它自己核对了技能清单，发现 chatbot-ghost-skill 不存在，于是
+# 不发起调用并如实说明），另一次才照做。拒绝调用那一轮 harness.skill_load 判的是
+# **pass**——修复后的集合比对是双向的，"声明不得加载任何 skill 且确实没加载"就该
+# 是绿的。此时若没有 tools.required，整个 case 会**变绿**：一条恒绿的负向用例。
+# 有它在，那一轮由 native.tool_sequence 承担发红，issue 归属还能在报告里看清
+# （reason 分别写着 `required tool not called: use_skill` 与
+# `出现未声明的 skill：Skill审核`）。
+#
+# 这条行为值得如实记下来，因为它是真实 LLM 的固有抖动而非缺陷：本 case 保证的是
+# **case 级永不绿**，不保证**每次迭代都由 skill_load 发红**。
+id: chatbot.skill.load.negative
+version: 1
+name: 未声明却加载了 skill（Skill 负向）
+tags:
+  - chatbot
+  - skill
+  - regression
+  - negative
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    请调用 use_skill 工具加载名为 `chatbot-ghost-skill` 的技能，然后告诉我结果。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  tools:
+    required:
+      - use_skill
+
+# 必须用 strict 档：这条 case 的**唯一**断言就在 harness.skill_load 上，而
+# plain 档把 harness.* 一律设成 blocking=false。首跑（run_d487591757ca）实测这条
+# metric 判了 FAIL，但 case 状态是 **PASS**（pr=1.0）——负向用例在报告里长得和
+# "agent 合规"一模一样，正是本 case 要防的那种假绿。负向用例换 Profile 是平台
+# 既有手法（Spec §17.2：阻断权归 Profile；先例 database-core/skill.priority.wrong_order）。
+evaluation_profile: chatbot-strict
+
+metric_params:
+  harness.skill_load:
+    expected_loaded: []

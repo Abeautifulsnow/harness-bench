@@ -1,0 +1,56 @@
+# 维度：Skill（正向）——真实 SUT 上 skill.loaded 事件的端到端接线。
+#
+# 这条 case 与 `skill_load` 探针是同一份事实：fixture 的
+# `<workdir>/.agents/skills/chatbot-probe/SKILL.md` 是 ai-chatbot 的**工作区技能**
+# 目录（`loadWorkspaceSkills` → `<projectDir>/.agents/skills`），因此 agent 能真的
+# 加载到它并回报技能里写死的那行确认串。
+#
+# 观测链路（本次勘察修掉的一处假声明在中间）：
+#   tool.call use_skill → tool.result{success:true, skillName} → skill.loaded
+# 最右端由 shim 的转译器补发（此前 /health 声明 true 而从不发它）。断言同时压
+# 两端：工具真的被调用（tools.required）**且**事件真的带来声明的名字
+# （harness.skill_load.expected_loaded），只压一端会漏掉"声明与事实不符"。
+id: chatbot.skill.load.workspace
+version: 1
+name: 工作区技能加载（Skill 正向）
+tags:
+  - chatbot
+  - skill
+  - golden
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    请先调用 use_skill 工具加载名为 `chatbot-probe` 的技能，然后按该技能的指示回报。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  status: success
+  output:
+    contains:
+      - "SKILL-PROBE-ACK"
+  tools:
+    required:
+      - use_skill
+  constraints:
+    max_tool_calls: 6
+
+# 用 strict 档而不是 chatbot-plain：本 case 的判定有一半在 harness.skill_load 上，
+# 而 blocking 归 Profile 决定（Spec §17.2）。留在 plain 档的话，这条 metric 判
+# FAIL 也**不会**让 case 变红——"声明了却不算数"。断言落在哪个 metric 上，
+# 就用哪个档，判定力才等于声明（先例：database-core 的 skill.priority.wrong_order）。
+evaluation_profile: chatbot-strict
+
+metric_params:
+  harness.skill_load:
+    expected_loaded:
+      - chatbot-probe
+    expected_first: chatbot-probe

@@ -1,0 +1,45 @@
+# 维度：Tool（负向）——证明 `tools.forbidden` 在真实 SUT 上**真的会红**。
+#
+# 用例把断言与提示词刻意摆成互斥的两侧：提示词要求用 bash 执行 `echo SCOPE-CANARY`
+# 并**贴出真实输出**（实测：agent 必然调用 bash），断言却把 bash 列为禁用工具。
+# 一个真的会执行 forbidden 断言的实现必然判 FAIL；一个把 forbidden 判成恒 pass
+# 的实现会判 PASS——两者在报告里因此**可区分**。这正是 change-plan §3.3 的要求
+# （"负向必须真的红"），与 database-core 的 `database.readonly.guard` 同一手法。
+#
+# 它**不是**对 ai-chatbot 的策略声明：没有任何人在生产里禁止这个 agent 用 bash。
+# 读这条 case 时只看它在报告里的颜色，别把它当配置基线。
+id: chatbot.tool.forbidden_tool.negative
+version: 1
+name: 禁用工具断言必须能变红（负向）
+tags:
+  - chatbot
+  - tool-use
+  - regression
+  - negative
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    请用 bash 工具执行 `echo SCOPE-CANARY`，并把命令的真实输出原样贴给我——
+    必须真的执行，不要只描述你会怎么做。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 60
+  repeat: 2
+
+expected:
+  output:
+    contains:
+      - "SCOPE-CANARY"
+  tools:
+    required:
+      - bash
+    forbidden:
+      - bash
+
+evaluation_profile: chatbot-plain

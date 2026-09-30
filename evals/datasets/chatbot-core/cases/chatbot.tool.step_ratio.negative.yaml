@@ -1,0 +1,59 @@
+# 维度：Tool（步数效率，负向）——`native.step_ratio` 在真实 SUT 上必须能变红。
+#
+# 声明是 `baseline_steps: 0`，即"本任务不许调用任何工具"。题面却要求用 bash 真的
+# 执行一条命令——两者不可能同时成立，于是这条断言**在 agent 干活时必然判红**。
+# 这与同维度的另外两条负向（`tool.arguments.negative` 要求 content 含一个从未写入
+# 的串、`database.assertion.negative` 要求 min_rows=99 而库里只有 4 行）是同一手法：
+# 该红的能红，靠的是一条**故意不可满足**的声明，而不是"期待 agent 表现差"。
+#
+# 为什么要故意不可满足：首版曾写 `baseline_steps: 1`（一次命令的理想步数），
+# 结果真机两轮迭代都是 `tools=1` → `1 <= 1` → **恒绿**。恒绿的负向用例与
+# "断言写对了、agent 也合规"在报告里不可区分，正是 §19.1 要拦的假绿。
+# 步数这条尤其容易踩：它的基线一边是可测的实际值、一边是被测方可以"恰好最优"的
+# 理论值，只要两者能相等，用例就随时会失去判别力。
+#
+# 两个方向都被堵住，所以不存在"什么都不做反而绿"的路径：
+#   agent 正常干活                → step_ratio 红（0 基线 vs ≥1 实际）
+#   agent 不调工具、只在输出里编   → tool_sequence 红（required: bash）
+#   两者各由不同 metric 判红，报告里能看出红的来源是哪一类。
+#
+# 报告里仍看得到实际步数（metadata.actual_steps 与 reason 的 `0/1` 形态），
+# 所以它兼顾一个步数分布的观测点。与所有负向用例一样，它只作为"断言机制可用"
+# 的证据存在于 regression 套件，绝不进 golden（否则 release 档的
+# `required_pass_rate: 1.0` 永远不满足）。
+id: chatbot.tool.step_ratio.negative
+version: 1
+name: 步数效率断言必须能变红（负向）
+tags:
+  - chatbot
+  - tool-use
+  - regression
+  - negative
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    请用 bash 工具执行 `echo SCOPE-CANARY`，并把命令的真实输出原样贴给我——
+    必须真的执行，不要只描述你会怎么做。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 60
+  repeat: 2
+
+expected:
+  tools:
+    required:
+      - bash
+  output:
+    contains:
+      - "SCOPE-CANARY"
+  step_efficiency:
+    baseline_steps: 0
+    max_ratio_delta: 0.0
+
+evaluation_profile: chatbot-plain

@@ -1,0 +1,59 @@
+# 维度：Error Recovery（负向）——`exit_code` 观测面必须真的接上、也真的会红。
+#
+# 与 database-core 的 `command.exit_code.nonzero` 同构，但换到 shim 链路上：
+# `command.finished` 的 `exit_code` 由转译器从 bash 的 `tool.result` 载荷里取
+# （实测该载荷形如 `{exitCode, error, message}`），任何一环断掉这条断言都会退化成
+# skipped 而不是 pass——Spec §19.1.1 的口径。
+#
+# 提示词要求真的跑一条以 3 结束的命令并如实报告退出码；断言要求**所有**被观测到的
+# 命令以 0 结束。实测（probe error_exit_code）流上有非零退出码，因此判 FAIL。
+#
+# 一个实测细节值得记在这里：目标 SUT 的 bash 工具把非 0 退出统一上报成
+# `exitCode: 1`（agent 自己在回答里指出了这一点，并用 `sys.exit(5)` 复现）。
+# 断言只比对"是否为 0"，所以这个归一化不影响本用例；但它意味着别在这条链路上
+# 断言**具体**的退出码数字（那会写出一条依赖封装实现的、迟早漂移的断言）。
+id: chatbot.command.exit_code.negative
+version: 1
+name: 命令退出码断言必须能变红（Error Recovery 负向）
+tags:
+  - chatbot
+  - error-recovery
+  - regression
+  - negative
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    请用 bash 工具执行 `python -c "import sys; sys.exit(3)"`，
+    然后如实报告这条命令的退出码数字。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  exit_code:
+    expect: 0
+
+# 本 case 的 `harness.loop` 期望单独声明：题目本身就要求 agent 反复尝试
+# （"如实报告这条命令的退出码"逼它做对照实验），实测一次执行里 bash 会被连续
+# 调用 5~9 次。沿用 profile 的上限会让这条 case 在报告里同时出现两个 FAIL，
+# 而 loop 那一条**不表达任何东西**（它只是题面要求的重复）。声明 20 是把这个
+# 已知的、由题面导致的重复排除在信号之外——而不是把整条 metric 关掉。
+#
+# 走 strict 档的理由不是这条 case 需要 harness 指标参与阻断（它的判定在
+# native.exit_code 上，本来就阻断），而是那条**可机械检查的不变式**：
+# case 用 metric_params 声明了对某条插件指标的期望，该指标就必须在该 case 的
+# profile 里 blocking=true，否则"声明了却不算数"。tests/test_chatbot_dataset.py
+# 的 TestAssertionsCanActuallyFail 逐条核对这一点，不留例外（有例外就没法机检）。
+# 本 case 的上限是 20，实测最长 9，因此这次切换不会引入新的阻断风险。
+evaluation_profile: chatbot-strict
+
+metric_params:
+  harness.loop:
+    max_repeats: 20

@@ -1,0 +1,33 @@
+# 数据集 chatbot-core（C 类：ai-chatbot 专用评测集）
+#
+# 这一份 dataset 只服务一个被测对象：ai-chatbot（经 shims/ai-chatbot/ 的协议
+# 转译 shim 接入）。它与 database-core 的差别不是题量，而是**被测方的工具面**
+# 和**可观测面**都不同——因此 case 的断言必须按实测事实写：
+#
+# - 工具名取自 ai-chatbot registry（packages/core/src/runtime/tools/index.ts +
+#   runtime/agent/tools.ts 的合并点），逐字一致；`_check_tools` 是精确字符串比对。
+#   冻结名单在同目录的 tool-surface.yaml，由 tests/test_chatbot_dataset.py 核对。
+# - connector 工具名（`<connectorId>_<tool>`）**大小写不稳定**（实测同一次联调里
+#   出现过 `PG-192-100-6-55_*` 与 `pg-query-…_*` 两种），因此不在 `tools.required`
+#   里点名——那会是一条随机变红的断言。
+# - fixture 只落在已实现能力内（`filesystem` / `sqlite`，Spec §18.4）。
+# - 观测面按 shim /health 的声明裁剪：`retry` 与 `context.compaction.*` 声明为
+#   false（提供不了），对应 metric 在 chatbot-plain profile 里显式保留并留痕
+#   （change-plan §3.4：保留条目 + 能力声明两条一起做）。
+# - 首版只做确定性部分（--no-judge 口径）：工具选择 / 工具参数 / 输出结构性断言 /
+#   步数效率 / native.status / 安全硬门 / skill 加载 / 子代理路由。judge 指标留到
+#   第二版。
+#
+# 本版**不覆盖 MCP 维度**：mcp__<server>__<tool> 取决于被测实例挂了哪些 server，
+# 点名等于把断言绑到某台机器的配置上（tool-surface.yaml 的 stability 说明）。
+#
+# 套件成员有两个层次，别把"跑不到"当成"没覆盖"：
+#   `benchmark run ai-chatbot-core`   → 带 chatbot 标签的 15 条（默认 run）
+#   `--suite security`                → 安全两条（负向 canary + 合规基线）
+# 安全负向刻意不进默认 run：它在 `security.*` 上判红，而 `security.max_failures: 0`
+# 在每档 gate 里都是 Hard Gate，留在默认 run 里会让那条硬门**永远红**、
+# "规则被触发"与"这是一条撞线 canary"不可分辨。tests/test_chatbot_dataset.py 的
+# EXCLUDED_FROM_BENCHMARK 逐条登记这条例外。
+id: chatbot-core
+version: 1.0.0
+description: ai-chatbot 专用评测集（C 类，change-plan §3）：确定性断言首版

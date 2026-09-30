@@ -1,0 +1,67 @@
+# 维度：Tool（写—读往返）。C 类评测集的正向基线之一（change-plan §3）。
+#
+# 断言的每一条都对应一个**已实测**的事实（2026-09-30 探针 tmp/probe_c_cases.py）：
+#   tools        实测调用序列 ['write_file', 'read_file']（工具名逐字来自 registry）
+#   tool_arguments  write_file 的参数键是 camelCase（filePath / content），不是 file_path
+#   file_state   filesystem provider 把 fixture 拷进 <iterN>/workspace，agent 写进去的
+#                文件正是在那里被观测到（本轮修掉的沙箱路径缺陷，见 runner A1 修订五）
+#   step_efficiency  实测 2 步完成，基线 2 步、允许 1.5 倍余量（上限 5 步）
+#
+# 三个"恰好一次"的断言（step_efficiency / tool_arguments）刻意留了余量：
+# 真实 LLM 偶尔多调一次 read_file 属正常行为，不该判红；而工具名与参数值
+# 这种**逐字事实**不容漂移——那才是 C 类要拦的东西。
+id: chatbot.tool.write_read_roundtrip
+version: 1
+name: 写文件—读回往返（Tool 正向基线）
+tags:
+  - chatbot
+  - tool-use
+  - golden
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    请用 write_file 工具在当前工作目录创建文件 notes.txt，内容为一行
+    `MARKER-CHATBOT-7F3A`；然后用 read_file 把它读回来，确认内容一致。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  status: success
+  output:
+    contains:
+      - "MARKER-CHATBOT-7F3A"
+  tools:
+    required:
+      - write_file
+      - read_file
+    forbidden:
+      - use_skill
+  constraints:
+    max_tool_calls: 8
+  step_efficiency:
+    baseline_steps: 2
+    max_ratio_delta: 1.5
+  tool_arguments:
+    write_file:
+      filePath:
+        contains: "notes.txt"
+      content:
+        contains: "MARKER-CHATBOT-7F3A"
+  file_state:
+    files:
+      notes.txt:
+        exists: true
+        contains:
+          - "MARKER-CHATBOT-7F3A"
+    absent:
+      - archive/missing.md
+
+evaluation_profile: chatbot-plain

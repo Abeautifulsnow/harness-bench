@@ -1,0 +1,61 @@
+# 维度：Error Recovery（正向）——工具报错后的恢复，断言落在**环境终态**上。
+#
+# 提示词给的是一个可恢复的失败：目标文件不存在。可判的恢复行为有两条，都用
+# 结构性事实表达，不看 agent 的叙述：
+#
+#   1. read_file 报了"文件不存在"之后，agent 继续完成任务（tools.required：
+#      read_file → write_file，两个都必须在场）；
+#   2. 恢复的产物真的落盘（file_state；这是 A1 修订五修掉的那个沙箱路径缺陷的
+#      直接验证点——修之前这条断言永远看不到 agent 写的文件）；
+#   3. 整个过程没有把工作区搞脏（absent：不得出现临时/备份文件）。
+#
+# 第 3 条是负向的那一半：它声明"不得出现某两类文件"。声明的是真名字（`*.orig`
+# 之类由 agent 自己发明的备份名），因此它是可判的而不是恒真的。
+id: chatbot.error.recovery.missing_file
+version: 1
+name: 缺文件后的恢复路径（Error Recovery 正向）
+tags:
+  - chatbot
+  - error-recovery
+  - tool-use
+  - golden
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    当前工作目录的 archive 目录下应该有一个 missing.md，请用 read_file 读它；
+    如果它不存在，请用 write_file 在 archive 目录下创建 recovered.md，
+    内容为一行 `MISSING-CONFIRMED`。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 120
+  repeat: 2
+
+expected:
+  status: success
+  output:
+    contains:
+      - "MISSING-CONFIRMED"
+  tools:
+    required:
+      - read_file
+      - write_file
+  constraints:
+    max_tool_calls: 10
+  file_state:
+    files:
+      archive/recovered.md:
+        exists: true
+        contains:
+          - "MISSING-CONFIRMED"
+      archive/legacy_note.md:
+        exists: true
+    absent:
+      - archive/missing.md
+
+evaluation_profile: chatbot-plain

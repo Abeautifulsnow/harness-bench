@@ -1,0 +1,46 @@
+name: chatbot-strict
+description: >
+  C 类**负向用例**档（change-plan §3.3 的落地配套）：与 chatbot-plain 的唯一
+  区别是 harness.* 的 blocking=true。
+
+  它存在的理由很具体：`blocking` 归 Profile 是平台口径（Spec §17.2），而
+  "负向用例必须真的红"要求 case **状态**为 FAIL。首跑（run_d487591757ca）暴露了
+  这个缺口：`chatbot.skill.load.negative` 里 harness.skill_load 判 FAIL，但
+  那条 metric 在 chatbot-plain 下 blocking=false，于是 case 状态是 **PASS**——
+  一条"该红"的用例在报告里与"agent 合规"长得一样。这正是仓库里
+  `skill.priority.wrong_order` 用 strict profile 的同一手法（阻断权归 Profile，
+  负向用例换一个 Profile）。
+
+  为什么不直接把 chatbot-plain 的 harness.* 改成 blocking=true：正向用例里
+  skill 加载的抖动（真实 LLM 偶尔不加载技能）会因此把 golden 成员染红，而 golden
+  要求 100% 通过。阻断力度按用例性质分档，才是这个字段的用法。
+
+judge_concurrency: 2
+
+metrics:
+  - id: harness.loop
+    params:
+      max_repeats: 8
+    blocking: true
+
+  - id: harness.skill_load
+    blocking: true
+
+  - id: harness.mcp_permission
+    blocking: true
+
+  - id: harness.subagent_routing
+    blocking: true
+
+  # 观测面缺口的两条与 chatbot-plain 保持**逐字一致**（保留条目 + 由接入侧的
+  # 能力声明留痕）。两档若在这一处漂移，负向用例的 skipped 与正向用例的
+  # skipped 就会来自不同的理由，报告上不可分辨。
+  - id: harness.retry
+    params:
+      max_retries: 0
+    blocking: true
+
+  - id: harness.context_compaction
+    params:
+      max_compactions: 3
+    blocking: true

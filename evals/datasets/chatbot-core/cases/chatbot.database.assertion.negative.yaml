@@ -1,0 +1,42 @@
+# 维度：Database（负向）——`database_state` 必须真的会读库、也真的会红。
+#
+# `database_state` 的观测来源是 **cleanup 之前** 对 fixture.db 的快照
+# （Spec §19.2）。这里把它声明成一条不可能满足的期望（`min_rows: 99`，而 seed
+# 只有 4 行）：判定必须落 FAIL。若接入侧或实现把"读不到库"坍缩成 pass（§19.1.1
+# 说的两种错误答案之一），这条 case 会**静默变绿**——那正是它存在的理由。
+#
+# 同一条 case 里并排放着 Positive 的那一半：`tickets` 表**存在**（exists: true 不会
+# 报错）、`max_rows: 100` 也宽松。于是判红的 reason 只指向 min_rows 一条，
+# 报告里能区分"库没读到"与"行数不对"。
+id: chatbot.database.assertion.negative
+version: 1
+name: 库终态断言必须能变红（Database 负向）
+tags:
+  - chatbot
+  - database
+  - regression
+  - negative
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    请查一下 tickets 表里有多少条工单，并回报条数。
+
+environment:
+  fixture: chatbot_ops
+  database: sqlite
+
+execution:
+  timeout: 180
+  repeat: 2
+
+expected:
+  database_state:
+    tables:
+      tickets:
+        exists: true
+        min_rows: 99
+        max_rows: 100
+
+evaluation_profile: chatbot-plain

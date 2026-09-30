@@ -1,0 +1,9 @@
+# C 类套件（ai-chatbot 专用，change-plan §3）：首版只收**确定性可判**的 case
+# （工具选择 / 工具参数 / 输出结构性断言 / 步数上限 / native.status / 安全硬门 /
+# skill 加载 / 子代理路由）。judge 类指标留到第二版。
+#
+# 标签是选择口径的唯一来源（SuiteDef.tags）：case 的 tags 里出现 chatbot 即入选，
+# 新增 case 不必动本文件——套件与 case 解耦，避免"加了 case 忘了挂套件"。
+name: chatbot
+tags:
+  - chatbot

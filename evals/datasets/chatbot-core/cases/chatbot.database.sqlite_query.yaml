@@ -1,0 +1,56 @@
+# 维度：Database（正向）——SQLite 场景下的工具链与"真跑出结果"。
+#
+# fixture 是 `chatbot_ops`（只有 seed.sql，没有 skill 目录）：ai-chatbot 的
+# 工具面里**没有** SQL 工具，它查 SQLite 是靠 bash 里跑 python/sqlite3。因此：
+#
+#   tools.required 只能是 bash —— 写 `execute_sql` 会恒 FAIL（那是另一个被测
+#   方的工具名，见 change-plan §3 首段）；
+#   sql_result 观测不到 —— `_sql_calls` 只认名字含 sql 或参数带 sql/query 的
+#   工具调用（native.py:409），bash 子进程里的 SQL 不在它的观测面上。这条
+#   case 因此**不声明** sql_result，而用 exit_code + 输出断言覆盖同一件事：
+#   命令真的以 0 结束、且答案真的算对了（HIGH=2，4 条工单里 2 条 high）。
+#
+# 第二条断言本来写的是 `exit_code: {expect: 0}`（Spec §19.4 的缺省口径：**全部**
+# 被观测到的命令都必须以 0 结束）。探针实测把它否决了：真实 SUT 在一次成功查询里
+# 留下了 `[('ok',0), ('ok',0), ('error',1), ('ok',0)]` —— 那条 error 1 是 agent
+# 自己试探环境时的一条失败命令（换引号/换解释器），与任务成败无关。保持这个声明
+# 会让一条**合格**的执行因为它的探索过程而判红，属于 change-plan §3.7 说的
+# "断言风格不适配非确定性"。因此这里只留 `tools.required: [bash]` 与输出断言；
+# `exit_code` 的机制由 `chatbot.command.exit_code.negative` 单独覆盖（那条断言
+# 本来就该红）。
+id: chatbot.database.sqlite_query
+version: 1
+name: SQLite 工单统计（Database 正向）
+tags:
+  - chatbot
+  - database
+  - tool-use
+  - golden
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    当前工作目录下有一个 SQLite 数据库文件 fixture.db，里面有一张 tickets 表。
+    请查出 severity 为 high 的工单数量，并按 `HIGH=<数量>` 这个格式回报（例如 HIGH=3）。
+
+environment:
+  fixture: chatbot_ops
+  database: sqlite
+
+execution:
+  timeout: 180
+  repeat: 2
+
+expected:
+  status: success
+  output:
+    contains:
+      - "HIGH=2"
+  tools:
+    required:
+      - bash
+  constraints:
+    max_tool_calls: 12
+
+evaluation_profile: chatbot-plain

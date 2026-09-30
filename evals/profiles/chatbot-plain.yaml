@@ -1,0 +1,57 @@
+name: chatbot-plain
+description: >
+  C 类首版 profile（change-plan §3）：**只用确定性观测**，不含任何 judge 指标，
+  因此 --no-judge 与不带该开关跑出的结论完全一致（首版口径是"确定性基线"，
+  judge 留到第二版——它需要先有一条稳定的确定性基线才能校准，见 §3 末尾）。
+judge_concurrency: 2
+
+metrics:
+  # harness.loop / skill_load / mcp_permission / subagent_routing 全部保留、
+  # blocking=false：它们是质量信号，不是平台底线（底线在 security.* 与 case
+  # 自身的阻断断言）。case 用 metric_params 声明自己的期望，未声明的判 skipped。
+  #
+  # max_repeats 从通用档的 3 提到 8：**实测校准**，不是放宽标准。
+  # chatbot-core 首跑（run_d487591757ca）里 `chatbot.command.exit_code.negative`
+  # 两条迭代各被判"bash 连续调用 5 / 9 次 > 上限 3"。查现场（case_runs/*.json 的
+  # tool_calls）后确认那是**真实 SUT 的正常工作方式**：它为了确认一个退出码，
+  # 会连跑 `python -c …`、管道取 `$LASTEXITCODE`、`Start-Process` 对照验证……
+  # 每一步都是一个新的 bash 调用。3 这个默认值是给 `fake://` 与短链路场景定的，
+  # 用在同一工具被反复使用的真实链路上只会制造噪声（且它 blocking=false，
+  # 除了把报告读脏之外没有任何作用）。
+  #
+  # 8 的来历：同一份实测里最长连续重复是 9（那条 case 本身在测"报错后继续尝试"），
+  # 所以取 8 会让它仍然红一次——这不是遗漏，而是**刻意保留**：那条用例的题目就是
+  # 让 agent 反复试，它的 loop 信号失去意义，应由 case 用 metric_params 单独声明。
+  - id: harness.loop
+    params:
+      max_repeats: 8
+    blocking: false
+
+  - id: harness.skill_load
+    blocking: false
+
+  - id: harness.mcp_permission
+    blocking: false
+
+  - id: harness.subagent_routing
+    blocking: false
+
+  # --- 以下两项是 A2"观测面缺失"的显式处置，两条一起做才算数 ---
+  #
+  # 1) 保留条目（不是删掉）：删了之后报告上看不出"本来就不打算测"与"忘了配"
+  #    的区别，而这正是 A2 要留痕的东西；
+  # 2) 接入侧在 /health 的能力表里把对应事件声明为 false（shim 已声明
+  #    retry=false、context.compaction.*=false）。
+  #
+  # 结果：`run_plugin` 判 skipped 且 reason 写明"观测面不可用"，metadata 落
+  # skipped_reason=observation_unavailable —— 既不是假绿的 pass，也不是
+  # "忘了配"的沉默。
+  - id: harness.retry
+    params:
+      max_retries: 0
+    blocking: false
+
+  - id: harness.context_compaction
+    params:
+      max_compactions: 3
+    blocking: false
