@@ -788,3 +788,70 @@ GET /api/cases                100ms      53ms
 ### Next Steps
 
 - None - task complete
+
+
+## Session 12: Mimosa L2 复查定性：3 条 SQL 注入告警是被测 agent 的评测产物，非本轮 diff
+
+**Date**: 2026-09-30
+**Task**: Mimosa L2 复查定性：3 条 SQL 注入告警是被测 agent 的评测产物，非本轮 diff
+**Branch**: `main`
+
+### Summary
+
+L2 复查把 .agent-eval/runs/run_7b16fe0e32d1/artifacts/ 下 3 行标为 SQL 注入。溯源确认误报：这三个文件是被测 ai-chatbot agent 在评测中自行 write_file 的探查脚本（trace 里 filePath 逐字指向、随后 bash 执行），属评测证据而非 harness 源码；目录整层被 gitignore（.gitignore:11），git ls-files 0 条，6 个 commit 无一触及。harness 侧数据库访问审计通过：analytics.py 全为 ? 绑定，SQL 插值全域零命中，snapshot.py 的表名 f-string 走白名单字符集校验。本会话无仓库文件变更。
+
+### Main Changes
+
+**三条告警的溯源证据（定性：误报）**
+
+Mimosa L2 复查把本轮 diff 里 3 行标为 SQL 注入，全部位于
+`.agent-eval/runs/run_7b16fe0e32d1/artifacts/` 下（`database.query.top_customers/iter1/db_inspect.py:9`、
+`.../iter1/query_top_customers.py:24`、`database.query.multi_turn_refine/iter1/outputs/eval-1c3726152e2a/inspect.py:7`）。
+逐条溯源后确认不是本轮改动的代码：
+
+- **是被测 agent 自己写出来的**：原始 trace（`.agent-eval/runs/run_7b16fe0e32d1/traces/database.query.top_customers.iter1.events.jsonl`）
+  里有 `tool.call name=write_file`，`filePath` 逐字指向被标记路径、`content` 就是 `db_inspect.py` 的源码，
+  紧接着 `tool.call name=bash` 把它跑起来。即：SUT 为探查 fixture 库自行生成的脚本。
+- **从未被跟踪**：`git check-ignore -v` → `.gitignore:11:.agent-eval/`；`git ls-files .agent-eval` → 0 条；
+  6 个 commit（`55d3db8`/`407c21e`/`3e4a515`/`a8a6fa9`/`ab9b74a`/`16659d7`）的 `--name-only` 里
+  `agent-eval/runs` 命中数全为 0。
+- **其中一条连"拼接"都不成立**：`query_top_customers.py:24` 是 `for r in cur.execute(q):`，而 `q` 是
+  第 15–23 行的静态三引号字面量（只含 `'2026-08-01'` 这类日期字面量，无任何变量插值）。
+  另两处是表名标识符拼接，表名取自 `sqlite_master`（库自身目录信息）。
+- **决定不改**：这些产物是"被测对象在某一轮里的真实行为"这一判定所依赖的证据，改动即篡改观测结果。
+  按 hook 的"若确认是误报，请向用户说明依据"处理，已向用户给出上述依据。
+
+**harness 侧数据库访问审计（对齐约束"所有外部输入必须使用参数绑定"）**
+
+- `src/agent_eval/storage/analytics.py`：SQL 全为字面量 DDL/DML，值一律 `?` 占位绑定
+  （`INSERT INTO ... VALUES (?,…)` 20+ 处、`WHERE run_id = ?` 等）；`src/` 全域扫
+  `.execute(...)` 带 `f"` / `%` / `format(` / `+` → 零命中。
+- `src/agent_eval/fixtures/sqlite_fixture.py`：静态 seed 走 `executescript(seed_sql.read_text(...))`，
+  另用 `iterdump()`，无外部输入进 SQL。
+- `src/agent_eval/fixtures/snapshot.py`：唯一一处 f-string 是**表名标识符**（SQLite 不支持参数化标识符），
+  来源 case YAML，经 `valid_table_name()` 白名单字符集（`all(ch.isalnum() or ch in "_.")`，
+  在 `evaluators/native.py:242/677` 强制）+ `"` 翻倍转义；行数上限用绑定参数 `LIMIT ?`。
+
+**清理**
+
+- 删除临时探针 `tmp/probe_artifact_origin.py`（`tmp/` 由 `.gitignore:49` 忽略）。
+
+**本会话无仓库文件变更**：安全复查只做溯源与定性，未触碰任何被跟踪文件；记账前工作区干净、
+`HEAD == origin/main == 16659d7`。
+
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
