@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 10
-- **Last Active**: 2026-09-29
+- **Total Sessions**: 11
+- **Last Active**: 2026-09-30
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~800 | Active |
+| `journal-1.md` | ~790 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 11 | 2026-09-30 | 联调实测修复：token usage scope 警告的真实根因链与两个额外缺陷 | `55d3db8`, `407c21e`, `3e4a515`, `a8a6fa9`, `ab9b74a` | `main` |
 | 10 | 2026-09-29 | §22.12 两项建议项收口：定义层解析开销与 junit skipped 覆盖 | `d1b3f4b` | `main` |
 | 9 | 2026-09-29 | 剩余缺口收口——发现 1、发现 4、§92 | `d20d28a` | `main` |
 | 8 | 2026-09-29 | 收尾批次——发现 2 修复、§19 Challenge Set、§40 Nightly Profile | `badfb76` | `main` |

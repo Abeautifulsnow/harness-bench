@@ -751,3 +751,40 @@ GET /api/cases                100ms      53ms
 ### Next Steps
 
 - None - task complete
+
+
+## Session 11: 联调实测修复：token usage scope 警告的真实根因链与两个额外缺陷
+
+**Date**: 2026-09-30
+**Task**: 联调实测修复：token usage scope 警告的真实根因链与两个额外缺陷
+**Branch**: `main`
+
+### Summary
+
+报告的 warn（token usage scope mismatch）根因是层错位：shim SETTINGS["timeout"] 只有读点没有写点 → /run 恒返回 200+空流 → 五 case 全 AGENT_FAILURE → candidate 没有任何用量观测 → scope 守卫触发。修了 5 处：shim 终局事件不假绿、usage scope 三态、endpoint kind 可比性、guard 多因并列、wall-clock 噪声下限边界（test_api 间歇 flake 的真机理）+ 工具面两处误判（bash 非零退出报成功、tool-output-error 被当未出现）。全量 512 passed，已推送。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `55d3db8` | (see git log) |
+| `407c21e` | (see git log) |
+| `3e4a515` | (see git log) |
+| `a8a6fa9` | (see git log) |
+| `ab9b74a` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
