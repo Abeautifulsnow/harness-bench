@@ -576,10 +576,12 @@ shim 转译时应按第一方形状（tool part 的 `state` 字段）识别审�
 冒烟实测：审批触发时流上出现 `{"type":"tool-approval-request","approvalId":"aitxt-…","toolCallId":"call_00_…"}`，
 随后流干净以 `finish(finishReason="tool-calls") + [DONE]` 收尾，被审批工具**没有**
 `tool-output-available`。第四轮"按 tool part 的 state 字段识别"的指引**作废**——
-shim 按 chunk type `tool-approval-request` 识别即可（比猜 state 简单且已验证）；
-`finishReason="tool-calls"` 是"这轮在等人"的判别信号（正常结束 = "stop"）。
-自动审批策略的注入方式（重新 POST `approval-responded` 消息）不变。
-三个实质判断（轮次即结束、等待在客户端、续跑重新 POST）经运行时再次确认。
+三份 dump 全量核对（1355 chunk、21 类型）中**没有任何 chunk 带 `state` 键**，
+state 识别路径在实测流上不存在；shim 按 chunk type `tool-approval-request`
+识别是唯一可行且已验证的方式。`finishReason="tool-calls"` 是"这轮在等人"
+的判别信号（正常结束 = "stop"）。自动审批策略的注入方式（重新 POST
+`approval-responded` 消息）不变。三个实质判断（轮次即结束、等待在客户端、
+续跑重新 POST）经运行时再次确认。
 
 harness-bench 的协议里没有"等人"这个概念，`run.finished` 一到就结算。因此 shim 必须
 定一个自动策略（预置 `allow` 权限规则 / 自动批准 / 自动拒绝），并且：
