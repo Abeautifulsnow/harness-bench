@@ -159,7 +159,21 @@ class TranslationSession:
         if handler is not None:
             return handler(chunk)
         # 其余方言（start-step/finish-step、tool-input-start/delta、
-        # data-task、data-sub-text-delta/tool-call/tool-result…）一律丢弃（B2 表）。
+        # data-task、data-connector-event、data-sub-text-delta/tool-call/tool-result…）
+        # 一律丢弃（B2 表）。
+        #
+        # `data-connector-event` 是**逐条登记**进来的，不是顺手补的（2026-09-30
+        # 复核）：它此前落在"…"里静默丢弃，而它的载荷里有一条**别处没有**的信号——
+        # `{type: 'connector.call.retrying', attempts}`（`connector/observability.ts`
+        # 定义、`runtime/agent/tools.ts` 经 `writerRef.write` 写到父流）。
+        # 其余两个变体（started/succeeded/failed）丢弃是对的：信息已由
+        # tool-input-available / tool-output-available / tool-output-error 承载，
+        # 透传只会重复计数（change-plan §B2 第五轮那行）。retrying 这条则**没有**
+        # 对应物，丢弃它的后果是"某个连接器工具重试了 N 次"在报告里完全不可见。
+        # 维持丢弃的理由只有一条，且要写明：本数据集不覆盖 connector 维度，
+        # 且 `harness.retry` 判的是模型层重试（见 server.OBSERVATION_SURFACE 的
+        # `retry` 口径）——转成 `retry` 事件会让两种重试混为一谈。**要覆盖它就得
+        # 新增一条工具级指标**，不能靠这条转译。
         # `data-sub-text-delta` 丢弃是安全的：异步子代理在后台跑，writer 置空，
         # 它的事件走子会话自己的 registry 通道，**不会**串进父流（第九轮实测：
         # 异步轮的直方图里一条 data-sub-text-delta 都没有；同步轮里的那批

@@ -269,6 +269,28 @@ Gate。守住五条：
    7 条没有 `expected.output`；判据集中在 `deepeval_adapter._is_missing_input`，
    结局在 `runner._run_judge_metrics`，反方向（判分器真坏仍是 error → exit 2）
    也必须有断言。
+11. **"永不失败的断言"与"永远判不出的指标"是两种假覆盖，各自要有护栏**
+    （2026-09-30，C 类全覆盖勘察）。两者都不报错、都不变红，只是占着"已覆盖"的名分。
+
+    **(a) 声明了却永远绿的断言**——比缺这条断言更糟。实例（真实测到）：
+    `chatbot.security.compliant.baseline` 声明过 `security.forbidden_sql`，
+    而该规则只读 `call.arguments["sql"]` / `["query"]`，本 SUT 的 SQL 走
+    `bash {command: …}` → 命中集**恒空** → 这条安全规则永远是 pass。
+    同一缺口此前已对 `native.sql_result` 下过禁令（"观测面不存在 → 不声明"），
+    `forbidden_sql` 是漏网的第二处。**判据**：一条断言的生命周期里，有没有一个
+    输入会让它变红？没有就别写，护栏要按"同一观测面缺口的所有下游断言"一起查
+    （`test_forbidden_sql_is_not_declared` 与 `test_sql_result_is_not_declared`
+    是同一条纪律的两个落点）。
+
+    **(b) 恒 skipped 的 profile 条目**——它不是假绿（没判过就是没判过，
+    Spec §19.1.1），但会让"这档覆盖了 N 个指标"的 N 虚高。两个来源：
+    **观测面缺口**（SUT 在 `/health` 把事件声明为 false）与**声明缺口**
+    （事件面可用，但区分性参数从未被任何 case/profile 声明，插件按
+    "未声明即不判"自跳过）。第二个来源尤其阴——既有护栏只覆盖第一个，
+    实测 `harness.mcp_permission` 在 `chatbot-core` 16 条 × 3 档里恒 skipped
+    而三套护栏全碰不到它。**处置**：维护一份"恒 skipped 指标 → 理由"登记表，
+    并要求它**双向**成立（未登记的空转 → 红；登记了却其实可判 → 红，防登记过期；
+    `TestEveryProfileMetricCanActuallyJudge`）。
 
 ## 断言有效性不变式（2026-09-23 review #I01–#I04 的教训）
 
@@ -406,10 +428,31 @@ python/git 读到 LF 而 ruff 报 E902 = 读取期问题，别动它。**
    断言消解掉"**，并把挡不住的情形如实登记（不进默认套件 / 按 case 选档），
    不要假装语义能修掉它。
 
+9. **接入侧的观测面声明只写事实，不写愿望**（2026-09-30，C 类合规基线修正）。
+    `observation_surface` 是"这个 SUT 能不能观测到"的**实测结论**，它的消费者是
+    判定逻辑（`run_plugin` 据此判 skipped）。因此两类错都禁止：
+    **为了让某条指标有输入而把 False 改成 True**（那就是伪造观测面），以及
+    **用一句过于笼统的话覆盖掉已知例外**。"provider 重试只写日志不上协议流"就是
+    后者：模型层重试确实不上流，但连接器工具有一条 `connector.call.retrying`
+    （经 `data-connector-event` 落到父流）。声明值不变（那条是**工具级**重试，
+    `harness.retry` 判的是模型层），但口径必须写准，并说明"要覆盖它得新增一条
+    工具级指标，不能靠改这条声明"。同理：**shim 丢弃的每一种流上方言都要逐条
+    登记**（`translator.feed` 的 fallback 注释是那份登记表）——静默落在"…"里的
+    方言，是下一个人唯一无法从代码看出来它会丢什么的地方。
+
 框架通用性的机制保障（change-plan E 类）落在 `tests/test_framework_boundary.py`：
 专有方言 deny-list 扫 `src/agent_eval/`、`SessionContext.extra` 保持不透明。
 往框架里加平台相关分支/字段/事件名之前先过那条测试与它的判断标准：
 **这个标识在换一个 SUT 之后还成立吗？**
+
+扫描面口径（2026-09-30 复核，四处收口）：**大小写不敏感**（`AI-Chatbot` /
+`conversation_id` 这类写法差异原本能溜过去，而写 Python 的人更可能写下划线形式）、
+**覆盖包内全部文本文件**（含 `reports/templates/*.j2`，此前只扫 `*.py`）、
+**清单按"同族成组"登记**（`data-sub-` 与 `data-connector-event` /
+`data-permission-mode` / `data-queue-status` 同族，只登记一半等于留后门）、
+**并自检扫描面非空且含非 .py 文件**（防止 glob 写错后"零命中"是假绿）。
+注释里曾写"dev/ 豁免"而代码从未豁免——按**更严的一侧**收口（继续扫 dev/），
+并在测试里补了一条"变体写法必须命中"的对照用例，防止匹配逻辑被改回大小写敏感。
 
 ## 示例数据集约定
 

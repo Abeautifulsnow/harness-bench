@@ -432,6 +432,70 @@ run_49ed60607d33  --profile chatbot-judge --tag database（stub judge）
 的排队成本。**15~40s 那档在本链路上等于测超时，不是测行为**——这个结论对
 `database-core` 同样适用，但那份用例集的预算还没重定（属于 D 类待办）。
 
+### 第十四轮：C 类评测机制收口（两种假覆盖 + 声明口径）
+
+需求是"优先保证针对 ai-chatbot 的评测机制完善，**但不要歪曲整个框架**"。
+框架核心逐 token 核过：对 `ai-chatbot` / `mcp__` / `data-sub-` / `conversationId` /
+`toolCallId` 等方言的命中数为 0（104 个文件全扫），**不需要为此改动一行**。
+问题全在评测机制本身，四处：
+
+**一、一条永不失败的安全断言（已删声明）。** `chatbot.security.compliant.baseline`
+声明过 `security.forbidden_sql: (?i)drop\s+table`。该规则只读
+`call.arguments["sql"]` / `["query"]`（`security/evaluator.py:289`），而本 SUT 的 SQL
+**只能**走 `bash {command: "sqlite3 app.db 'DROP TABLE …'"}` —— 参数里没有那两个键，
+命中集恒空 → 规则永远 pass。实测四场景复现：
+
+```text
+bash + command 含 DROP TABLE        → security.forbidden_sql: pass（认不出）
+bash + 参数键改成 sql（database-core 的形状）→ security.forbidden_sql: fail（可达）
+```
+
+这与 `native.sql_result` 是**同一个观测面缺口**，因此按同一口径处置：不声明
+（一条永不失败的安全断言比没有它更糟——占着"安全规则已覆盖"的名分）。护栏
+`test_forbidden_sql_is_not_declared`。**没有选择"改造通用安全规则去认 bash 参数"**：
+那要在规则里加 shell 字符串抠 SQL 的启发式，是为一个 SUT 歪曲通用规则，且启发式
+自身会产生假阳性/漏判。
+
+**二、`harness.mcp_permission` 恒 skipped，而三套护栏都碰不到它。** 它的观测面是
+**可用**的（`mcp.call`=true），但本数据集不覆盖 MCP 维度（`dataset.yaml` 有理由），
+没有任何 case/profile 声明 `params.allowed` → 插件按"未声明即不判"自跳过。
+既有护栏只查"观测面为 false"的那一类，于是这条在 16 条 case × 3 档里恒 skipped
+而无人发现。新增 `TestEveryProfileMetricCanActuallyJudge` + 登记表 `VACUOUS_METRICS`
+（`harness.retry` / `harness.context_compaction` / `harness.mcp_permission`，各带理由），
+**双向**断言：未登记的空转 → 红；登记了却其实可判 → 红（防登记过期）。
+**处置是登记，不是修**——不覆盖 MCP 维度是有理由的设计，硬塞一个假 `allowed`
+把它变成"能判"才是歪曲。
+
+**三、judge 档从"跑通过一次"变成"逐条有断言"。** 第十三轮的验证止步于 stub 传输层，
+而 profile 注释里写着 6/16、7/16 这种占比——注释会漂移，断言不会。
+新增 `TestChatbotJudgeProfileIsWiredEndToEnd`（真数据集 × 真 profile × 真 adapter，
+只换假 judge 模型）：
+
+```text
+agent.task_completion   : 16/16 判出分（stub 调用计数 > 0，证明真的走到判分器）
+agent.tool_correctness  : 10 判出分 / 6 落 skipped(judge_input_unavailable)
+                          skipped 集合**恰好等于**"case 级无 tools.required"的集合
+无凭据时                  : EvaluationInfraError → exit 2（不降级成 skipped）
+```
+
+最后一条的方向要与缺输入相反：**凭据缺失是 run 级配置问题（infra），输入缺口是
+这次观测的问题（skipped）**。把它记成 skipped，会让"这次评测根本没判"看起来像
+"这条用例不需要判"。用 `monkeypatch.delenv` 构造，不靠"本机恰好没配 key"。
+
+**四、`retry: False` 的口径收窄（声明值不变）。** 第十三/十四轮复核发现原来那句话
+说得太满："provider 重试只写日志不上协议流"——模型层确实如此
+（`foundation/model/retry-middleware.ts` 的 for-attempt 循环只 `console` 一行），
+**但连接器工具有一条例外**：`connector.call.retrying`（带 `attempts`）经
+`data-connector-event` 落到父流。声明值维持 `False`：那是**工具级**重试，
+`harness.retry` 判的是模型层（"harness 有没有在撞运气"），混在一起会让两种重试
+在报告里不可分辨。要覆盖它得**新增一条工具级指标**，不能靠改这条声明。
+顺带把 `data-connector-event` 补进 `translator.feed` 的丢弃登记表——此前它落在
+注释的"…"里，是**下一个人唯一看不出会丢什么的地方**。
+
+**未完成**：judge 阈值 0.70 / 0.80 仍是从 nightly 抄的先例值（本机无 judge 凭据）。
+这一轮钉死的是**机制**（能判几条、哪几条、缺输入怎么记、无凭据怎么报），
+**判得准不准依然没有结论**。
+
 ## 转译要点（详见 change-plan B2/B3）
 
 - `mcp__<server>__<tool>` 拆成独立 `mcp.call`/`mcp.result`（name=server 段）；

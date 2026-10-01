@@ -956,6 +956,25 @@ run `partial`、exit 2（不静默降级，符合 §6.1）。
 （去掉它，那条 case 会**整体变绿**），也是真实 LLM 抖动的边界：C 类负向用例保证的
 是"case 级永不绿"，不保证"每次迭代都由同一条 metric 发红"。
 
+**（第十四轮，2026-09-30）"机制完善"与"判得准不准"被明确切开。** 上一轮的结论停在
+"连通性验证过、判准无结论"，容易被读成"judge 这块还欠着"。本轮把**机制**这一半做完
+并逐条断言，另一半如实留着：
+
+| # | 项 | 结论 |
+| --- | --- | --- |
+| 1 | judge 档的逐条结局 | 固化为 `TestChatbotJudgeProfileIsWiredEndToEnd`：真数据集 16 条 × 真 profile × 真 adapter、只换假 judge 模型。`task_completion` 16/16 判出分；`tool_correctness` 10 判出分 / 6 落 skipped，且 **skipped 集合恰好等于"case 级无 `tools.required`"的集合**（两侧都从数据集现算，不写死条数）。stub 调用计数 > 0 作为"接线真的通了"的证据 |
+| 2 | 无凭据的方向 | 用 `monkeypatch.delenv` 钉住：仍是 `EvaluationInfraError` → exit 2，**不得**降级成 skipped。凭据缺失是 run 级配置问题，输入缺口是这次观测的问题，两者方向相反 |
+| 3 | 一条永不失败的安全断言 | `chatbot.security.compliant.baseline` 的 `security.forbidden_sql` 删掉：该规则只读 `arguments["sql"]`/`["query"]`，本 SUT 的 SQL 走 `bash {command: …}` → 恒空 → 永远 pass（四场景实测复现）。与 `native.sql_result` 同一观测面缺口、同一处置 |
+| 4 | 恒 skipped 的 profile 条目 | `harness.mcp_permission` 在 16×3 里恒 skipped（观测面可用但无人声明 `params.allowed`），而三套既有护栏只覆盖"观测面为 false"那一类。新增 `VACUOUS_METRICS` 登记表 + 双向断言（未登记的空转 → 红；登记了却可判 → 红） |
+| 5 | `retry: False` 的口径 | 收窄：模型层重试确实不上流，但连接器工具的 `connector.call.retrying`（经 `data-connector-event`）**确实上了父流**。声明值不变（那是工具级重试，`harness.retry` 判模型层），口径写准；`data-connector-event` 同时补进 `translator.feed` 的丢弃登记表 |
+| 6 | **判得准不准** | **仍无结论**（本机无 judge 凭据）。阈值 0.70/0.80 依旧是 nightly 的先例值，judge 档不进默认 run、不 pin 基线 |
+
+第 3 与第 4 项的取舍值得单记：两处**都没有选择"改通用机制去适配这一个 SUT"**
+（不为 `forbidden_sql` 加 shell 抠 SQL 的启发式、不为 `mcp_permission` 塞一个假的
+`allowed` 声明）。需求原话是"不要歪曲整个框架"，而这两条正是最容易顺手歪曲的地方——
+缺口如实登记，通用规则一行不动。框架核心的逐 token 复核结论（104 个文件、
+方言命中数 0）记在 `.trellis/tasks/ROADMAP.md` 的"第十四轮"一节。
+
 ---
 
 ## 4. D 类：文档变更（本文的重点交付）

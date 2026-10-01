@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -33,8 +34,14 @@ from deepeval.models.base_model import DeepEvalBaseLLM  # noqa: E402
 
 from agent_eval.errors import EvaluationInfraError, JudgeInputUnavailableError  # noqa: E402
 from agent_eval.evaluators.deepeval_adapter import DeepEvalCapabilityAdapter  # noqa: E402
-from agent_eval.evaluators.registry import DEEPEVAL_AGENT_METRICS  # noqa: E402
-from agent_eval.loading.loader import load_dataset  # noqa: E402
+from agent_eval.evaluators.native import EvalScope  # noqa: E402
+from agent_eval.evaluators.registry import DEEPEVAL_AGENT_METRICS, MetricSpec  # noqa: E402
+from agent_eval.loading.loader import load_dataset, load_profile  # noqa: E402
+from agent_eval.models.case import Case  # noqa: E402
+from agent_eval.models.events import TraceEvent  # noqa: E402
+from agent_eval.models.results import CaseRunResult, CaseStatus  # noqa: E402
+from agent_eval.runner.runner import RunConfig, Runner, _CaseContext, _ResolvedProfile  # noqa: E402
+from agent_eval.trace.builder import TraceBuilder  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -220,3 +227,217 @@ class TestChatbotCoreJudgeInputSplit:
                 assert outcome != "input_unavailable", case.id
         assert gated, "数据集里应当有未声明 required 工具的 case（负向用例）"
         assert len(gated) + len(ok) == len(self._dataset())
+
+
+class _CannedLLM(DeepEvalBaseLLM):
+    """有问必答的假 judge 模型：返回一份各 metric schema 的超集 JSON。
+
+    走的是真 SDK：``initialize_model`` 见到 ``DeepEvalBaseLLM`` 原样返回，
+    不构造 ``OpenAIModel``，因此**不需要凭据**；而 required params 校验、
+    schema 提取、打分、verdict 全是真的。用"调了几次"作为"接线是否真的通了"
+    的可观测证据——只断言"拿到分数"会被"其实没调模型"的实现骗过。
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def load_model(self) -> None:
+        return None
+
+    def _payload(self) -> str:
+        self.calls += 1
+        # 各 metric 的 schema 不同（task_completion 要 verdict/reason、
+        # step_efficiency 要 score/reason、plan_quality 还要 plan/task），
+        # 返回超集：多出来的键对 pydantic 无影响。
+        return json.dumps(
+            {
+                "verdict": 1.0,
+                "reason": "canned",
+                "score": 1.0,
+                "task": "读取表结构",
+                "outcome": "已读取",
+                "plan": ["读文件", "汇报"],
+            }
+        )
+
+    def generate(self, *args: Any, **kwargs: Any) -> str:
+        return self._payload()
+
+    async def a_generate(self, *args: Any, **kwargs: Any) -> str:
+        return self._payload()
+
+    def get_model_name(self) -> str:
+        return "canned-llm"
+
+
+class TestChatbotJudgeProfileIsWiredEndToEnd:
+    """``chatbot-judge`` 档在**真数据集**上的逐条结局：真 profile、真 16 条 case、
+    真 adapter，只把 judge 模型换成假替身。
+
+    为什么要有这一层：此前这一档的验证止步于"用本地 stub HTTP 服务跑通一次"
+    （run_49ed60607d33）。那证明了**传输层**，没有把"这一档在本数据集上到底判出
+    几条、哪几条判不出"固化成断言——而 profile 的注释里恰恰写着这些占比（6/16、
+    7/16）。注释会漂移，断言不会。
+
+    实测结论（2026-09-30，tmp/probe_chatbot_judge_pipeline.py 的同一个形状）：
+      - ``agent.task_completion``：16/16 条都有输入（本用例给非空 final_output；
+        真实运行里"agent 收尾没输出"会走缺输入 → skipped，另有单元测试钉住）
+      - ``agent.tool_correctness``：**恰好**在 case 级无 ``tools.required`` 的
+        那些 case 上缺输入——与 ``test_required_tools_is_what_gates_tool_correctness``
+        是同一事实的上下游两面
+      - 两条指标都必须真的走到 judge 模型（stub 调用计数 > 0）
+    """
+
+    BENCHMARK = "ai-chatbot-core"
+    PROFILE = "chatbot-judge"
+
+    def _dataset(self) -> list[Case]:
+        return load_dataset(REPO / "evals", "chatbot-core")[1]
+
+    def _judge_specs(self) -> list[MetricSpec]:
+        profile = load_profile(REPO / "evals", self.PROFILE)
+        return [spec for spec in profile.metrics if spec.provider == "deepeval"]
+
+    def _tree(self, case: Case):
+        """造一份"agent 真的调了它声明要求的工具"的 trace（按协议成对发事件）。"""
+        events = [TraceEvent(event_id="evt_run", trace_id="t1", type="run.started", data={})]
+        for index, name in enumerate(case.expected.tools.required):
+            call_id = f"evt_call_{index}"
+            events.append(
+                TraceEvent(
+                    event_id=call_id,
+                    trace_id="t1",
+                    type="tool.call",
+                    data={"name": name, "arguments": {"path": "x"}},
+                )
+            )
+            events.append(
+                TraceEvent(
+                    event_id=f"evt_result_{index}",
+                    trace_id="t1",
+                    parent_span_id=call_id,
+                    type="tool.result",
+                    data={"status": "ok", "result": "ok"},
+                )
+            )
+        events.append(
+            TraceEvent(
+                event_id="evt_fin", trace_id="t1", type="run.finished", data={"status": "success"}
+            )
+        )
+        builder = TraceBuilder("t1")
+        builder.feed_all(events)
+        return builder.build()
+
+    async def _run_case(self, case: Case, stub: _CannedLLM, specs: list[MetricSpec]):
+        runner = Runner(
+            RunConfig(
+                evals_root=REPO / "evals",
+                fixtures_root=REPO / "fixtures",
+                data_root=REPO / ".agent-eval",
+                benchmark=self.BENCHMARK,
+                agent_endpoint="fake://",
+                baseline_policy="NO_BASELINE",
+            )
+        )
+        profile = load_profile(REPO / "evals", self.PROFILE)
+        ctx = _CaseContext(
+            resolved={},
+            case_profile={},
+            case_by_id={},
+            judge=runner._resolve_profiles({}, {}, []).judge,
+            judge_sem=asyncio.Semaphore(2),
+            capabilities={},
+            degradations={},
+            judge_model=stub,  # type: ignore[arg-type]
+        )
+        result = CaseRunResult(
+            id="cr_probe",
+            run_id="run_probe",
+            case_id=case.id,
+            case_version=case.version,
+            iteration=1,
+            status=CaseStatus.PASS,
+        )
+        error = await runner._run_judge_metrics(
+            case,
+            _ResolvedProfile(profile=profile, judge_specs=specs, harness_specs=[]),
+            ctx,
+            self._tree(case),
+            EvalScope(run_status="success", final_output="占位输出（非空即够判分器用）"),
+            result,
+        )
+        assert error == "", error
+        return {m.metric: m for m in result.metric_results}
+
+    def test_profile_declares_exactly_two_judge_metrics(self) -> None:
+        assert [spec.id for spec in self._judge_specs()] == [
+            "agent.task_completion",
+            "agent.tool_correctness",
+        ]
+
+    async def test_task_completion_is_judged_on_every_case(self) -> None:
+        """16/16 条都能判出分（在输出非空的前提下）——不是"声明了"，是"判到了"。"""
+        specs = self._judge_specs()
+        stub = _CannedLLM()
+        for case in self._dataset():
+            rows = await self._run_case(case, stub, specs)
+            row = rows["agent.task_completion"]
+            assert row.verdict == "pass", f"{case.id}: {row.verdict} / {row.reason}"
+            assert row.score == 1.0, case.id
+            assert row.metadata.get("deepeval_version"), case.id
+        assert stub.calls > 0, "judge 模型一次都没被调用：接线断了，分数是伪造的"
+
+    async def test_tool_correctness_is_skipped_exactly_where_required_tools_are_missing(
+        self,
+    ) -> None:
+        """恒 skipped 的集合必须**恰好**等于"case 级无 required 工具"的集合。
+
+        两侧都从数据集现算，不写死条数：谁补了 ``tools.required``，这条会立刻
+        指出来，profile 注释里的占比也就必须跟着改。这挡住两种漂移——
+        "缺口比注释里少"（注释过期）与"缺口比预期多"（某条 case 的输入悄悄没了）。
+        """
+        specs = self._judge_specs()
+        stub = _CannedLLM()
+        skipped: set[str] = set()
+        judged: set[str] = set()
+        for case in self._dataset():
+            rows = await self._run_case(case, stub, specs)
+            row = rows["agent.tool_correctness"]
+            if row.verdict == "skipped":
+                assert row.metadata.get("skipped_reason") == "judge_input_unavailable", case.id
+                assert row.blocking is False, case.id
+                skipped.add(case.id)
+            else:
+                judged.add(case.id)
+        no_required = {case.id for case in self._dataset() if not case.expected.tools.required}
+        assert skipped == no_required, {
+            "多出来的 skip": sorted(skipped - no_required),
+            "该 skip 却没 skip": sorted(no_required - skipped),
+        }
+        assert skipped and judged, (skipped, judged)
+
+    async def test_missing_judge_credentials_stay_infrastructure_not_skipped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """凭据缺失**不得**降级成 skipped（profile 的"未配置即 exit 2"承诺）。
+
+        这是与"输入缺口"方向相反的另一半：输入缺口是**这次观测**的问题（skipped），
+        凭据缺失是**run 级配置**问题（infra → EVALUATION_FAILURE → exit 2）。
+        把后者记成 skipped 会让"这次评测根本没判"看起来像"这条用例不需要判"。
+
+        用 ``monkeypatch.delenv`` 而不是"本机恰好没配 key"来构造（与 sqlglot 的
+        降级路径同一原则：不靠机器状态测）。实测 deepeval 在**构造模型时**读
+        ``OPENAI_API_KEY``（不是 import 时缓存），因此 delenv 是有效杠杆。
+        """
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        trace = {
+            "type": "llm",
+            "input": "q",
+            "actual_output": "o",
+            "tools_called": [{"name": "read_file", "input_parameters": {}}],
+            "expected_tools": [{"name": "read_file"}],
+        }
+        with pytest.raises(EvaluationInfraError):
+            await DeepEvalCapabilityAdapter().evaluate("agent.task_completion", 0.7, trace)

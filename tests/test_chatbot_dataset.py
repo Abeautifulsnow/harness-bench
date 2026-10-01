@@ -245,6 +245,44 @@ class TestToolNamesMatchTheFrozenSurface:
         ]
         assert not offenders, f"chatbot-core 不得声明 sql_result（观测面不存在）：{offenders}"
 
+    def test_forbidden_sql_is_not_declared(self) -> None:
+        """与 ``sql_result`` 同源的第二处：``security.forbidden_sql`` 也读不到本 SUT 的 SQL。
+
+        该规则的观测来源是 ``call.arguments["sql"]`` / ``["query"]``
+        （``security/evaluator.py:289``），而 ai-chatbot 的 SQL 只能是
+        ``bash {command: "sqlite3 … 'DROP TABLE …'"}`` —— 参数里没有那两个键。
+
+        **它不是判 skipped，是判 pass**：规则一旦被声明就产出 finding，命中集为
+        空即 pass。也就是说它是一条**永远绿的安全断言**，比缺这条断言更糟——
+        会占着"安全规则已覆盖"的名分。实测（2026-09-30，四场景形状复现）：
+
+          ``bash`` + ``command`` 含 DROP TABLE      → forbidden_sql: pass（认不出）
+          参数键改成 ``sql``（database-core 的形状） → forbidden_sql: fail（可达）
+
+        故与 ``sql_result`` 同一口径：不声明。实测记录同时写在
+        ``cases/chatbot.security.compliant.baseline.yaml`` 的文件头。
+        """
+        offenders = [
+            case.id
+            for case in _cases()
+            if any(
+                assertion.security.forbidden_sql for _mount, assertion in case.session_assertions()
+            )
+        ]
+        assert not offenders, (
+            "chatbot-core 不得声明 forbidden_sql（SQL 走 bash，参数键里没有 "
+            f"sql/query，声明了也永远 pass）：{offenders}"
+        )
+
+
+def _shim_surface() -> dict[str, bool]:
+    """接入侧自报的观测面表（与 /health 同源，直接 import shim 的模块常量）。"""
+    if str(SHIM) not in sys.path:
+        sys.path.insert(0, str(SHIM))
+    from shim_ai_chatbot import server as shim_server
+
+    return dict(shim_server.OBSERVATION_SURFACE)
+
 
 class TestProfileHandlesMissingObservationSurface:
     """change-plan §3.4：能力裁剪要**两条一起做**，缺一条就是假信号。"""
@@ -256,11 +294,7 @@ class TestProfileHandlesMissingObservationSurface:
     PROFILES = ("chatbot-plain", "chatbot-strict", "chatbot-judge")
 
     def _surface_declaration(self) -> dict[str, bool]:
-        if str(SHIM) not in sys.path:
-            sys.path.insert(0, str(SHIM))
-        from shim_ai_chatbot import server as shim_server
-
-        return dict(shim_server.OBSERVATION_SURFACE)
+        return _shim_surface()
 
     @pytest.mark.parametrize("name", PROFILES)
     def test_unobservable_metrics_are_kept_and_declared_absent(self, name: str) -> None:
@@ -440,7 +474,105 @@ class TestProfileHandlesMissingObservationSurface:
         assert not problems, problems
 
 
-class TestAssertionsCanActuallyFail:
+# 每档 profile 里"永远判不出分"的插件指标 → **为什么**不能判。
+#
+# 为什么要有一份清单：这类条目在报告里是 skipped（不是假绿），但它们会占着
+# "这档覆盖了 N 个指标"的名分。N 里有几条永远不会有 verdict，只有把理由写下来，
+# 才分辨得出"设计如此"与"漏配了参数"。
+#
+# 两个来源：
+#   surface    —— 观测面不存在（SUT 在 /health 里把该事件声明为 false），
+#                 run_plugin 统一判 skipped；
+#   undeclared —— 事件面**可用**，但区分性参数（default_params 里缺省为 None
+#                 的那些）从未被 profile 或任何 case 声明 → 插件按"未声明即不判"
+#                 自跳过。
+#
+# **第二个来源是本清单存在的理由**：既有护栏（
+# TestProfileHandlesMissingObservationSurface）只覆盖了第一个。
+# 清单与事实必须互补：登记了却其实可判 → 护栏会红（登记过期）。
+VACUOUS_METRICS: dict[str, str] = {
+    "harness.retry": (
+        "观测面缺口：provider 重试只写日志、不上协议流"
+        "（shim 声明 retry=false；实测出处见 dataset.yaml 与本仓 change-plan）"
+    ),
+    "harness.context_compaction": (
+        "观测面缺口：SUT 只有预算数字（lastCompactionFreed），没有压缩起止事件"
+        "（shim 声明 context.compaction.started/finished 均为 false）"
+    ),
+    "harness.mcp_permission": (
+        "声明缺口：本数据集不覆盖 MCP 维度（理由见 dataset.yaml——MCP server 由"
+        "运行期配置决定），没有任何 case/profile 声明 params.allowed，"
+        '插件按"未声明即不判"自跳过'
+    ),
+}
+
+
+class TestEveryProfileMetricCanActuallyJudge:
+    """profile 覆盖的指标里，哪些**永远判不出分**——必须逐条登记理由。
+
+    起因（2026-09-30 勘察）：`harness.mcp_permission` 的观测面是**可用**的
+    （shim 声明 `mcp.call`=true），三条既有护栏因此全碰不到它，但它在
+    16 条 case × 3 档 profile 里恒为 skipped。**"事件面缺口"与"声明缺口"是两种
+    空转**：前者有护栏，后者此前没有。
+    """
+
+    PROFILES = TestProfileHandlesMissingObservationSurface.PROFILES
+
+    def _discriminating_keys(self, metric_id: str) -> set[str]:
+        """区分性参数：缺省为 None 的那些（缺省 None = 未声明即不判）。"""
+        plugin = plugin_for(metric_id)
+        if plugin is None:
+            return set()
+        return {key for key, value in plugin.default_params.items() if value is None}
+
+    def _vacuous(self) -> dict[str, set[str]]:
+        """恒 skipped 的插件指标 → 命中的档位集合。"""
+        cases = _cases()
+        declared_surface = _shim_surface()
+        found: dict[str, set[str]] = {}
+        for name in self.PROFILES:
+            for spec in load_profile(EVALS, name).metrics:
+                plugin = plugin_for(spec.id)
+                if plugin is None:
+                    continue
+                # 来源一：观测面不存在
+                if any(declared_surface.get(event) is False for event in plugin.required_events):
+                    found.setdefault(spec.id, set()).add(name)
+                    continue
+                # 来源二：事件面可用，但区分性参数从未被任一 case 或 profile 声明
+                gate = self._discriminating_keys(spec.id)
+                if not gate:
+                    continue
+                declared_anywhere = set(spec.params)
+                for case in cases:
+                    declared_anywhere |= set(case.metric_params.get(spec.id, {}))
+                if not (declared_anywhere & gate):
+                    found.setdefault(spec.id, set()).add(name)
+        return found
+
+    def test_vacuous_metrics_are_registered_and_the_registry_is_not_stale(self) -> None:
+        vacuous = self._vacuous()
+        assert vacuous, "一条恒 skipped 的指标都没有——护栏已失效，检查探测逻辑本身"
+
+        unregistered = sorted(set(vacuous) - set(VACUOUS_METRICS))
+        assert not unregistered, (
+            "这些指标在本数据集里永远判不出分（恒 skipped），却没有登记理由——"
+            f"它们会占着'已覆盖'的名分：{unregistered}"
+        )
+
+        stale = sorted(set(VACUOUS_METRICS) - set(vacuous))
+        assert not stale, f"VACUOUS_METRICS 里这些条目其实可以判出分（登记过期，请删掉）：{stale}"
+
+    def test_every_registration_explains_itself_and_is_in_every_profile(self) -> None:
+        """登记必须带理由，且该指标在该数据集的每一档里都在（否则"留痕"是空话）。"""
+        specs_by_profile = {
+            name: {spec.id for spec in load_profile(EVALS, name).metrics} for name in self.PROFILES
+        }
+        for metric_id, reason in VACUOUS_METRICS.items():
+            assert len(reason) >= 20, f"{metric_id} 的理由太短，说不清为什么不能判"
+            for name, ids in specs_by_profile.items():
+                assert metric_id in ids, f"{metric_id} 未在 {name} 里留痕（删条目 = 看不见的省略）"
+
     """`blocking` 归 Profile（Spec §17.2）→ "声明了却不算数"是一条独立的失败模式。
 
     首跑（run_d487591757ca）实测到它：`chatbot.skill.load.negative` 的

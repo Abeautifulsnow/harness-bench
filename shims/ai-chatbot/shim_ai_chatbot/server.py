@@ -65,6 +65,19 @@ SETTINGS: dict = {
 # E2 观测面能力表（事件名 → bool）：**实测事实**（change-plan B2/A2）——
 # provider 重试只写日志不上协议流、压缩只有预算数字无起止事件。
 #
+# `retry: False` 的**精确口径**（2026-09-30 复核，此前这句话说得太满）：
+#   - 模型/provider 层重试确实完全不上流（`foundation/model/retry-middleware.ts`
+#     的 for-attempt 循环只 `console` 一行），这是 `harness.retry` 要判的那一层；
+#   - **但连接器工具有一条例外**：`extensions/connector/observability.ts` 定义了
+#     `connector.call.retrying`（带 `attempts`），经 `runtime/agent/tools.ts` 以
+#     `data-connector-event` 写到父流上。它是**工具级**重试，不是模型级，
+#     与 `harness.retry` 的语义不同（那条指标问的是"harness 有没有在撞运气"）。
+#     本数据集不覆盖 MCP/connector 维度（dataset.yaml 有理由），因此没有可声明
+#     它的 case；若将来要覆盖，需要的是一个工具级重试指标，而不是把这条信号
+#     塞进 `harness.retry`——那会让"模型在重试"与"某个连接器工具在重试"在报告里
+#     不可分辨。
+#   - 结论：声明值维持 False（**不要**为了让哪条指标有输入而改声明）。
+#
 # 必须是模块级常量而不是 `_health_payload` 里的字面量：定义树侧要按它判"哪些
 # metric 的观测面不存在"（C 类 profile 的裁剪依据），而唯一能读到它的方式不该是
 # 起一个真上游再发 HTTP（tests/test_chatbot_dataset.py 的护栏直接导入它）。

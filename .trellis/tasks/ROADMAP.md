@@ -189,7 +189,10 @@ shim 起在 8901、harness 指向它开跑之后，暴露的三个缺陷两个�
 新增交付：`evals/profiles/chatbot-judge.yaml`（两条 judge + 与 plain 逐条一致的
 确定性层；阈值抄 nightly 的先例值，不自造第二套数字）；`tests/test_deepeval_judge_metrics.py`
 （9 条，真实 SDK、不需要凭据）；`tests/test_chatbot_dataset.py` 33 条；
-`tests/test_judge_cost.py` 8 条；`tests/test_registry.py` 33 条。全量 595 passed。
+`tests/test_judge_cost.py` 8 条；`tests/test_registry.py` 27 条。全量 597 passed
+（2026-09-30 回填：此行原先写的 595 / 33 是落笔时的估数，未经实测。重跑
+`pytest -q` 实测 `597 passed in 411.61s`，四个改动文件 `--collect-only` 为
+9 / 33 / 8 / 27。同一段里的三个缺陷都是"没实测就落结论"，这行数字是第四个）。
 
 ### C 类实测回修（2026-09-30，跑完三轮真机全量后）
 
@@ -206,7 +209,93 @@ C 类用例本身的问题逐条记在 change-plan §3「第五轮修订」；�
 
 ---
 
-## 优先级视图
+## C 类机制收口（2026-09-30，第十四轮）——"针对 ai-chatbot 的评测机制"本身
+
+需求原话是"**优先保证针对 ai-chatbot 的评测机制完善，但不要歪曲整个框架**"。
+因此这一轮分成两层，各自有明确的归属：**属于 C 类的进 C 类，属于通用框架的
+进通用框架**，不做"为了这一个 SUT 在框架里开分支"的事。
+
+先说结论：**框架核心没有被 ai-chatbot 污染的痕迹**（逐 token 核过，见下"框架侧"）。
+真正有问题的四处都在**评测机制本身**——两种假覆盖 + 一处声明口径 + 多处护栏
+不够严，全部不含 SUT 分支。
+
+### 一、C 类侧：两种"假覆盖"（都不会报错，只会占着"已覆盖"的名分）
+
+| # | 项 | 事实 | 处置 |
+| --- | --- | --- | --- |
+| 1 | **永不失败的安全断言** | `chatbot.security.compliant.baseline` 声明了 `security.forbidden_sql: (?i)drop\s+table`。该规则只读 `call.arguments["sql"]` / `["query"]`（`security/evaluator.py:289`），而 ai-chatbot 的 SQL 只能走 `bash {command: "sqlite3 …"}` → 命中集**恒空** → 这条规则永远 pass。实测四场景复现（`bash+command` 含 DROP TABLE → pass；参数键改成 `sql` → fail） | ✅ 删掉该声明（与 `native.sql_result` 同一口径），文件头写实测记录 + 新增 `test_forbidden_sql_is_not_declared` |
+| 2 | **恒 skipped 的 profile 条目** | `harness.mcp_permission` 在 `chatbot-core` 16 条 × 3 档 profile 里**恒为 skipped**：观测面可用（`mcp.call`=true），但本数据集不覆盖 MCP 维度（`dataset.yaml` 有理由），没有任何 case/profile 声明 `params.allowed` → 插件按"未声明即不判"自跳过。**三套既有护栏全碰不到它**——它们只查"观测面为 false"的那一类 | ✅ 新增 `TestEveryProfileMetricCanActuallyJudge`：登记表 `VACUOUS_METRICS`（三条：`harness.retry` / `harness.context_compaction` / `harness.mcp_permission`，各带理由），并**双向**断言（未登记的空转 → 红；登记了却其实可判 → 红）。"事件面缺口"与"声明缺口"从此是两种被点名的空转 |
+
+### 二、C 类侧：judge 档的机制从"跑通过一次"变成"逐条有断言"
+
+第二版（`74ba912`）的验证止步于"用本地 stub HTTP 服务跑通一次"（`run_49ed60607d33`），
+证明了**传输层**，但没把"这一档在本数据集上到底判出几条"固化下来——而 profile 的
+注释里恰恰写着 6/16、7/16 这些占比。注释会漂移，断言不会。
+
+新增 `TestChatbotJudgeProfileIsWiredEndToEnd`（真数据集 16 条 × 真 profile × 真
+adapter，只把 judge 模型换成假替身，因此不需要凭据）：
+
+```text
+agent.task_completion   : 16/16 判出分（stub 调用计数 > 0，证明真的走到了判分器）
+agent.tool_correctness  : 10 判出分 / 6 落 skipped(judge_input_unavailable)
+                          skipped 集合**恰好等于**"case 级无 tools.required"的集合
+无凭据时                  : 仍是 EvaluationInfraError → exit 2（不降级成 skipped）
+```
+
+最后一条尤其要钉：**凭据缺失是 run 级配置问题（infra），输入缺口是这次观测的问题
+（skipped）**，两者方向相反。把它记成 skipped 会让"这次评测根本没判"看起来像
+"这条用例不需要判"。用 `monkeypatch.delenv` 构造，不靠"本机恰好没配 key"。
+
+### 三、接入侧：声明口径与方言登记
+
+| 项 | 事实 | 处置 |
+| --- | --- | --- |
+| `retry: False` 说得太满 | 模型/provider 层重试确实完全不上流（`foundation/model/retry-middleware.ts` 只 `console` 一行）；**但连接器工具有一条例外**：`connector.call.retrying`（带 `attempts`）经 `data-connector-event` 落到父流。声明值维持 False（那是**工具级**重试，`harness.retry` 判的是模型层），但口径写准了，并写明"要覆盖它得新增一条工具级指标" | ✅ `server.py` 的 `OBSERVATION_SURFACE` 注释按口径收窄 |
+| 静默丢弃且未登记的方言 | `data-connector-event` 此前落在 `translator.feed` 的注释"…"里——**下一个人唯一看不出它会丢什么的地方** | ✅ 补进丢弃登记表，并写明"维持丢弃的唯一理由" |
+| 扫描面不够严（**通用框架侧**，非 C 类） | 见下 | ✅ |
+
+### 四、框架侧（通用，与 ai-chatbot 无关）
+
+`tests/test_framework_boundary.py` 是"框架通用性"的机械护栏。它**从第一天就是绿的、
+基线零命中**——但这轮发现它**自己不够严**，四处（都不涉及 SUT 分支）：
+
+1. 大小写敏感精确子串 → `AI-Chatbot` / `conversation_id` / `toolCallId` /
+   `parentMessageId` 这些**同一标识的写法差异**全能溜过去（写 Python 的人更可能写
+   下划线形式）；改为大小写不敏感 + 补齐 snake_case 变体；
+2. 只扫 `*.py` → `reports/templates/report.html.j2`（包内唯一非 .py 文件）脱离护栏；
+   改为扫包内全部文本文件；
+3. **注释写"dev/ 豁免"而代码从未豁免** → 按更严的一侧收口（继续扫 dev/，改对注释）；
+   顺带补一条"变体写法必须命中"的对照用例，防止匹配逻辑被改回大小写敏感；
+4. 同族标识只登记一半（`data-sub-` 有、`data-connector-event` /
+   `data-permission-mode` / `data-queue-status` 没有）→ 补齐。
+
+另加一条**护栏自检**（`test_the_sweep_actually_covers_files_and_templates`）：扫描面
+必须非空且含非 .py 文件——防止 glob 写错后"零命中"是假绿（改大小写/后缀时最容易踩）。
+
+**框架核心的逐 token 复核结论**：`src/agent_eval/**` 里对 `ai-chatbot` /
+`ai_chatbot` / `mcp__` / `data-sub-` / `data-*` 一族 / `conversationId` /
+`toolCallId` / `parentMessageId` / `SIACT_` 的命中数为 **0**（104 个文件全扫）。
+命中过的只有 `OPENAI_API_KEY`（judge provider 的凭据说明，与 SUT 无关）。
+框架本身**不需要为此改动一行**——这一轮的框架侧产出只有那条护栏的收口。
+
+### 本轮的取舍与未做完的
+
+- **`forbidden_sql` 删声明而不是"改造规则去认 bash 参数"**：后者要在通用安全规则里
+  加"从 shell 字符串里抠 SQL"的启发式，那是**为了一个 SUT 歪曲通用规则**（原话
+  禁止的事），且启发式本身会产生假阳性/漏判。缺口如实登记，规则不动。
+- **`harness.mcp_permission` 的空转不"修"**：本数据集不覆盖 MCP 维度是**有理由的
+  设计**（MCP server 取决于被测实例配置），不是漏配。因此处置是**登记**它恒 skipped，
+  而不是硬塞一个假的 `allowed` 声明把它变成"能判"。
+- **judge 阈值仍未校准**：本机无 judge 凭据，0.70 / 0.80 仍是从 nightly 抄的先例值。
+  这一轮把"机制"钉死了（能判几条、哪几条、缺输入怎么记、无凭据怎么报），
+  **判得准不准依然没有结论**——与第二版登记的状态一致。
+
+测试计数：本轮新增 9 条（`test_chatbot_dataset` 33→36、`test_deepeval_judge_metrics`
+9→13、`test_framework_boundary` 2→4），**全量 606 passed**（实测，
+`pytest -q` → `606 passed in 276.29s`）。两条新护栏都验证过"可红"：
+拿掉 `VACUOUS_METRICS` 里的一条登记 → 立刻报出未登记的空转；
+往 `report.html.j2` 里塞一个 `conversation_id` → 边界测试立刻命中模板文件。
+
 
 | 任务 | 优先级 | 性质 | 阻塞了什么 |
 | --- | --- | --- | --- |
