@@ -1,14 +1,26 @@
 # agent-eval Web 控制台（P5）
 
-React + TypeScript + shadcn/ui + Tailwind 的**只读**控制台，覆盖 PRD §72–§78 与 §9.2
+React + TypeScript + shadcn/ui + Tailwind 的控制台，覆盖 PRD §72–§78 与 §9.2
 的全部导航面（Dashboard / Benchmark / Case / Suite / Run / Trace / Experiment /
-Regression / Failure / Quality / Review / Security / Cost / Trends）。
+Regression / Failure / Quality / Review / Security / Cost / Trends），以及
+Web Execution 控制面（Evaluation，docs/web-evaluation-control-plane-design.md §38）。
 
-## 为什么是只读
+## 安全边界：Definition 只读 + 受控执行
 
-写操作留在 CLI。前端不存在"绕过 Gate / Baseline / Review 流程改数据"的路径——
-这不是约定，而是结构性的：API 层只有 GET 路由（`tests/test_api.py::TestReadOnlyContract`
-断言 OpenAPI 里出现的 HTTP 动词集合恰好是 `{get}`）。
+Definition 数据（Benchmark / Dataset / Case / Suite / Gate）依然只读：前端不存在
+"绕过 Gate / Baseline / Review 流程改数据"的路径——这不是约定，而是结构性的：
+OpenAPI 里 PUT/DELETE/PATCH 不存在，POST 只出现在 `/api/eval-runs`
+（发起/取消评测两个执行动词，`tests/test_api.py::TestReadOnlyContract` 断言这一点）。
+
+执行面的 POST 只有两个，全部经受控入口进入 Runner：
+
+| 动作 | 端点 |
+| --- | --- |
+| 发起评测（202；幂等重放 200） | `POST /api/eval-runs` |
+| 取消评测（Runner 收到真实 cancellation） | `POST /api/eval-runs/{job_id}/cancel` |
+
+Agent endpoint 由管理员预注册在 `evals/agents/*.yaml`，Web 只能选择；
+凭证（secret_ref → env var）只在服务端解析，浏览器永远看不到值。
 
 ## 工具链选择
 
@@ -51,6 +63,7 @@ uv run agent-eval serve --port 8000 --static web/dist
 src/
   lib/
     api.ts            只读客户端（只发 GET；409/404 语义原样上抛）
+    evaluation-api.ts 执行面客户端（仅有的两个 POST：发起/取消评测；Job SSE 订阅）
     api-types.ts      REST 契约类型，与 src/agent_eval/api/schemas.py 对齐
     format.ts         数字/时间格式化（null ≠ 0 的显示约定集中在这里）
     verdicts.ts       判定 → 配色/中文标签
@@ -59,7 +72,7 @@ src/
     ui/               shadcn/ui 组件（源码入仓）
     common/           状态块、徽标、Trace 树等跨页复用件
     layout/           侧栏健康状态
-  pages/              每个导航项一个文件
+  pages/              每个导航项一个文件（Evaluation 三页见 §43：列表/新建/详情）
 ```
 
 ## 两条硬约定

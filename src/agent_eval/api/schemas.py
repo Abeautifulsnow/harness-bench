@@ -79,6 +79,16 @@ class SuiteRow(BaseModel):
     description: str = ""
 
 
+class ProfileRow(BaseModel):
+    """Metric Profile 轻量视图（Execution 文档 §12：Web 只选择，不修改）。"""
+
+    name: str
+    metrics: int = 0
+    blocking_metrics: int = 0
+    judge_concurrency: int = 2
+    strict_protocol: bool = False
+
+
 class CaseRow(BaseModel):
     """PRD §73/§14：Case 列表的轻量视图（不返回完整 input/output）。"""
 

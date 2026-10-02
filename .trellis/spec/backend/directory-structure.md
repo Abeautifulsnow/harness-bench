@@ -32,10 +32,11 @@ web/                   # P5 前端（React + TS + shadcn/ui + Tailwind，bun 管
 | `review/` | Human Review 台账 + Review Queue 候选识别 | 只产出建议，不写库（入队是审计动作） |
 | `experiment/` | Experiment/Variant/Matrix 定义与执行 | 同一实验内各 variant 共享 benchmark/dataset/profile/repeat/gate |
 | `runner/` | 编排：调度/超时/失败语义/落盘触发 | 不直接 import YAML/CLI |
+| `execution/` | Execution Plane：EvalRunJob 生命周期、LocalJobExecutor（独立线程 loop）、EvalRunService、Agent Connection Profile | 唯一编排 Runner 的入口；Router 不直接碰 Runner；Secret 只以 env 现场解析，不进 Job 记录 |
 | `regression/` | 稳定性判定（Spec §3）+ compare / trace diff | 判定是纯函数；成本/性能类指标方向语义见 Spec §14 |
 | `storage/` | RunStore（增量落盘）、BaselineStore、Analytics（DuckDB 投影） | 写入 tmp+replace 原子替换；派生层永远可重建 |
 | `reports/` | 五个产物由同一个 RunAggregate 一次写入 | build/render 纯函数与 IO write 分离 |
-| `api/` | P5 只读 REST API（PRD §84） | **只有 GET 路由**；派生层 `read_only=True`（Spec §13） |
+| `api/` | P5 REST API（PRD §84 + Web Execution 控制面） | **Definition mutation verbs = forbidden；Execution verbs = allowed**（POST 仅 `/eval-runs` 发起/取消，`test_api.py::TestReadOnlyContract` 断言）；派生层 `read_only=True`（Spec §13） |
 | `cli/` | Typer 子命令（app.py 聚合 + commands/* 一命令族一模块） | 只做参数解析与退出码映射 |
 | `dev/` | mock server 等本地联调工具 | 不被生产代码 import |
 

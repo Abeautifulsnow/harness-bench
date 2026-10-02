@@ -151,4 +151,7 @@ export const api = {
   cost: (params?: { benchmark?: string; limit?: number }) => get<T.CostBreakdown[]>("/cost", params),
   flaky: (limit?: number) => get<T.FlakyList>("/flaky", { limit }),
   storageStatus: () => get<T.StorageStatus>("/storage/status"),
+
+  // 执行面的只读部分（POST 只存在于 evaluation-api.ts 的两个执行动词）。
+  profiles: () => get<T.ProfileRow[]>("/profiles"),
 };

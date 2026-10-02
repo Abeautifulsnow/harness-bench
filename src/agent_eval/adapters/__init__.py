@@ -34,16 +34,19 @@ class InvalidEndpointError(InvalidCallError):
     """
 
 
-def open_adapter(endpoint: str) -> AgentAdapter:
+def open_adapter(endpoint: str, headers: dict[str, str] | None = None) -> AgentAdapter:
     """Resolve an adapter from an endpoint string.
 
     - ``fake://``            → in-process scripted adapter (tests / local dev)
     - ``http://...`` etc.    → HTTP + SSE adapter (PRD §6.1 V1 protocol)
+
+    ``headers``：Agent Connection Profile 解析出的凭证头（Execution 文档 §27），
+    仅对 HTTP 传输有意义；fake:// 没有传输层，静默忽略。
     """
     if endpoint == "fake://":
         return FakeAgentAdapter()
     if endpoint.startswith(("http://", "https://")):
-        return HttpAgentAdapter(endpoint)
+        return HttpAgentAdapter(endpoint, headers=headers)
     raise InvalidEndpointError(
         f"unsupported agent endpoint '{endpoint}': expected 'fake://' or an http(s) URL"
     )

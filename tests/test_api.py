@@ -52,13 +52,28 @@ async def _run(workspace, **kw) -> str:
 
 
 class TestReadOnlyContract:
-    def test_no_write_routes_are_exposed(self, client: TestClient) -> None:
-        """只读保证：HTTP 层不允许任何改数据的动词（PRD §84 只列了资源路径）。"""
+    def test_write_routes_are_execution_only(self, client: TestClient) -> None:
+        """Execution 边界（docs/web-evaluation-control-plane-design.md §42）：
+
+        ``Definition mutation verbs = forbidden``，
+        ``Execution mutation verbs = allowed``——POST 只能出现在 eval-runs
+        （发起/取消评测），PUT/DELETE/PATCH 任何资源都不存在。
+        """
         schema = client.get("/api/openapi.json").json()
-        verbs = set()
-        for path in schema["paths"].values():
-            verbs.update(path.keys())
-        assert verbs == {"get"}
+        for path, operations in schema["paths"].items():
+            for verb in operations:
+                assert verb in {"get", "post"}, f"unexpected verb {verb!r} on {path}"
+                if verb == "post":
+                    assert path.startswith("/api/eval-runs"), (
+                        f"execution verb on non-execution path: {verb.upper()} {path}"
+                    )
+
+    def test_definition_mutation_verbs_are_rejected(self, client: TestClient) -> None:
+        """对 Definition 资源发写入动词必须被路由层拒绝（405：不存在该动词的端点）。"""
+        assert client.post("/api/benchmarks", json={}).status_code == 405
+        assert client.put("/api/gates", json={}).status_code == 405
+        assert client.delete("/api/cases/database-core").status_code == 405
+        assert client.patch("/api/runs/run_x").status_code == 405
 
     def test_health(self, client: TestClient) -> None:
         payload = client.get("/api/health").json()

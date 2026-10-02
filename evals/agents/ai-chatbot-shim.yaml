@@ -1,0 +1,8 @@
+# Agent Connection Profile（docs/web-evaluation-control-plane-design.md §8）。
+# Definition Plane 资产：随 Git 版本管理；Web 只能选择/查看，不能新增或修改。
+# 本地联调：uv run python shims/ai-chatbot/shim_ai_chatbot/server.py（缺省 8901 端口）。
+id: ai-chatbot-shim
+display_name: AI Chatbot Shim (local)
+endpoint: http://127.0.0.1:8901
+enabled: true
+description: shims/ai-chatbot 内置 shim，本机联调/演示用

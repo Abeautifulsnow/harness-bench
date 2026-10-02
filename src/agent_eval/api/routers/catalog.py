@@ -13,13 +13,14 @@ from typing import Annotated, Any
 from fastapi import APIRouter, HTTPException, Query
 
 from agent_eval.api.deps import WorkspaceDep
-from agent_eval.api.schemas import BenchmarkRow, CaseRow, SuiteRow
+from agent_eval.api.schemas import BenchmarkRow, CaseRow, ProfileRow, SuiteRow
 from agent_eval.errors import AgentEvalError
 from agent_eval.loading.loader import (
     dataset_refs,
     load_all_datasets,
     load_benchmark,
     load_dataset,
+    load_profile,
     load_suites,
     resolve_cases,
     select_suite_cases,
@@ -285,6 +286,34 @@ def list_suite_rows(workspace: WorkspaceDep) -> list[SuiteRow]:
                 cases=summary.cases,
                 kind="security" if summary.tag == "security" else "red-team",
                 description=summary.description,
+            )
+        )
+    return out
+
+
+@router.get(
+    "/profiles",
+    response_model=list[ProfileRow],
+    summary="Metric Profile 列表（Execution 文档 §12：Web 只选择，不修改）",
+)
+def list_profile_rows(workspace: WorkspaceDep) -> list[ProfileRow]:
+    root = workspace.evals_root
+    profiles_dir = root / "profiles"
+    out: list[ProfileRow] = []
+    if not profiles_dir.is_dir():
+        return out
+    for path in sorted(profiles_dir.glob("*.yaml")):
+        try:
+            profile = load_profile(root, path.stem)
+        except AgentEvalError as exc:
+            raise HTTPException(status_code=400, detail=exc.message) from exc
+        out.append(
+            ProfileRow(
+                name=profile.name,
+                metrics=len(profile.metrics),
+                blocking_metrics=sum(1 for m in profile.metrics if m.blocking),
+                judge_concurrency=profile.judge_concurrency,
+                strict_protocol=profile.strict_protocol,
             )
         )
     return out

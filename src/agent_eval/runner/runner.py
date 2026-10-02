@@ -96,6 +96,12 @@ from agent_eval.trace.builder import TraceBuilder
 
 INFRA_RETRIES = 2  # PRD §87 Infrastructure Retry（会话建立阶段）
 DEFAULT_GATE = "pr"
+# run-level progress 回调（Execution 文档 §18）的状态键映射。
+_PROGRESS_KEYS = {
+    CaseStatus.PASS: "passed",
+    CaseStatus.FAIL: "failed",
+    CaseStatus.ERROR: "error",
+}
 # session 级兜底超时相对预算的余量（秒）：正常路径下每一轮都按剩余预算自行收场，
 # 这一层只防病理情况，余量留给超时后的 cancel 与收尾落盘。
 _SESSION_TIMEOUT_GRACE = 30.0
@@ -108,6 +114,9 @@ class RunConfig:
     data_root: Path
     benchmark: str
     agent_endpoint: str = "fake://"
+    # Agent Connection Profile 解析出的凭证头（Execution 文档 §27）：只活在
+    # 内存里，随 adapter 注入传输层；绝不序列化进 run.json / job 记录。
+    agent_headers: dict[str, str] | None = None
     profile: str | None = None
     repeat: int | None = None
     concurrency: int = 4
@@ -225,7 +234,7 @@ class Runner:
         self.store = RunStore(cfg.runs_root)
         self.baselines = BaselineStore(cfg.state_root, cfg.runs_root)
         self.pricing = PricingTable.load(cfg.evals_root)
-        self.adapter: AgentAdapter = open_adapter(cfg.agent_endpoint)
+        self.adapter: AgentAdapter = open_adapter(cfg.agent_endpoint, cfg.agent_headers)
         # run 级执行期状态（E1/A1/A3）：并发 TaskGroup 内只做事件级累加，
         # 无跨 await 的读改写，asyncio 单线程语义下无需加锁。
         self._protocol_violations: dict[str, int] = {}
@@ -236,7 +245,11 @@ class Runner:
 
     # ------------------------------------------------------------------ entry
 
-    async def run(self, on_run_created: Callable[[str], None] | None = None) -> RunOutcome:
+    async def run(
+        self,
+        on_run_created: Callable[[str], None] | None = None,
+        on_progress: Callable[[dict[str, int]], None] | None = None,
+    ) -> RunOutcome:
         cfg = self.cfg
         benchmark = load_benchmark(cfg.evals_root, cfg.benchmark)
         info, cases = load_dataset(cfg.evals_root, benchmark.dataset)
@@ -299,29 +312,55 @@ class Runner:
 
         meta = self._build_meta(benchmark, info, baseline, suites_covered)
         run_dir = self.store.create_run(meta)
-        meta.metric_capability_snapshot = {
-            **ctx.capabilities,
-            # A2 留痕段：观测面表与 probe() 共用字段，`event:` 前缀区分键空间
-            # （裸键 = metric id 能力，event: 键 = PRD §8 事件观测面）。
-            **{f"event:{name}": flag for name, flag in health.observation_surface.items()},
-        }
-        meta.metric_degradations = ctx.degradations
-        meta.status = RunStatus.running
-        self.store.save_meta(meta)
-        if on_run_created is not None:
-            on_run_created(meta.run_id)  # Spec §6.4: run_id 先于任何执行进度落盘
-
         results: list[CaseRunResult] = []
         agent_sem = asyncio.Semaphore(cfg.concurrency)
         try:
+            meta.metric_capability_snapshot = {
+                **ctx.capabilities,
+                # A2 留痕段：观测面表与 probe() 共用字段，`event:` 前缀区分键空间
+                # （裸键 = metric id 能力，event: 键 = PRD §8 事件观测面）。
+                **{f"event:{name}": flag for name, flag in health.observation_surface.items()},
+            }
+            meta.metric_degradations = ctx.degradations
+            meta.status = RunStatus.running
+            self.store.save_meta(meta)
+            if on_run_created is not None:
+                on_run_created(meta.run_id)  # Spec §6.4: run_id 先于任何执行进度落盘
+
+            # Execution 文档 §18：run-level progress。total 在选定 case 后即知；
+            # completed/passed/failed/error 由每次 trial 收尾时回调。
+            total_trials = sum((cfg.repeat or case.execution.repeat) for case in selected)
+
+            def notify_progress() -> None:
+                if on_progress is None:
+                    return
+                counts = {"passed": 0, "failed": 0, "error": 0}
+                for item in results:
+                    counts[_PROGRESS_KEYS[item.status]] += 1
+                on_progress(
+                    {
+                        "total_trials": total_trials,
+                        "completed_trials": len(results),
+                        **counts,
+                    }
+                )
+
+            if on_progress is not None:
+                notify_progress()
+
             async with asyncio.TaskGroup() as tg:
                 for case in selected:
                     repeat = cfg.repeat or case.execution.repeat
                     for iteration in range(1, repeat + 1):
                         tg.create_task(
-                            self._guarded_iteration(case, iteration, ctx, agent_sem, results)
+                            self._guarded_iteration(
+                                case, iteration, ctx, agent_sem, results, notify_progress
+                            )
                         )
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            # Ctrl+C（CLI）与外部取消（Execution Job cancel）同一出口：
+            # run.json 必须收口成 cancelled，不能永远停在 running。
+            # 覆盖 create_run 之后的全程——取消落在 TaskGroup 之前也一样收口。
             meta.status = RunStatus.cancelled
             meta.finished_at = _now()
             self.store.save_meta(meta)
@@ -540,6 +579,7 @@ class Runner:
         ctx: _CaseContext,
         agent_sem: asyncio.Semaphore,
         results: list[CaseRunResult],
+        notify_progress: Callable[[], None] | None = None,
     ) -> None:
         """两阶段执行：Agent 阶段持 agent 槽位，Judge 阶段不持（PRD §86 并发分离）。
 
@@ -551,6 +591,8 @@ class Runner:
         result = await self._finish_iteration(case, phase, ctx)
         results.append(result)
         self.store.save_case_run(result)
+        if notify_progress is not None:
+            notify_progress()
 
     async def _execute_agent_phase(
         self, case: Case, iteration: int, ctx: _CaseContext

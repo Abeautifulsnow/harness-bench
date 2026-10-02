@@ -1,14 +1,18 @@
-"""FastAPI 应用装配（PRD §84）。
+"""FastAPI 应用装配（PRD §84 + docs/web-evaluation-control-plane-design.md §41/§42）。
 
-只读约束由三件事共同保证，缺一不可：
-  1. 本模块只注册 GET 路由；
+安全边界（§42）由三件事共同保证，缺一不可：
+  1. 路由层面：Definition 数据只有 GET；POST 只出现在 eval-runs
+     （发起/取消评测）——"Definition mutation = forbidden, Execution verbs = allowed"；
   2. Workspace 持有的 store 只调用读取方法，DuckDB 以 read_only 打开；
+     执行侧写入全部经 EvalRunService → Runner 落在 .agent-eval/ 产物区；
   3. 前端构建产物同源托管（``web/dist``），因此不需要 CORS 通配——
      "没有跨源写入口"这件事是配置层面成立的，而不是靠约定。
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -17,10 +21,20 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from agent_eval import __version__
-from agent_eval.api.routers import analytics, catalog, dashboard, experiments, failures, quality
+from agent_eval.api.routers import (
+    agent_connections,
+    analytics,
+    catalog,
+    dashboard,
+    eval_runs,
+    experiments,
+    failures,
+    quality,
+)
 from agent_eval.api.routers import regressions as regressions_router
 from agent_eval.api.routers import runs as runs_router
 from agent_eval.api.workspace import Workspace
+from agent_eval.execution.service import EvalRunService
 
 API_PREFIX = "/api"
 STORE_MISSING_TYPES = ("DirectoryNotFound", "IOException", "SerializationException")
@@ -30,35 +44,55 @@ def create_app(
     *,
     evals_root: Path,
     data_root: Path,
+    fixtures_root: Path | None = None,
     static_dir: Path | None = None,
+    max_running_jobs: int = 2,
 ) -> FastAPI:
+    service = EvalRunService(
+        evals_root=evals_root,
+        data_root=data_root,
+        fixtures_root=fixtures_root,
+        max_running_jobs=max_running_jobs,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        # 优雅停机：撤掉在途 Job（Runner 收到真实 cancellation），停执行线程。
+        yield
+        service.shutdown()
+
     app = FastAPI(
         title="agent-eval API",
         description=(
-            "Agent Evaluation & Regression Platform 只读 API（PRD §84）。"
-            "所有写入路径留在 CLI：HTTP 层不存在任何改数据的入口。"
+            "Agent Evaluation & Regression Platform API（PRD §84 + Web Execution 控制面）。"
+            "Definition 数据只读；执行动作（发起/取消评测）经受控入口进入 Runner。"
         ),
         version=__version__,
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
+        lifespan=lifespan,
     )
     app.state.workspace = Workspace(evals_root=evals_root, data_root=data_root)
     app.state.version = __version__
+    app.state.eval_run_service = service
 
     app.add_middleware(
         CORSMiddleware,
-        # 开发期前端跑在 vite dev server（5173），仅白名单本地回环
+        # 开发期前端跑在 vite dev server（5173），仅白名单本地回环；
+        # POST 只服务执行入口（发起/取消评测），依然没有跨源 Definition 写入口。
         allow_origins=[
             "http://127.0.0.1:5173",
             "http://localhost:5173",
         ],
-        allow_methods=["GET"],
+        allow_methods=["GET", "POST"],
         allow_headers=["*"],
     )
 
     for module in (dashboard, catalog, runs_router, regressions_router):
         app.include_router(module.router, prefix=API_PREFIX)
     for module in (experiments, failures, quality, analytics):
+        app.include_router(module.router, prefix=API_PREFIX)
+    for module in (eval_runs, agent_connections):
         app.include_router(module.router, prefix=API_PREFIX)
 
     _register_error_handlers(app)

@@ -733,3 +733,11 @@ export interface StorageStatus {
   hint?: string;
   counts: Record<string, number>;
 }
+
+export interface ProfileRow {
+  name: string;
+  metrics: number;
+  blocking_metrics: number;
+  judge_concurrency: number;
+  strict_protocol: boolean;
+}

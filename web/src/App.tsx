@@ -12,6 +12,7 @@ import {
   ListTree,
   Menu,
   PlayCircle,
+  Rocket,
   ShieldAlert,
   TrendingUp,
   Wallet,
@@ -73,6 +74,15 @@ const Security = React.lazy(() =>
   import("@/pages/Security").then((module) => ({ default: module.Security })),
 );
 const Costs = React.lazy(() => import("@/pages/Costs").then((module) => ({ default: module.Costs })));
+const Evaluations = React.lazy(() =>
+  import("@/pages/Evaluations").then((module) => ({ default: module.Evaluations })),
+);
+const EvaluationNew = React.lazy(() =>
+  import("@/pages/EvaluationNew").then((module) => ({ default: module.EvaluationNew })),
+);
+const EvaluationDetail = React.lazy(() =>
+  import("@/pages/EvaluationDetail").then((module) => ({ default: module.EvaluationDetail })),
+);
 
 /** PRD §72–§78 的导航面。Review / Cost / Trends 是**一级入口**（PRD §9.2），
  *  不塞进"管理"折叠菜单——它们回答的是每天都会问的问题。 */
@@ -95,6 +105,7 @@ const NAV: { group: string; items: { to: string; label: string; icon: React.Elem
   {
     group: "执行",
     items: [
+      { to: "/evaluations", label: "Evaluation", icon: Rocket },
       { to: "/runs", label: "Run", icon: PlayCircle },
       { to: "/traces", label: "Trace Viewer", icon: Activity },
       { to: "/experiments", label: "Experiment", icon: FlaskConical },
@@ -218,6 +229,9 @@ export function AppRoutes() {
           <Route path="/suites" element={<Suites />} />
           <Route path="/runs" element={<Runs />} />
           <Route path="/runs/:runId" element={<RunDetail />} />
+          <Route path="/evaluations" element={<Evaluations />} />
+          <Route path="/evaluations/new" element={<EvaluationNew />} />
+          <Route path="/evaluations/:jobId" element={<EvaluationDetail />} />
           <Route path="/traces" element={<TraceViewer />} />
           <Route path="/experiments" element={<Experiments />} />
           <Route path="/experiments/:experimentId" element={<ExperimentDetail />} />

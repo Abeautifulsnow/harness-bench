@@ -1,0 +1,12 @@
+# 预注册 Agent Connection 的**示例模板**（不会被装载：文件名不是 *.yaml）。
+# 部署时复制为 <id>.yaml 并按环境填写；secret_ref 是 env var 的名字，
+# 值永远不进仓库（docs/web-evaluation-control-plane-design.md §27）。
+id: ai-chatbot-staging
+display_name: AI Chatbot Staging
+endpoint: http://ai-chatbot-shim:8901
+enabled: true
+description: 预发环境自研 Agent
+
+auth:
+  type: bearer
+  secret_ref: AI_CHATBOT_STAGING_TOKEN

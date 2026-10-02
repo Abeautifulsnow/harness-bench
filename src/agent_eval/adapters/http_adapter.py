@@ -45,15 +45,21 @@ class HttpAgentAdapter(AgentAdapter):
         endpoint: str,
         client: httpx.AsyncClient | None = None,
         health_timeout: float = 10.0,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self._endpoint = endpoint.rstrip("/")
         self._client = client  # injectable for tests (MockTransport / base_url required)
         self._owns = client is None
         self._health_timeout = health_timeout
+        # Agent Connection Profile 的凭证头（如 bearer token）：值由调用方在
+        # 服务端现场解析注入，不落盘、不进日志（Execution 文档 §27）。
+        self._headers = dict(headers) if headers else None
 
     def _client_for(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(base_url=self._endpoint, timeout=DEFAULT_TIMEOUT)
+            self._client = httpx.AsyncClient(
+                base_url=self._endpoint, timeout=DEFAULT_TIMEOUT, headers=self._headers
+            )
             self._owns = True
         return self._client
 

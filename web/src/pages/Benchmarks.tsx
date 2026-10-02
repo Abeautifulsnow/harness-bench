@@ -96,13 +96,25 @@ export function Benchmarks() {
                     )}
                   </TableCell>
                   <TableCell className="text-right">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => navigate(`/benchmarks/${encodeURIComponent(row.name)}`)}
-                    >
-                      <Play /> 查看 / 运行
-                    </Button>
+                    <div className="flex justify-end gap-2">
+                      {/* 设计文档 §39：Run 按钮进 New Evaluation 表单，而不是立即执行——
+                          用户仍有机会确认 Agent / Profile / Repeat / Judge。 */}
+                      <Button
+                        size="sm"
+                        onClick={() =>
+                          navigate(`/evaluations/new?benchmark=${encodeURIComponent(row.name)}`)
+                        }
+                      >
+                        <Play /> Run Benchmark
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => navigate(`/benchmarks/${encodeURIComponent(row.name)}`)}
+                      >
+                        查看
+                      </Button>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -164,13 +176,20 @@ export function BenchmarkDetail() {
               },
             ]}
           />
-          <div className="mt-4 rounded-lg border border-border bg-muted/40 px-3 py-2">
-            <div className="text-[11px] tracking-wide text-muted-foreground uppercase">
-              运行命令（只读 UI 不提供写操作）
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
+            <div>
+              <div className="text-[11px] tracking-wide text-muted-foreground uppercase">
+                CLI 运行命令（或直接在 Web 发起）
+              </div>
+              <code className="mt-1 block font-mono text-xs text-foreground">
+                agent-eval benchmark run {name} --repeat 3 --gate pr
+              </code>
             </div>
-            <code className="mt-1 block font-mono text-xs text-foreground">
-              agent-eval benchmark run {name} --repeat 3 --gate pr
-            </code>
+            <Button size="sm" asChild>
+              <Link to={`/evaluations/new?benchmark=${encodeURIComponent(name)}`}>
+                <Play /> Run Benchmark
+              </Link>
+            </Button>
           </div>
         </Section>
       )}
