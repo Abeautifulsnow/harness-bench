@@ -115,4 +115,9 @@ class EvalRunJob(BaseModel):
     # §36：浏览器重试/双击不能产生两个相同评测。
     idempotency_key: str | None = None
 
+    # V2 Notification：终态 webhook。值由提交时的 schedule/trigger 给出；URL 本身
+    # 不是凭证，Bearer 凭证以 env var 名（notify_token_ref）现场解析、不落盘。
+    notify_webhook: str | None = None
+    notify_token_ref: str | None = None
+
     progress: JobProgress = Field(default_factory=JobProgress)

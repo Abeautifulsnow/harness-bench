@@ -1,0 +1,12 @@
+# Webhook / CI Trigger 示例模板（不会被装载：文件名不是 *.yaml）。
+# CI 调用方式：
+#   curl -X POST http://<host>/api/triggers/ci-database/run \
+#     -H "Authorization: Bearer $TRIGGER_TOKEN" \
+#     -H "Idempotency-Key: $CI_JOB_ID"
+# token 值存环境变量，仓库里只有 env var 名（secret_ref 约定，docs §27）。
+id: ci-database
+display_name: CI · database-core
+enabled: true
+description: CI 流水线按需触发的冒烟评测
+preset: smoke-database
+token_secret_ref: AGENT_EVAL_TRIGGER_CI_TOKEN

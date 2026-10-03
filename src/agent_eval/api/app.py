@@ -24,6 +24,7 @@ from agent_eval import __version__
 from agent_eval.api.routers import (
     agent_connections,
     analytics,
+    automation,
     catalog,
     dashboard,
     eval_runs,
@@ -34,6 +35,7 @@ from agent_eval.api.routers import (
 from agent_eval.api.routers import regressions as regressions_router
 from agent_eval.api.routers import runs as runs_router
 from agent_eval.api.workspace import Workspace
+from agent_eval.execution.scheduler import SchedulerService, load_schedules
 from agent_eval.execution.service import EvalRunService
 
 API_PREFIX = "/api"
@@ -54,11 +56,16 @@ def create_app(
         fixtures_root=fixtures_root,
         max_running_jobs=max_running_jobs,
     )
+    scheduler = SchedulerService(evals_root=evals_root, data_root=data_root, service=service)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        # 优雅停机：撤掉在途 Job（Runner 收到真实 cancellation），停执行线程。
+        # V2 Scheduled Evaluation：仓库里有调度定义才起守护线程（空定义零开销）。
+        if load_schedules(evals_root):
+            scheduler.start()
         yield
+        # 优雅停机：撤掉在途 Job（Runner 收到真实 cancellation），停执行/调度线程。
+        scheduler.stop()
         service.shutdown()
 
     app = FastAPI(
@@ -75,6 +82,7 @@ def create_app(
     app.state.workspace = Workspace(evals_root=evals_root, data_root=data_root)
     app.state.version = __version__
     app.state.eval_run_service = service
+    app.state.scheduler = scheduler
 
     app.add_middleware(
         CORSMiddleware,
@@ -92,7 +100,7 @@ def create_app(
         app.include_router(module.router, prefix=API_PREFIX)
     for module in (experiments, failures, quality, analytics):
         app.include_router(module.router, prefix=API_PREFIX)
-    for module in (eval_runs, agent_connections):
+    for module in (eval_runs, agent_connections, automation):
         app.include_router(module.router, prefix=API_PREFIX)
 
     _register_error_handlers(app)

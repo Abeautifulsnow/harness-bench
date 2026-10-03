@@ -1,0 +1,14 @@
+# Scheduled Evaluation（V2，docs §52 Nightly 场景）。
+# Definition Plane 资产：cron 为本地时间 5 字段。enabled: false 是刻意缺省——
+# 打开前先确认 agent connection / preset 在部署环境可用。
+id: nightly-database-core
+display_name: Nightly · database-core
+description: 每晚 03:00 冒烟 database-core，完成后向 webhook 推送终态
+enabled: false
+cron: "0 3 * * *"
+preset: smoke-database
+
+# 可选：任务终态 webhook 通知（V2 Notification 最小形态）。
+# notify:
+#   webhook: http://example.internal/hooks/agent-eval
+#   token_secret_ref: AGENT_EVAL_NOTIFY_TOKEN

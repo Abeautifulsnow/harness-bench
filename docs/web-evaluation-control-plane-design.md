@@ -2150,3 +2150,57 @@ V1 已按本文档落地。对应关系：
 - 实施后 review 修订（2026-10-02）：定义名标识符白名单（防路径注入，§28 的落地）；
   Job 终态不可复活守卫（cancel 竞态收口）；重启时非终态 Job 收口为 failed；
   幂等键在 V2 RBAC 时应按 requested_by 作用域隔离。
+
+---
+
+# 58. V2 增量一（2026-10-03）：Scheduled / Preset / Trigger / Notification / 执行 token 门
+
+§52 路线图的第一批落地。**未做**：Remote Worker（需要分布式队列设计）、完整 RBAC
+（用户体系不存在；本批仅落"执行 token 门"作为最小前置）。
+
+## 58.1 Scheduled Evaluation / Nightly Job
+
+- Definition：`evals/schedules/*.yaml`（cron、preset/request 引用、可选 notify），
+  随 Git 管理；坏定义装载期即炸（InvalidCallError）。
+- Runtime State：`<data_root>/state/schedules/<id>.json`（last_run_at / last_job_id /
+  next_run_at / error——调度台账，非事实源，可删可重建）。
+- `SchedulerService.tick()` 注入时钟可测；进程内守护线程默认 30s 一 tick，
+  仓库有调度定义才启动。
+- 语义决策：
+  - **首次见到调度只注册不触发**——从 now 起算下一次，绝不部署即连发历史；
+  - **错过窗口合并为一次补跑**（coalesce），不回填；
+  - **cron 为本地时间**（5 字段、数字、`*/n`、区间、逗号组合；Vixie dom/dow 并集
+    规则）。DST 折返日"少跑/多跑一次"是已知边界，接受。
+
+## 58.2 Evaluation Preset / Run Preset
+
+- `evals/presets/*.yaml`：命名的部分参数模板（全部字段可选）。
+- 三个消费方：Web New Evaluation 预填表单；Trigger 引用；Schedule 引用。
+- 解析规则：显式覆盖 > 预设字段；发起评测时必填字段缺失 → 400（绝不编默认值）。
+
+## 58.3 CI / Webhook Trigger
+
+- `evals/triggers/*.yaml`：`POST /api/triggers/{id}/run`，Bearer token（env var 名
+  进仓库、值留在部署环境，§27 约定）。token env 缺失 → **fail-closed 400**；
+  token 错误 → 401。CI 应携带 `Idempotency-Key` 防重放。
+- 审计：`requested_by = "trigger:<id>"`；执行 token 门（见 58.5）可整体关闭该入口。
+
+## 58.4 Notification（最小形态）
+
+- Job 终态 webhook：`EvalRunJob.notify_webhook`（+ 可选 `notify_token_ref`），
+  由 schedule/trigger 提交时给出。
+- **尽力而为 + 留痕**：独立守护线程同步 POST（10s 超时），成功/失败追加
+  `<data_root>/state/notifications.jsonl`；失败不改写终态、不重试、不阻塞执行线程。
+
+## 58.5 执行 token 门（RBAC 最小前置）
+
+- 设 `AGENT_EVAL_EXEC_TOKEN` 后，全部执行动词（POST /eval-runs、cancel、
+  trigger run）要求 `Authorization: Bearer <token>`（恒定时间比较）；
+  未设置保持 V1 开放行为。GET 一律不受限。完整 viewer/operator/admin 仍属后续。
+
+## 58.6 验收
+
+- `tests/test_automation.py`：cron 解析边界（含 Vixie 并集规则）、调度注册/触发/
+  合并补跑/禁用/坏预设、trigger 鉴权矩阵、执行 token 门、通知内容与留痕。
+- API：GET /schedules、GET /eval-presets、GET /triggers、POST /triggers/{id}/run。
+- Web：Automation 页（调度台账 + 触发器视图）、New Evaluation 预设填充。

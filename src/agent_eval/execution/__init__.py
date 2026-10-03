@@ -15,6 +15,7 @@ from agent_eval.execution.connections import (
     check_agent_health,
     load_agent_connections,
 )
+from agent_eval.execution.cron import CronSpec
 from agent_eval.execution.executor import LocalJobExecutor
 from agent_eval.execution.models import (
     TERMINAL_STATUSES,
@@ -24,7 +25,9 @@ from agent_eval.execution.models import (
     JobProgress,
     JobStatus,
 )
+from agent_eval.execution.presets import EvalPreset, PresetRequest, load_presets
 from agent_eval.execution.repository import JobRepository
+from agent_eval.execution.scheduler import ScheduleDef, SchedulerService, load_schedules
 from agent_eval.execution.service import (
     DuplicateSubmission,
     EvalRunService,
@@ -32,6 +35,7 @@ from agent_eval.execution.service import (
     JobAlreadyFinished,
     UnknownJob,
 )
+from agent_eval.execution.triggers import TriggerDef, load_triggers
 
 __all__ = [
     "TERMINAL_STATUSES",
@@ -39,7 +43,9 @@ __all__ = [
     "AgentConnectionProfile",
     "AgentConnectionView",
     "AgentHealthReport",
+    "CronSpec",
     "DuplicateSubmission",
+    "EvalPreset",
     "EvalRunJob",
     "EvalRunRequest",
     "EvalRunService",
@@ -50,7 +56,14 @@ __all__ = [
     "JobRepository",
     "JobStatus",
     "LocalJobExecutor",
+    "PresetRequest",
+    "ScheduleDef",
+    "SchedulerService",
+    "TriggerDef",
     "UnknownJob",
     "check_agent_health",
     "load_agent_connections",
+    "load_presets",
+    "load_schedules",
+    "load_triggers",
 ]

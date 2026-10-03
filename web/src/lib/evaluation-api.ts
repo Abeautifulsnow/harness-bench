@@ -67,6 +67,37 @@ export interface AgentHealthReport {
   detail: string;
 }
 
+/** V2 §52：Scheduled Evaluation / Preset / Trigger。 */
+export interface ScheduleView {
+  id: string;
+  display_name: string;
+  enabled: boolean;
+  description: string;
+  cron: string;
+  preset: string | null;
+  last_run_at: string | null;
+  last_job_id: string | null;
+  next_run_at: string | null;
+  error: string | null;
+}
+
+export interface EvalPreset {
+  id: string;
+  display_name: string;
+  description: string;
+  request: Partial<EvalRunRequest>;
+}
+
+export interface TriggerView {
+  id: string;
+  display_name: string;
+  enabled: boolean;
+  description: string;
+  preset: string | null;
+  token_ref: string | null;
+  token_state: "none" | "configured" | "missing";
+}
+
 const BASE = "/api";
 
 async function get<T>(path: string): Promise<T> {
@@ -119,6 +150,10 @@ export const evaluationApi = {
   agentConnections: () => get<AgentConnection[]>("/agent-connections"),
   agentHealth: (id: string) =>
     get<AgentHealthReport>(`/agent-connections/${encodeURIComponent(id)}/health`),
+
+  schedules: () => get<ScheduleView[]>("/schedules"),
+  presets: () => get<EvalPreset[]>("/eval-presets"),
+  triggers: () => get<TriggerView[]>("/triggers"),
 };
 
 /** §18：订阅 Job 的 run-level progress SSE。

@@ -1,0 +1,12 @@
+# Run Preset（V2，docs §52 Evaluation Template / Run Preset）。
+# Definition Plane 资产：一份命名的评测参数模板；字段允许部分给出，
+# Web New Evaluation 用它预填表单，Trigger / Schedule 用它发起评测。
+id: smoke-database
+display_name: Smoke · database-core
+description: 最小冒烟参数（repeat=1、no_judge），适合快速验证链路
+request:
+  benchmark: database-core
+  agent_profile: ai-chatbot-shim
+  tags: [smoke]
+  repeat: 1
+  no_judge: true

@@ -51,6 +51,8 @@ export function EvaluationNew() {
     queryKey: ["agent-connections"],
     queryFn: evaluationApi.agentConnections,
   });
+  // V2 §52：评测预设——一键把模板参数填进表单（字段允许部分给出）。
+  const presets = useQuery({ queryKey: ["eval-presets"], queryFn: evaluationApi.presets });
 
   const [form, setForm] = React.useState<EvaluationForm>({
     agentProfile: "",
@@ -64,6 +66,24 @@ export function EvaluationNew() {
     tags: "",
   });
   const update: FormUpdater = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+
+  const applyPreset = (presetId: string) => {
+    const preset = presets.data?.find((p) => p.id === presetId);
+    if (!preset) return;
+    const r = preset.request;
+    setForm((prev) => ({
+      ...prev,
+      benchmark: r.benchmark ?? prev.benchmark,
+      agentProfile: r.agent_profile ?? prev.agentProfile,
+      suite: r.suite?.length === 1 ? r.suite[0] : "default",
+      profile: r.profile ?? "default",
+      repeat: r.repeat != null ? String(r.repeat) : prev.repeat,
+      concurrency: r.agent_concurrency != null ? String(r.agent_concurrency) : prev.concurrency,
+      noJudge: r.no_judge != null ? String(r.no_judge) : prev.noJudge,
+      strictProtocol: r.strict_protocol != null ? String(r.strict_protocol) : prev.strictProtocol,
+      tags: r.tags?.join(", ") ?? prev.tags,
+    }));
+  };
 
   // §36：每次进入页面生成一个幂等键；连点/浏览器重试不会产生两个相同评测。
   const idempotencyKey = React.useRef(
@@ -102,11 +122,27 @@ export function EvaluationNew() {
         title="New Evaluation"
         description="设计文档 §4/§7：不走 CLI 完成一次标准化评测。参数受服务端限制（repeat ≤ 10、agent_concurrency ≤ 16），Profile 与 Suite 来自 Git 定义树，Web 不临时修改。"
         actions={
-          <Button variant="ghost" asChild>
-            <a onClick={() => void navigate(-1)} role="button">
-              <ArrowLeft /> 返回
-            </a>
-          </Button>
+          <div className="flex items-center gap-2">
+            {presets.data && presets.data.length > 0 && (
+              <Select onValueChange={applyPreset}>
+                <SelectTrigger className="w-52">
+                  <SelectValue placeholder="从预设填充…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {presets.data.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.display_name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            <Button variant="ghost" asChild>
+              <a onClick={() => void navigate(-1)} role="button">
+                <ArrowLeft /> 返回
+              </a>
+            </Button>
+          </div>
         }
       />
 

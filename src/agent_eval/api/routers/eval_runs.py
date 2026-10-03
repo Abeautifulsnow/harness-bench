@@ -10,9 +10,10 @@ from __future__ import annotations
 import asyncio
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
+from agent_eval.api.security import enforce_exec_token
 from agent_eval.execution.models import TERMINAL_STATUSES, EvalRunJob, EvalRunRequest
 from agent_eval.execution.service import (
     DuplicateSubmission,
@@ -37,7 +38,11 @@ def _service(request: Request) -> EvalRunService:
     return request.app.state.eval_run_service  # type: ignore[no-any-return]
 
 
-@router.post("/eval-runs", summary="创建评测 Job（§16：202 受理；幂等重放 200）")
+@router.post(
+    "/eval-runs",
+    summary="创建评测 Job（§16：202 受理；幂等重放 200）",
+    dependencies=[Depends(enforce_exec_token)],
+)
 async def create_eval_run(
     payload: EvalRunRequest,
     request: Request,
@@ -80,6 +85,7 @@ async def get_eval_run(job_id: str, request: Request) -> EvalRunJob:
     "/eval-runs/{job_id}/cancel",
     status_code=202,
     summary="取消评测（§17：必须传到 Runner）",
+    dependencies=[Depends(enforce_exec_token)],
 )
 async def cancel_eval_run(job_id: str, request: Request) -> EvalRunJob:
     try:

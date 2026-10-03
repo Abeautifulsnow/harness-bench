@@ -53,18 +53,19 @@ async def _run(workspace, **kw) -> str:
 
 class TestReadOnlyContract:
     def test_write_routes_are_execution_only(self, client: TestClient) -> None:
-        """Execution 边界（docs/web-evaluation-control-plane-design.md §42）：
+        """Execution 边界（docs/web-evaluation-control-plane-design.md §42 + §58）：
 
         ``Definition mutation verbs = forbidden``，
-        ``Execution mutation verbs = allowed``——POST 只能出现在 eval-runs
-        （发起/取消评测），PUT/DELETE/PATCH 任何资源都不存在。
+        ``Execution mutation verbs = allowed``——POST 只能出现在
+        eval-runs（发起/取消评测）与 triggers（CI/Webhook 触发入口，V2 §58.3），
+        PUT/DELETE/PATCH 任何资源都不存在。
         """
         schema = client.get("/api/openapi.json").json()
         for path, operations in schema["paths"].items():
             for verb in operations:
                 assert verb in {"get", "post"}, f"unexpected verb {verb!r} on {path}"
                 if verb == "post":
-                    assert path.startswith("/api/eval-runs"), (
+                    assert path.startswith(("/api/eval-runs", "/api/triggers")), (
                         f"execution verb on non-execution path: {verb.upper()} {path}"
                     )
 

@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from agent_eval.errors import AgentEvalError, EvaluationInfraError, InfraError, InvalidCallError
+from agent_eval.execution import notifier
 from agent_eval.execution.connections import (
     AgentConnectionProfile,
     load_agent_connections,
@@ -73,6 +74,7 @@ class EvalRunService:
         self.data_root = data_root
         self.fixtures_root = fixtures_root if fixtures_root is not None else Path("fixtures")
         self.repo = JobRepository(data_root / "jobs")
+        self._notification_log = data_root / "state" / "notifications.jsonl"
         self.repeat_cap = repeat_cap
         self.agent_concurrency_cap = agent_concurrency_cap
         self.executor = LocalJobExecutor(
@@ -106,6 +108,8 @@ class EvalRunService:
         request: EvalRunRequest,
         requested_by: str = "local",
         idempotency_key: str | None = None,
+        notify_webhook: str | None = None,
+        notify_token_ref: str | None = None,
     ) -> EvalRunJob:
         with self._lock:
             if idempotency_key:
@@ -121,6 +125,8 @@ class EvalRunService:
                 request=request,
                 requested_by=requested_by,
                 idempotency_key=idempotency_key,
+                notify_webhook=notify_webhook,
+                notify_token_ref=notify_token_ref,
             )
             self._persist(job)
             self.executor.submit(job.job_id, lambda: self._execute_job(job.job_id, connection))
@@ -310,6 +316,10 @@ class EvalRunService:
             current = job.model_copy(update=updates)
             self._jobs[job_id] = current
             self.repo.save(current)
+        # V2 Notification：终态 + 声明了 webhook → 尽力通知（失败只留痕，
+        # 见 notifier 模块；在锁外发，绝不阻塞状态机）。
+        if current.status in TERMINAL_STATUSES and current.notify_webhook:
+            notifier.fire_and_forget(current, self._notification_log)
 
     def _reap_orphaned_jobs(self) -> None:
         """进程重启即丢失执行者（review #S01）：repo 里的非终态 Job 诚实收口。

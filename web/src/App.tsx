@@ -5,6 +5,7 @@ import {
   BadgeCheck,
   Beaker,
   Boxes,
+  CalendarClock,
   ClipboardCheck,
   FlaskConical,
   GitCompareArrows,
@@ -83,6 +84,9 @@ const EvaluationNew = React.lazy(() =>
 const EvaluationDetail = React.lazy(() =>
   import("@/pages/EvaluationDetail").then((module) => ({ default: module.EvaluationDetail })),
 );
+const Automation = React.lazy(() =>
+  import("@/pages/Automation").then((module) => ({ default: module.Automation })),
+);
 
 /** PRD §72–§78 的导航面。Review / Cost / Trends 是**一级入口**（PRD §9.2），
  *  不塞进"管理"折叠菜单——它们回答的是每天都会问的问题。 */
@@ -106,6 +110,7 @@ const NAV: { group: string; items: { to: string; label: string; icon: React.Elem
     group: "执行",
     items: [
       { to: "/evaluations", label: "Evaluation", icon: Rocket },
+      { to: "/automation", label: "自动化", icon: CalendarClock },
       { to: "/runs", label: "Run", icon: PlayCircle },
       { to: "/traces", label: "Trace Viewer", icon: Activity },
       { to: "/experiments", label: "Experiment", icon: FlaskConical },
@@ -232,6 +237,7 @@ export function AppRoutes() {
           <Route path="/evaluations" element={<Evaluations />} />
           <Route path="/evaluations/new" element={<EvaluationNew />} />
           <Route path="/evaluations/:jobId" element={<EvaluationDetail />} />
+          <Route path="/automation" element={<Automation />} />
           <Route path="/traces" element={<TraceViewer />} />
           <Route path="/experiments" element={<Experiments />} />
           <Route path="/experiments/:experimentId" element={<ExperimentDetail />} />
