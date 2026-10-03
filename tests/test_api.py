@@ -53,21 +53,21 @@ async def _run(workspace, **kw) -> str:
 
 class TestReadOnlyContract:
     def test_write_routes_are_execution_only(self, client: TestClient) -> None:
-        """Execution 边界（docs/web-evaluation-control-plane-design.md §42 + §58）：
+        """Execution 边界（docs/web-evaluation-control-plane-design.md §42 + §58/§59）：
 
-        ``Definition mutation verbs = forbidden``，
-        ``Execution mutation verbs = allowed``——POST 只能出现在
-        eval-runs（发起/取消评测）与 triggers（CI/Webhook 触发入口，V2 §58.3），
-        PUT/DELETE/PATCH 任何资源都不存在。
+        ``Definition mutation verbs = forbidden``；
+        ``Execution mutation verbs = allowed``（eval-runs 发起/取消、triggers 触发），
+        另有一类 **UI 状态动词**（notifications/read 已读标记——不是 Definition、
+        也不是评测事实）。PUT/DELETE/PATCH 任何资源都不存在。
         """
         schema = client.get("/api/openapi.json").json()
         for path, operations in schema["paths"].items():
             for verb in operations:
                 assert verb in {"get", "post"}, f"unexpected verb {verb!r} on {path}"
                 if verb == "post":
-                    assert path.startswith(("/api/eval-runs", "/api/triggers")), (
-                        f"execution verb on non-execution path: {verb.upper()} {path}"
-                    )
+                    assert path.startswith(
+                        ("/api/eval-runs", "/api/triggers", "/api/notifications/read")
+                    ), f"unexpected POST path: {verb.upper()} {path}"
 
     def test_definition_mutation_verbs_are_rejected(self, client: TestClient) -> None:
         """对 Definition 资源发写入动词必须被路由层拒绝（405：不存在该动词的端点）。"""

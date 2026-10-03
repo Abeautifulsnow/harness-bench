@@ -30,6 +30,7 @@ from agent_eval.api.routers import (
     eval_runs,
     experiments,
     failures,
+    notifications,
     quality,
 )
 from agent_eval.api.routers import regressions as regressions_router
@@ -100,7 +101,7 @@ def create_app(
         app.include_router(module.router, prefix=API_PREFIX)
     for module in (experiments, failures, quality, analytics):
         app.include_router(module.router, prefix=API_PREFIX)
-    for module in (eval_runs, agent_connections, automation):
+    for module in (eval_runs, agent_connections, automation, notifications):
         app.include_router(module.router, prefix=API_PREFIX)
 
     _register_error_handlers(app)

@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 
 import { HealthPill } from "@/components/layout/HealthPill";
+import { NotificationBell } from "@/components/layout/NotificationBell";
 import { Loading } from "@/components/common/states";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -184,7 +185,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
           <SidebarNav />
         </div>
         <Separator />
-        <div className="p-3">
+        <div className="space-y-1 p-3">
+          <NotificationBell />
           <HealthPill />
         </div>
       </aside>

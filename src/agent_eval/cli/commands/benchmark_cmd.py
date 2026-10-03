@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
 from pathlib import Path
 
 import typer
 from rich.table import Table
 
 from agent_eval.cli.commands import DATA_ROOT, EVALS_ROOT, FIXTURES_ROOT, console
-from agent_eval.errors import AgentEvalError
+from agent_eval.execution.models import (
+    TERMINAL_STATUSES,
+    EvalRunJob,
+    EvalRunRequest,
+    JobStatus,
+)
+from agent_eval.execution.service import EvalRunService, InvalidSubmission
 from agent_eval.loading.loader import load_benchmark
-from agent_eval.runner.runner import RunConfig, Runner
 
 app = typer.Typer(help="Benchmark 操作", no_args_is_help=True)
 
@@ -76,25 +83,117 @@ def benchmark_run(
     fixtures_root: Path = typer.Option(FIXTURES_ROOT, "--fixtures-root"),
     data_dir: Path = typer.Option(DATA_ROOT, "--data-dir"),
 ) -> None:
-    """运行 benchmark：Agent → Trace → Eval → Result → Gate（PRD §104 验收链）。"""
-    cfg = RunConfig(
-        evals_root=root,
-        fixtures_root=fixtures_root,
-        data_root=data_dir,
+    """运行 benchmark：Agent → Trace → Eval → Result → Gate（PRD §104 验收链）。
+
+    §45 统一入口：经 EvalRunService 提交（同一套服务端校验 + Job 账本），原地等待
+    终态后按既有约定输出与退出。Job 落在 <data-dir>/jobs/，与 Web 发起的评测同账本。
+    """
+    request = _build_run_request(
         benchmark=benchmark,
         agent_endpoint=agent_endpoint,
         profile=profile,
         repeat=repeat,
         concurrency=concurrency,
-        tag_filter=list(tag),
-        baseline_policy=baseline_policy,
-        baseline_run_id=baseline_run,
         gate=gate,
         suites=list(suite),
+        tags=list(tag),
         no_judge=no_judge,
         strict_protocol=strict_protocol,
+        no_save_artifacts=no_save_artifacts,
+        baseline_policy=baseline_policy,
+        baseline_run=baseline_run,
         judge_skip_policy=judge_skip_policy,
+        timeout=timeout,
+        model=model,
+        agent_version=agent_version,
+        judge_model=judge_model,
+        experiment_id=experiment_id,
+        variant_id=variant_id,
+    )
+    service = EvalRunService(
+        evals_root=root,
+        data_root=data_dir,
+        fixtures_root=fixtures_root,
+        # review #I02/#I03：CLI 是本机可信入口——不收割共享账本里 Web 正在跑的
+        # Job，也不受 §13 浏览器上限约束。
+        reap_orphans=False,
+        repeat_cap=None,
+        agent_concurrency_cap=None,
+    )
+    job: EvalRunJob | None = None
+
+    def _on_submitted(submitted: EvalRunJob) -> None:
+        # review #I01：KeyboardInterrupt 可能发生在 asyncio.run 返回之前——
+        # 提交一落地就捕获引用，KI 分支才有东西可取消。
+        nonlocal job
+        job = submitted
+
+    try:
+        job = asyncio.run(
+            service.run_sync(
+                request,
+                requested_by="cli",
+                agent_endpoint=agent_endpoint,
+                on_run_created=_writer(run_id_file),
+                on_submitted=_on_submitted,
+            )
+        )
+    except InvalidSubmission as exc:
+        console.print(f"[red]error[/red] {exc}")
+        raise typer.Exit(3) from exc
+    except KeyboardInterrupt:
+        # 与旧直跑行为对齐：Ctrl+C → 真实取消 + exit 130。有界等待 Job 落终态
+        # （Runner 要把 run.json 收口成 cancelled），超时则如实退出、不留假象。
+        if job is not None:
+            with contextlib.suppress(Exception):
+                service.cancel(job.job_id)
+            _await_terminal_bounded(service, job.job_id, timeout=10.0)
+        console.print("[yellow]cancelled[/yellow]")
+        raise typer.Exit(130) from None
+    finally:
+        service.shutdown()
+
+    _finish(job)
+
+
+def _build_run_request(
+    *,
+    benchmark: str,
+    agent_endpoint: str,
+    profile: str | None,
+    repeat: int | None,
+    concurrency: int,
+    gate: str,
+    suites: list[str],
+    tags: list[str],
+    no_judge: bool,
+    strict_protocol: bool,
+    no_save_artifacts: bool,
+    baseline_policy: str | None,
+    baseline_run: str | None,
+    judge_skip_policy: str,
+    timeout: float | None,
+    model: str | None,
+    agent_version: str | None,
+    judge_model: str | None,
+    experiment_id: str | None,
+    variant_id: str | None,
+) -> EvalRunRequest:
+    return EvalRunRequest(
+        agent_profile=agent_endpoint,  # CLI ad-hoc：仅作请求记录，不查注册表
+        benchmark=benchmark,
+        suite=suites or None,
+        profile=profile,
+        repeat=repeat,
+        agent_concurrency=concurrency,
+        no_judge=no_judge,
+        strict_protocol=strict_protocol,
         save_artifacts=not no_save_artifacts,
+        tags=tags,
+        baseline_policy=baseline_policy,
+        baseline_run=baseline_run,
+        gate=gate,
+        judge_skip_policy=judge_skip_policy,
         timeout=timeout,
         agent_model=model,
         agent_version=agent_version,
@@ -102,22 +201,41 @@ def benchmark_run(
         experiment_id=experiment_id,
         variant_id=variant_id,
     )
-    try:
-        outcome = asyncio.run(Runner(cfg).run(on_run_created=_writer(run_id_file)))
-    except AgentEvalError as exc:
-        console.print(f"[red]error[/red] {exc.message}")
-        raise typer.Exit(exc.exit_code) from exc
-    except KeyboardInterrupt:
+
+
+_KI_DRAIN_POLL_SECONDS = 0.2
+
+
+def _await_terminal_bounded(service: EvalRunService, job_id: str, timeout: float) -> None:
+    """Ctrl+C 后等待 Job 落终态（Runner 收口 run.json），超时即放弃。"""
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = service.get(job_id)
+        if job is None or job.status in TERMINAL_STATUSES:
+            return
+        time.sleep(_KI_DRAIN_POLL_SECONDS)
+
+
+def _finish(job: EvalRunJob | None) -> None:
+    """终态输出与退出码（旧直跑路径的契约逐字保留）。"""
+
+    if job is None:  # 提交即被 KI：run_sync 未及回调；cancel 已无从谈起
+        raise typer.Exit(130)
+    if job.status is JobStatus.FAILED:
+        console.print(f"[red]error[/red] {job.error}")
+        raise typer.Exit(job.exit_code if job.exit_code is not None else 1)
+    if job.status is JobStatus.CANCELLED:
         console.print("[yellow]cancelled[/yellow]")
-        raise typer.Exit(130) from None
+        raise typer.Exit(130)
+
     console.print(
-        f"run [bold]{outcome.run_id}[/bold] status={outcome.status} "
-        f"gate={outcome.gate.gate if outcome.gate else '-'} verdict={outcome.verdict}"
+        f"run [bold]{job.run_id}[/bold] status={job.run_status} "
+        f"gate={job.gate or '-'} verdict={job.gate_verdict}"
     )
-    if outcome.aggregate is not None and outcome.aggregate.warnings:
-        for warning in outcome.aggregate.warnings:
-            console.print(f"[yellow]warn[/yellow] {warning}")
-    raise typer.Exit(outcome.exit_code)
+    for warning in job.warnings:
+        console.print(f"[yellow]warn[/yellow] {warning}")
+    raise typer.Exit(job.exit_code if job.exit_code is not None else 0)
 
 
 def _writer(run_id_file: Path | None):

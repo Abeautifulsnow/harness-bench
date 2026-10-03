@@ -1,9 +1,13 @@
-"""Job 终态 webhook 通知（V2 Notification 的最小形态，docs §52）。
+"""Job 终态 webhook 通知（V2 Notification，docs §52/§59）。
 
-约定：**尽力而为 + 留痕**。通知失败绝不改写 Job 的终态，也绝不重试到阻塞
-执行线程——每次尝试（成功或失败）追加进 ``<data_root>/state/notifications.jsonl``，
-可事后核对。发送在独立守护线程里同步完成（V1 执行器是本地线程模型，
-不值得为一次 HTTP POST 引入跨 loop 编排）。
+约定：
+- **尽力而为 + 留痕**：通知失败绝不改写 Job 的终态，也绝不阻塞执行线程；
+  每次尝试（成功或失败）追加进 ``<data_root>/state/notifications.jsonl``。
+- **重试 + 退避**：最多 3 次尝试，间隔 2s/8s 指数退避；**只重试暂态失败**
+  （网络错误 / HTTP 5xx）——4xx 是永久性配置问题（URL 错、鉴权拒），重试
+  只会刷屏，首次失败即收口。
+- 发送在独立守护线程里同步完成（V1 执行器是本地线程模型，不值得为一次
+  HTTP POST 引入跨 loop 编排）。
 """
 
 from __future__ import annotations
@@ -11,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -19,6 +24,9 @@ import httpx
 from agent_eval.execution.models import EvalRunJob
 
 _TIMEOUT_SECONDS = 10.0
+MAX_ATTEMPTS = 3
+# 测试注入 (0, 0) 关闭真实等待；生产 (2, 8) 指数退避。
+BACKOFF_SECONDS: tuple[float, ...] = (2.0, 8.0)
 
 
 def job_payload(job: EvalRunJob) -> dict:
@@ -60,11 +68,24 @@ def fire_and_forget(job: EvalRunJob, log_path: Path) -> None:
 
 
 def _deliver(url: str, payload: dict, headers: dict[str, str], log_path: Path) -> None:
-    record = {
-        "url": url,
-        "job_id": payload["job_id"],
-        "attempted_at": datetime.now().astimezone().isoformat(),
-    }
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        record = {
+            "url": url,
+            "job_id": payload["job_id"],
+            "attempted_at": datetime.now().astimezone().isoformat(),
+            "attempt": attempt,
+        }
+        outcome, retryable = _attempt_once(url, payload, headers)
+        record["outcome"] = outcome
+        _append_log(log_path, record)
+        if not retryable or attempt == MAX_ATTEMPTS:
+            return
+        time.sleep(BACKOFF_SECONDS[min(attempt - 1, len(BACKOFF_SECONDS) - 1)])
+
+
+def _attempt_once(url: str, payload: dict, headers: dict[str, str]) -> tuple[str, bool]:
+    """单次投递。返回 (结果描述, 是否值得重试)。4xx 是永久失败，不重试。"""
+
     try:
         response = httpx.post(
             url,
@@ -72,10 +93,11 @@ def _deliver(url: str, payload: dict, headers: dict[str, str], log_path: Path) -
             headers={"content-type": "application/json", **headers},
             timeout=_TIMEOUT_SECONDS,
         )
-        record["outcome"] = "delivered" if response.is_success else f"HTTP {response.status_code}"
     except (httpx.HTTPError, OSError) as exc:
-        record["outcome"] = f"error: {type(exc).__name__}: {exc}"
-    _append_log(log_path, record)
+        return f"error: {type(exc).__name__}: {exc}", True
+    if response.is_success:
+        return "delivered", False
+    return f"HTTP {response.status_code}", response.status_code >= 500
 
 
 def _append_log(log_path: Path, record: dict) -> None:

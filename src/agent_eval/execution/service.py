@@ -17,6 +17,7 @@ import re
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -37,7 +38,7 @@ from agent_eval.execution.models import (
 from agent_eval.execution.repository import JobRepository
 from agent_eval.loading.loader import load_benchmark, load_profile, load_suites
 from agent_eval.models.regression import BaselineMode
-from agent_eval.runner.runner import RunConfig, Runner
+from agent_eval.runner.runner import DEFAULT_GATE, RunConfig, Runner
 
 
 class InvalidSubmission(Exception):
@@ -68,9 +69,12 @@ class EvalRunService:
         fixtures_root: Path | None = None,
         *,
         max_running_jobs: int = 2,
-        repeat_cap: int = 10,
-        agent_concurrency_cap: int = 16,
+        # §13 上限是给"不受信任的浏览器提交"设的；CLI 是本机可信入口，传 None
+        # 即解禁（review #I03：不能让 Web 上限悄悄改变 CLI 的既有行为）。
+        repeat_cap: int | None = 10,
+        agent_concurrency_cap: int | None = 16,
         executor: JobExecutor | None = None,
+        reap_orphans: bool = True,
     ) -> None:
         self.evals_root = evals_root
         self.data_root = data_root
@@ -90,7 +94,11 @@ class EvalRunService:
         # RLock：submit 持锁期间会经 _persist 落账，可重入避免自锁
         # （faulthandler 抓过的死锁：submit → _persist → 二次加锁）。
         self._lock = threading.RLock()
-        self._reap_orphaned_jobs()
+        # review #I02：收割语义只属于"执行进程的启动"——serve 装配时收割；
+        # CLI 每次调用都新建 service，与 Web 共享 data_root 时会把活着的
+        # 在跑 Job 误标成 interrupted，因此 CLI 传 reap_orphans=False。
+        if reap_orphans:
+            self._reap_orphaned_jobs()
 
     # ---------------------------------------------------------------- queries
 
@@ -133,6 +141,7 @@ class EvalRunService:
         idempotency_key: str | None = None,
         notify_webhook: str | None = None,
         notify_token_ref: str | None = None,
+        connection_override: AgentConnectionProfile | None = None,
     ) -> EvalRunJob:
         with self._lock:
             if idempotency_key:
@@ -140,8 +149,13 @@ class EvalRunService:
                 if replay is not None:
                     raise DuplicateSubmission(replay)
 
-            self._validate(request)
-            connection = self._resolve_connection(request.agent_profile)
+            self._validate(request, validate_connection=connection_override is None)
+            if connection_override is not None:
+                # §45：CLI 的 ad-hoc endpoint（--agent / env）。CLI 是本机可信入口，
+                # 与 Web 的注册表约束不同；agent_profile 字段仅作请求记录。
+                connection = connection_override
+            else:
+                connection = self._resolve_connection(request.agent_profile)
 
             job = EvalRunJob(
                 job_id=_new_job_id(),
@@ -154,6 +168,57 @@ class EvalRunService:
             self._persist(job)
             self.executor.submit(job.job_id, lambda: self._execute_job(job.job_id, connection))
             return job
+
+    async def run_sync(
+        self,
+        request: EvalRunRequest,
+        requested_by: str = "cli",
+        *,
+        agent_endpoint: str | None = None,
+        on_run_created: Callable[[str], None] | None = None,
+        on_submitted: Callable[[EvalRunJob], None] | None = None,
+        poll_seconds: float = 0.2,
+    ) -> EvalRunJob:
+        """§45 统一入口的同步门面：CLI 提交后原地等待终态。
+
+        与 submit() 同一条校验/账本/执行路径；区别只在调用方要等结果。
+        ``agent_endpoint`` 是 CLI 专属的 ad-hoc 被测地址（fake:// 缺省 /
+        AGENT_EVAL_AGENT_ENDPOINT / 显式 http URL），不要求注册表里有对应 profile。
+        ``on_submitted`` 在 Job 创建后立即回调（review #I01）：让 CLI 在
+        KeyboardInterrupt 发生于 asyncio.run 返回之前也能拿到 job 引用去取消。
+        """
+
+        connection = None
+        if agent_endpoint is not None:
+            try:
+                connection = AgentConnectionProfile(
+                    id="cli-adhoc", display_name="CLI ad-hoc", endpoint=agent_endpoint
+                )
+            except Exception as exc:
+                # 与旧直跑路径对齐：非法 endpoint 是配置错误（exit 3），
+                # 不是未捕获崩溃（exit 1）；文案保留旧契约关键词。
+                raise InvalidSubmission(
+                    f"unsupported agent endpoint {agent_endpoint!r}: "
+                    f"expected 'fake://' or an http(s) URL ({exc})"
+                ) from exc
+        job = self.submit(
+            request,
+            requested_by=requested_by,
+            connection_override=connection,
+        )
+        if on_submitted is not None:
+            on_submitted(job)
+        fired = False
+        while True:
+            current = self.get(job.job_id)
+            if current is None:  # 理论不可达（内存 + 仓库双写）；防御死循环
+                raise UnknownJob(job.job_id)
+            if on_run_created is not None and not fired and current.run_id:
+                on_run_created(current.run_id)  # Spec §6.4: run_id 先于任何执行进度落盘
+                fired = True
+            if current.status in TERMINAL_STATUSES:
+                return current
+            await asyncio.sleep(poll_seconds)
 
     def cancel(self, job_id: str) -> EvalRunJob:
         job = self.get(job_id)
@@ -182,17 +247,32 @@ class EvalRunService:
                 return job
         return self.repo.find_by_idempotency_key(key)
 
-    def _validate(self, request: EvalRunRequest) -> None:
+    def _validate(self, request: EvalRunRequest, *, validate_connection: bool = True) -> None:
         """全部服务端限制（§13/§44）。命中即 400，不创建 Job。"""
 
-        if request.repeat is not None and not 1 <= request.repeat <= self.repeat_cap:
+        if (
+            self.repeat_cap is not None
+            and request.repeat is not None
+            and not (1 <= request.repeat <= self.repeat_cap)
+        ):
             raise InvalidSubmission(f"repeat must be within 1..{self.repeat_cap}")
-        if request.agent_concurrency is not None and not (
-            1 <= request.agent_concurrency <= self.agent_concurrency_cap
+        if (
+            self.agent_concurrency_cap is not None
+            and request.agent_concurrency is not None
+            and not (1 <= request.agent_concurrency <= self.agent_concurrency_cap)
         ):
             raise InvalidSubmission(
                 f"agent_concurrency must be within 1..{self.agent_concurrency_cap}"
             )
+        if request.gate is not None and request.gate not in {"pr", "main", "release"}:
+            raise InvalidSubmission("gate must be one of: pr, main, release")
+        if request.judge_skip_policy is not None and request.judge_skip_policy not in {
+            "none",
+            "skip_blocked",
+        }:
+            raise InvalidSubmission("judge_skip_policy must be one of: none, skip_blocked")
+        if request.timeout is not None and request.timeout <= 0:
+            raise InvalidSubmission("timeout must be a positive number of seconds")
         # 定义名会拼进文件路径（loader 的 f"{name}.yaml"）：绝对路径会整体替换
         # Path 拼接、相对路径可穿越出 evals/。提交入口是 V1 唯一的执行面门，
         # 白名单在这里设防，而不是信任 loader。
@@ -225,7 +305,8 @@ class EvalRunService:
             if unknown:
                 raise InvalidSubmission(f"unknown suite(s): {', '.join(sorted(unknown))}")
 
-        self._resolve_connection(request.agent_profile)
+        if validate_connection:
+            self._resolve_connection(request.agent_profile)
 
     def _resolve_connection(self, profile_id: str) -> AgentConnectionProfile:
         profiles = {p.id: p for p in load_agent_connections(self.evals_root)}
@@ -282,6 +363,7 @@ class EvalRunService:
                 status=JobStatus.FAILED,
                 error=exc.message,
                 failure_kind=_failure_kind(exc),
+                exit_code=exc.exit_code,
                 finished_at=datetime.now().astimezone(),
             )
             return
@@ -291,6 +373,7 @@ class EvalRunService:
                 status=JobStatus.FAILED,
                 error=f"{type(exc).__name__}: {exc}",
                 failure_kind=FailureKind.INTERNAL,
+                exit_code=1,
                 finished_at=datetime.now().astimezone(),
             )
             return
@@ -305,6 +388,10 @@ class EvalRunService:
             job_id,
             status=JobStatus.SUCCEEDED,
             gate_verdict=outcome.gate.verdict if outcome.gate else None,
+            gate=outcome.gate.gate if outcome.gate else None,
+            run_status=outcome.status,
+            exit_code=outcome.exit_code,
+            warnings=[*outcome.aggregate.warnings] if outcome.aggregate else [],
             finished_at=datetime.now().astimezone(),
         )
 
@@ -331,6 +418,15 @@ class EvalRunService:
             no_judge=request.no_judge,
             strict_protocol=request.strict_protocol,
             save_trace=request.save_trace,
+            save_artifacts=request.save_artifacts,
+            gate=request.gate or DEFAULT_GATE,
+            judge_skip_policy=request.judge_skip_policy or "none",
+            timeout=request.timeout,
+            agent_model=request.agent_model,
+            agent_version=request.agent_version,
+            judge_model=request.judge_model,
+            experiment_id=request.experiment_id,
+            variant_id=request.variant_id,
         )
 
     # 状态落账：一律 copy-on-write（读者拿到的快照不会撕开），并同步仓库。

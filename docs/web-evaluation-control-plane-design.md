@@ -2204,3 +2204,34 @@ V1 已按本文档落地。对应关系：
   合并补跑/禁用/坏预设、trigger 鉴权矩阵、执行 token 门、通知内容与留痕。
 - API：GET /schedules、GET /eval-presets、GET /triggers、POST /triggers/{id}/run。
 - Web：Automation 页（调度台账 + 触发器视图）、New Evaluation 预设填充。
+
+---
+
+# 59. 修订（2026-10-03）：§45 统一入口闭合 + Notification 重试/站内通知
+
+## 59.1 CLI 统一入口（§45 闭合）
+
+- `agent-eval benchmark run` 改经 `EvalRunService.run_sync()`：同一套服务端校验
+  （repeat/并发上限、标识符白名单、suite/profile/gate/baseline 校验）+ 同一份
+  Job 账本（`<data-dir>/jobs/`），等待终态后按既有约定输出与退出。
+- 输出契约与退出码逐字保留：`run <id> status=... gate=... verdict=...`、
+  warnings 逐行、Gate FAIL exit 1 / 基础设施 exit 2 / 无效调用 exit 3、
+  Ctrl+C → cancel + exit 130、非法 endpoint exit 3（含旧文案关键词）。
+- CLI ad-hoc 被测地址（`--agent` / `AGENT_EVAL_AGENT_ENDPOINT`）以
+  `connection_override` 进入，不要求注册表里有对应 profile——Web 的注册表
+  约束（§8）不变；`request.agent_profile` 仅作请求记录。
+- 代价：EvalRunRequest 扩至与 RunConfig 对齐（gate/judge_skip_policy/timeout/
+  模型标签/experiment 归属/save_artifacts）——§46"CLI 与 Web 共享同一模型"
+  从此是字面事实，Web API 也能设置这些执行调优字段。
+- Job 记录新增结果字段：`run_status / gate / gate_verdict / exit_code / warnings`。
+
+## 59.2 Notification 升级（§52）
+
+- **重试 + 退避**：最多 3 次尝试，间隔 2s/8s；只重试暂态失败（网络错误 /
+  HTTP 5xx），4xx 首次失败即收口（永久性配置问题，重试只刷屏）。
+  每次尝试独立留痕于 `state/notifications.jsonl`（含 attempt 序号）。
+- **站内通知**：不另建事件存储——feed 直接从 Job 账本投影终态 Job
+  （`GET /api/notifications`），已读标记存 `state/notification_state.json`
+  （上限 500，超限丢最旧）。`POST /api/notifications/read` 只改 UI 状态，
+  是 §42 边界的第三类合法 POST（非 Definition、非评测事实）。
+- Web：侧栏底部通知铃铛（未读计数、最近 12 条、单条点击即已读、全部已读）。

@@ -51,6 +51,10 @@ class EvalRunRequest(BaseModel):
     运行时覆盖它违反 §12 的 Profile 原则。
     """
 
+    # 语义按入口分叉（review #S01）：Web/触发器/调度传 **Agent Connection 的
+    # 注册 id**（submit() 据此查注册表解析 endpoint + 凭证）；CLI 传 **ad-hoc
+    # endpoint 字符串**（fake:// 或 http(s) URL，经 run_sync 的 connection_override
+    # 绕开注册表，本字段仅作请求记录）。除 CLI 外它不是 URL，而是名字。
     agent_profile: str
     benchmark: str
     suite: list[str] | None = None
@@ -64,11 +68,28 @@ class EvalRunRequest(BaseModel):
     no_judge: bool = False
     strict_protocol: bool = False
     save_trace: bool = True
+    # PRD §90：case 级产物采集（CLI --no-save-artifacts 的反向）。
+    save_artifacts: bool = True
 
     tags: list[str] = Field(default_factory=list)
 
     baseline_policy: str | None = None
     baseline_run: str | None = None
+
+    # ---- 执行调优字段（§45：CLI 与 Web 共享同一请求模型的全部语义）----
+    # gate 规则集（pr | main | release）；None = Runner 缺省 pr。
+    gate: str | None = None
+    # PRD §92：none | skip_blocked。
+    judge_skip_policy: str | None = None
+    # 运行期预算覆盖（秒），替换 case 声明的 execution.timeout。
+    timeout: float | None = None
+    # PRD §30/§109.3 可复现信息与 judge 分离。
+    agent_model: str | None = None
+    agent_version: str | None = None
+    judge_model: str | None = None
+    # PRD §22–§25 实验归属（CLI 实验流程使用）。
+    experiment_id: str | None = None
+    variant_id: str | None = None
 
 
 class JobProgress(BaseModel):
@@ -107,6 +128,12 @@ class EvalRunJob(BaseModel):
     # §33：PREPARING 阶段（健康检查/定义装载）可能还没有 run_id。
     run_id: str | None = None
     gate_verdict: str | None = None
+    # §45：CLI 直接消费的结果字段（Web 详情页同样可读）。run_status 是 Run 的
+    # 生命周期（completed/partial/cancelled/...），区别于 Job 自身的 status。
+    run_status: str | None = None
+    gate: str | None = None
+    exit_code: int | None = None
+    warnings: list[str] = Field(default_factory=list)
 
     error: str | None = None
     failure_kind: FailureKind | None = None

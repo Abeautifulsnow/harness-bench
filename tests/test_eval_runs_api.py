@@ -21,7 +21,7 @@ from agent_eval.api.app import create_app
 from agent_eval.execution.executor import LocalJobExecutor
 from agent_eval.execution.models import EvalRunJob, EvalRunRequest, FailureKind, JobStatus
 from agent_eval.execution.repository import JobRepository
-from agent_eval.execution.service import EvalRunService
+from agent_eval.execution.service import EvalRunService, InvalidSubmission
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -469,6 +469,78 @@ class TestQueuePosition:
         repo.save(job)
         stored = repo.get("job_q")
         assert stored.queue_position is None, "位次是读时事实，落盘只会留过期快照"
+
+
+class TestReapAndCaps:
+    """review #I02/#I03：收割开关与上限解禁的语义锁定。"""
+
+    def test_reap_orphans_false_leaves_jobs_untouched(self, workspace) -> None:
+        evals_root, data_root = workspace
+        repo = JobRepository(data_root / "jobs")
+        repo.save(
+            EvalRunJob(
+                job_id="job_live",
+                status=JobStatus.RUNNING,
+                request=EvalRunRequest(agent_profile="local-fake", benchmark="database-core"),
+            )
+        )
+        # CLI 场景：新建 service（reap 关）不得误标共享账本里活着的 Job。
+        EvalRunService(evals_root=evals_root, data_root=data_root, reap_orphans=False)
+        assert repo.get("job_live").status == JobStatus.RUNNING
+        # 对照组：默认 reap 开（serve 装配语义）→ 收口。
+        EvalRunService(evals_root=evals_root, data_root=data_root)
+        assert repo.get("job_live").status == JobStatus.FAILED
+
+    def test_caps_none_lifts_web_limits(self, workspace) -> None:
+        evals_root, data_root = workspace
+        service = EvalRunService(
+            evals_root=evals_root,
+            data_root=data_root,
+            repeat_cap=None,
+            agent_concurrency_cap=None,
+        )
+        request = EvalRunRequest(
+            agent_profile="local-fake", benchmark="database-core", repeat=999, agent_concurrency=999
+        )
+        service._validate(request)  # 不抛即通过（CLI 可信入口语义）
+
+        default_service = EvalRunService(evals_root=evals_root, data_root=data_root)
+        with pytest.raises(InvalidSubmission):
+            default_service._validate(request)
+
+    async def test_run_sync_returns_cancelled_job_and_run_closed(self, workspace) -> None:
+        """review #I01 服务侧锁定：run_sync 期间取消 → Job 与 run.json 都收口 cancelled。"""
+        import asyncio as _asyncio
+
+        evals_root, data_root = workspace
+        app = create_app(
+            evals_root=evals_root, data_root=data_root, fixtures_root=REPO / "fixtures"
+        )
+        service: EvalRunService = app.state.eval_run_service
+        request = EvalRunRequest(
+            agent_profile="local-fake", benchmark="database-core", tags=["smoke"], repeat=5
+        )
+        task = _asyncio.create_task(service.run_sync(request))
+        deadline = time.monotonic() + 30
+        job = None
+        while time.monotonic() < deadline:
+            jobs = service.list()
+            if jobs and jobs[0].status is JobStatus.RUNNING:
+                job = jobs[0]
+                break
+            await _asyncio.sleep(0.02)
+        assert job is not None, "run_sync 应已进入 RUNNING"
+
+        service.cancel(job.job_id)
+        returned = await task
+        assert returned.status is JobStatus.CANCELLED
+        # Runner 收到真实 cancellation：run.json 收口成 cancelled
+        if returned.run_id:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                run_status = (await client.get(f"/api/runs/{returned.run_id}/status")).json()
+            assert run_status["status"] == "cancelled"
 
 
 class TestCustomExecutorInjection:

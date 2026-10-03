@@ -100,6 +100,19 @@ export interface TriggerView {
   token_state: "none" | "configured" | "missing";
 }
 
+/** §59：站内通知——终态 Job 的投影 + 已读标记。 */
+export interface NotificationItem {
+  job_id: string;
+  status: JobStatus;
+  run_id: string | null;
+  benchmark: string;
+  gate_verdict: string | null;
+  requested_by: string;
+  error: string | null;
+  finished_at: string | null;
+  read: boolean;
+}
+
 const BASE = "/api";
 
 async function get<T>(path: string): Promise<T> {
@@ -156,6 +169,10 @@ export const evaluationApi = {
   schedules: () => get<ScheduleView[]>("/schedules"),
   presets: () => get<EvalPreset[]>("/eval-presets"),
   triggers: () => get<TriggerView[]>("/triggers"),
+
+  notifications: () => get<NotificationItem[]>("/notifications"),
+  markNotificationsRead: (jobIds: string[]) =>
+    post<{ marked_read: number }>("/notifications/read", { job_ids: jobIds }),
 };
 
 /** §18：订阅 Job 的 run-level progress SSE。

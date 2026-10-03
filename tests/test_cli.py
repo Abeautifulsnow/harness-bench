@@ -192,3 +192,60 @@ def test_query_commands(evals_tree, fixtures_root) -> None:
     assert run_id is not None
     detail = cli.invoke(app, ["run", "show", run_id.group(0), "--data-dir", str(data_root)])
     assert detail.exit_code == 0
+
+
+def test_benchmark_run_goes_through_service_job_ledger(evals_tree, fixtures_root) -> None:
+    """§45 统一入口：CLI run 必须在 EvalRunService 的 Job 账本里留痕，
+    且结果字段（run_status/gate/verdict/exit_code）落全。"""
+    import json
+
+    evals_root, data_root = evals_tree
+    result = cli.invoke(
+        app,
+        [
+            "benchmark",
+            "run",
+            "database-core",
+            "--tag",
+            "smoke",
+            "--no-judge",
+            "--root",
+            str(evals_root),
+            "--data-dir",
+            str(data_root),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    jobs_dir = Path(data_root) / "jobs"
+    job_files = list(jobs_dir.glob("job_*.json"))
+    assert len(job_files) == 1, "CLI run 应恰好产生一个 Job 记录"
+    job = json.loads(job_files[0].read_text(encoding="utf-8"))
+    assert job["requested_by"] == "cli"
+    assert job["status"] == "succeeded"
+    assert job["run_status"] in {"completed", "partial"}
+    assert job["gate"] == "pr"
+    assert job["gate_verdict"] in {"pass", "fail", "undetermined"}
+    assert job["exit_code"] == 0
+    assert job["request"]["gate"] == "pr"
+    # agent_profile 记录的是 CLI ad-hoc endpoint（缺省 fake://）
+    assert job["request"]["agent_profile"] == "fake://"
+
+
+def test_benchmark_run_invalid_benchmark_exit_3_via_service(evals_tree, fixtures_root) -> None:
+    """§45：提交期校验（unknown benchmark）在 CLI 呈现为 exit 3，不创建 Job。"""
+    evals_root, data_root = evals_tree
+    result = cli.invoke(
+        app,
+        [
+            "benchmark",
+            "run",
+            "no-such-benchmark",
+            "--root",
+            str(evals_root),
+            "--data-dir",
+            str(data_root),
+        ],
+    )
+    assert result.exit_code == 3
+    assert not list((Path(data_root) / "jobs").glob("job_*.json"))

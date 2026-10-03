@@ -36,7 +36,7 @@ export function Evaluations() {
     <div className="space-y-5">
       <PageHeader
         title="Evaluation"
-        description="设计文档 §38：通过 Web 发起的评测 Job。Job 是「一次评测请求」的生命周期，Run 是 Runner 产生的评测事实——完成后经 Run 列进入分析面。"
+        description="设计文档 §38/§45：评测 Job 账本。CLI / Web / 调度与触发器发起的评测都经 EvalRunService 记在这里；Run 是 Runner 产生的评测事实，完成后经 Run 列进入分析面。"
         actions={
           <Button asChild>
             <Link to="/evaluations/new">
