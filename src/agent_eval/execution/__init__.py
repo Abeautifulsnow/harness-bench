@@ -16,7 +16,7 @@ from agent_eval.execution.connections import (
     load_agent_connections,
 )
 from agent_eval.execution.cron import CronSpec
-from agent_eval.execution.executor import LocalJobExecutor
+from agent_eval.execution.executor import JobExecutor, LocalJobExecutor
 from agent_eval.execution.models import (
     TERMINAL_STATUSES,
     EvalRunJob,
@@ -52,6 +52,7 @@ __all__ = [
     "FailureKind",
     "InvalidSubmission",
     "JobAlreadyFinished",
+    "JobExecutor",
     "JobProgress",
     "JobRepository",
     "JobStatus",

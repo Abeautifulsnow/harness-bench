@@ -75,7 +75,9 @@ export function EvaluationDetail() {
         title={`Evaluation ${job.job_id}`}
         description={
           job.status === "queued"
-            ? "排队中：已有评测在运行，本任务等全局并发空位。"
+            ? job.queue_position != null
+              ? `排队中 · 当前第 ${job.queue_position} 位（§25：全局并发空出来即自动启动）。`
+              : "排队中：已有评测在运行，本任务等全局并发空位。"
             : "Job 是一次评测请求；Run 是评测事实。完成后可跳转 Run Detail 进入分析面。"
         }
         actions={

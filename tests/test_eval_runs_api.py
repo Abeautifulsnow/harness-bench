@@ -174,6 +174,29 @@ class TestSubmitValidation:
             # 应用的 HTTPException 处理器把 detail 包进 {"error": ...}。
             assert "EXECUTION_TEST_AGENT_TOKEN" in response.json()["error"]
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"baseline_policy": "yolo"},
+            {"baseline_policy": "explicit", "baseline_run": None},
+            {"baseline_policy": "explicit"},
+        ],
+    )
+    async def test_invalid_baseline_submission_is_400(self, workspace, payload: dict) -> None:
+        """§31：baseline 策略白名单；explicit 必须指名 baseline run。"""
+        async with _async_client(workspace) as client:
+            response = await client.post("/api/eval-runs", json=_submit_body(**payload))
+            assert response.status_code == 400, response.text
+
+    async def test_valid_baseline_policy_passes_validation(self, workspace) -> None:
+        """NO_BASELINE / main-latest 合法（提交成功即可，不要求跑完）。"""
+        async with _async_client(workspace) as client:
+            response = await client.post(
+                "/api/eval-runs",
+                json=_submit_body(baseline_policy="NO_BASELINE"),
+            )
+            assert response.status_code == 202
+
 
 class TestJobLifecycle:
     @pytest.mark.parametrize("field", ["benchmark", "profile"])
@@ -357,3 +380,137 @@ class TestLocalJobExecutor:
             assert not any(e[0] == "error" for e in events)
         finally:
             executor.shutdown()
+
+    def test_ordered_in_flight_preserves_submission_order(self) -> None:
+        """§25 排队位次的依据：ordered_in_flight 必须按提交序返回。"""
+        executor = LocalJobExecutor(2)
+
+        async def sleeper() -> None:
+            await asyncio.sleep(30)
+
+        try:
+            for job_id in ("first", "second", "third"):
+                executor.submit(job_id, sleeper)
+            time.sleep(0.3)
+            assert executor.ordered_in_flight() == ["first", "second", "third"]
+            assert executor.in_flight_ids() == {"first", "second", "third"}
+        finally:
+            executor.shutdown()
+
+
+class TestQueuePosition:
+    """§25：QUEUED Job 的排队位次是读时事实——get() 动态补，永不落盘。"""
+
+    def _service_with_stub_executor(self, workspace, in_flight: list[str]):
+        evals_root, data_root = workspace
+        service = EvalRunService(
+            evals_root=evals_root,
+            data_root=data_root,
+            fixtures_root=REPO / "fixtures",
+            max_running_jobs=1,
+        )
+
+        class StubExecutor:
+            """§23 JobExecutor 协议的最小替身：只提供位次计算需要的视图。"""
+
+            def __init__(self, order: list[str]) -> None:
+                self.order = order
+
+            def ordered_in_flight(self) -> list[str]:
+                return self.order
+
+            def submit(self, job_id, body) -> None: ...
+
+            def cancel(self, job_id: str) -> bool:
+                return False
+
+            def is_in_flight(self, job_id: str) -> bool:
+                return job_id in self.order
+
+            def in_flight_ids(self) -> set[str]:
+                return set(self.order)
+
+            def shutdown(self) -> None: ...
+
+        service.executor = StubExecutor(in_flight)  # type: ignore[assignment]
+        return service
+
+    def test_queued_position_counts_running_and_ahead(self, workspace) -> None:
+        from agent_eval.execution.models import EvalRunJob, JobStatus
+
+        service = self._service_with_stub_executor(workspace, ["running-job", "queued-job"])
+        running = EvalRunJob(
+            job_id="running-job",
+            status=JobStatus.RUNNING,
+            request=EvalRunRequest(agent_profile="local-fake", benchmark="database-core"),
+        )
+        queued = EvalRunJob(
+            job_id="queued-job",
+            status=JobStatus.QUEUED,
+            request=EvalRunRequest(agent_profile="local-fake", benchmark="database-core"),
+        )
+        service._jobs.update({"running-job": running, "queued-job": queued})  # noqa: SLF001
+
+        assert service.get("queued-job").queue_position == 1  # 1 个在跑，它是下一个
+        # 非 QUEUED 状态不补位次
+        assert service.get("running-job").queue_position is None
+
+    def test_queue_position_never_persisted(self, workspace) -> None:
+        from agent_eval.execution.models import EvalRunJob, JobStatus
+
+        evals_root, data_root = workspace
+        repo = JobRepository(data_root / "jobs")
+        job = EvalRunJob(
+            job_id="job_q",
+            status=JobStatus.QUEUED,
+            request=EvalRunRequest(agent_profile="local-fake", benchmark="database-core"),
+            queue_position=3,
+        )
+        repo.save(job)
+        stored = repo.get("job_q")
+        assert stored.queue_position is None, "位次是读时事实，落盘只会留过期快照"
+
+
+class TestCustomExecutorInjection:
+    """§23：服务层只认 JobExecutor 协议——自定义执行器可整体替换本地实现。"""
+
+    def test_service_accepts_protocol_executor(self, workspace) -> None:
+        submitted: list[str] = []
+        cancelled: list[str] = []
+
+        class RecordingExecutor:
+            def __init__(self) -> None:
+                self.jobs: dict = {}
+
+            def submit(self, job_id: str, body) -> None:
+                submitted.append(job_id)
+
+            def cancel(self, job_id: str) -> bool:
+                cancelled.append(job_id)
+                return True
+
+            def is_in_flight(self, job_id: str) -> bool:
+                return False
+
+            def in_flight_ids(self) -> set[str]:
+                return set()
+
+            def ordered_in_flight(self) -> list[str]:
+                return []
+
+            def shutdown(self) -> None: ...
+
+        evals_root, data_root = workspace
+        recorder = RecordingExecutor()
+        service = EvalRunService(
+            evals_root=evals_root,
+            data_root=data_root,
+            fixtures_root=REPO / "fixtures",
+            executor=recorder,  # type: ignore[arg-type]
+        )
+        job = service.submit(
+            EvalRunRequest(agent_profile="local-fake", benchmark="database-core", tags=["smoke"])
+        )
+        assert submitted == [job.job_id]
+        service.cancel(job.job_id)
+        assert cancelled == [job.job_id]

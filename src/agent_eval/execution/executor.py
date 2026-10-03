@@ -21,10 +21,33 @@ import asyncio
 import threading
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
-from typing import Any
+from typing import Any, Protocol
+
+
+class JobExecutor(Protocol):
+    """§23 的执行机制接口：服务层只认协议，不认具体实现。
+
+    ``LocalJobExecutor`` 是 V1 的进程内实现；未来可替换为
+    Dramatiq / RemoteWorker 等分布式执行器而不动 EvalRunService。
+    """
+
+    def submit(self, job_id: str, body: Callable[[], Coroutine[Any, Any, None]]) -> None: ...
+
+    def cancel(self, job_id: str) -> bool: ...
+
+    def is_in_flight(self, job_id: str) -> bool: ...
+
+    def in_flight_ids(self) -> set[str]: ...
+
+    def ordered_in_flight(self) -> list[str]:
+        """在途任务 id，按提交顺序（§25 排队位次的依据）。"""
+
+    def shutdown(self) -> None: ...
 
 
 class LocalJobExecutor:
+    """V1 进程内执行器：独立线程 + 独立 asyncio loop + 全局并发信号量。"""
+
     def __init__(
         self,
         max_running_jobs: int = 2,
@@ -82,6 +105,10 @@ class LocalJobExecutor:
 
     def in_flight_ids(self) -> set[str]:
         return {job_id for job_id, pending in self._futures.items() if not pending.done()}
+
+    def ordered_in_flight(self) -> list[str]:
+        # dict 保持插入序 = 提交序；done 回调只删除不重排。
+        return [job_id for job_id, pending in self._futures.items() if not pending.done()]
 
     def shutdown(self) -> None:
         for jid in list(self._futures):

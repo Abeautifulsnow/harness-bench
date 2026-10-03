@@ -46,6 +46,8 @@ export interface EvalRunJob {
   error: string | null;
   failure_kind: "INFRA_FAILURE" | "INVALID_REQUEST" | "INTERNAL" | null;
   cancel_requested: boolean;
+  /** §25：读时事实（QUEUED 时由服务端动态补，不落盘）。 */
+  queue_position: number | null;
   progress: JobProgress;
 }
 

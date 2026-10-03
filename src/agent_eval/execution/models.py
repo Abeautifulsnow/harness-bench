@@ -120,4 +120,8 @@ class EvalRunJob(BaseModel):
     notify_webhook: str | None = None
     notify_token_ref: str | None = None
 
+    # §25：排队位次是**读时事实**（随调度实时变化）——动态补在出参上，
+    # repository.save 用 exclude 永不落盘，避免留下一份过期的位次快照。
+    queue_position: int | None = None
+
     progress: JobProgress = Field(default_factory=JobProgress)

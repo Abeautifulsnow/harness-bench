@@ -20,8 +20,9 @@ class JobRepository:
 
     def save(self, job: EvalRunJob) -> None:
         path = self.root / f"{job.job_id}.json"
+        # queue_position 是读时事实（§25），落盘只会留过期快照——永远排除。
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(job.model_dump_json(indent=2), encoding="utf-8")
+        tmp.write_text(job.model_dump_json(indent=2, exclude={"queue_position"}), encoding="utf-8")
         os.replace(tmp, path)
 
     def get(self, job_id: str) -> EvalRunJob | None:

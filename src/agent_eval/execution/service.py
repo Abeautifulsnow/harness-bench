@@ -26,7 +26,7 @@ from agent_eval.execution.connections import (
     AgentConnectionProfile,
     load_agent_connections,
 )
-from agent_eval.execution.executor import LocalJobExecutor
+from agent_eval.execution.executor import JobExecutor, LocalJobExecutor
 from agent_eval.execution.models import (
     TERMINAL_STATUSES,
     EvalRunJob,
@@ -36,6 +36,7 @@ from agent_eval.execution.models import (
 )
 from agent_eval.execution.repository import JobRepository
 from agent_eval.loading.loader import load_benchmark, load_profile, load_suites
+from agent_eval.models.regression import BaselineMode
 from agent_eval.runner.runner import RunConfig, Runner
 
 
@@ -69,6 +70,7 @@ class EvalRunService:
         max_running_jobs: int = 2,
         repeat_cap: int = 10,
         agent_concurrency_cap: int = 16,
+        executor: JobExecutor | None = None,
     ) -> None:
         self.evals_root = evals_root
         self.data_root = data_root
@@ -77,7 +79,9 @@ class EvalRunService:
         self._notification_log = data_root / "state" / "notifications.jsonl"
         self.repeat_cap = repeat_cap
         self.agent_concurrency_cap = agent_concurrency_cap
-        self.executor = LocalJobExecutor(
+        # §23：执行机制可替换（LocalJobExecutor 之外，未来可换 RemoteWorker 等）；
+        # 缺省自建本地执行器。
+        self.executor: JobExecutor = executor or LocalJobExecutor(
             max_running_jobs,
             on_cancelled=self._on_executor_cancelled,
             on_error=self._on_executor_error,
@@ -92,9 +96,28 @@ class EvalRunService:
 
     def get(self, job_id: str) -> EvalRunJob | None:
         job = self._jobs.get(job_id)
-        if job is not None:
-            return job
-        return self.repo.get(job_id)
+        if job is None:
+            job = self.repo.get(job_id)
+        if job is None:
+            return None
+        if job.status is JobStatus.QUEUED:
+            # §25：排队位次是读时事实（随调度变化），不落盘——动态补在出参上。
+            job = job.model_copy(update={"queue_position": self._queue_position(job_id)})
+        return job
+
+    def _queue_position(self, job_id: str) -> int | None:
+        """QUEUED Job 的排队位次：提交序中排在它前面的在途任务数 - 运行槽位 + 1。"""
+
+        in_flight = self.executor.ordered_in_flight()
+        if job_id not in in_flight:
+            return None
+        running = sum(
+            1
+            for job in self._jobs.values()
+            if job.status is JobStatus.RUNNING or job.status is JobStatus.CANCELLING
+        )
+        ahead = in_flight.index(job_id)
+        return max(1, ahead - running + 1)
 
     def list(self) -> list[EvalRunJob]:
         merged = {job.job_id: job for job in self.repo.list()}
@@ -176,6 +199,14 @@ class EvalRunService:
         _require_identifier("benchmark", request.benchmark)
         if request.profile is not None:
             _require_identifier("profile", request.profile)
+        # §31：baseline 策略只能选 Git 里已有的语义；explicit 必须指名 baseline run
+        # （Runner 会在执行期报 InvalidCallError，但提交期就拒绝体验更好）。
+        if request.baseline_policy is not None:
+            allowed = {mode.value for mode in BaselineMode}
+            if request.baseline_policy not in allowed:
+                raise InvalidSubmission(f"baseline_policy must be one of {sorted(allowed)}")
+            if request.baseline_policy == BaselineMode.explicit.value and not request.baseline_run:
+                raise InvalidSubmission("baseline_policy=explicit requires baseline_run")
 
         try:
             load_benchmark(self.evals_root, request.benchmark)

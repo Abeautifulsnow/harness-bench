@@ -35,6 +35,9 @@ interface EvaluationForm {
   noJudge: string;
   strictProtocol: string;
   tags: string;
+  // §31：baseline 策略。"default" = 不传（Runner 按默认策略解析）；explicit 必须给 run。
+  baselinePolicy: string;
+  baselineRun: string;
 }
 
 type FormUpdater = <K extends keyof EvaluationForm>(key: K, value: EvaluationForm[K]) => void;
@@ -64,6 +67,8 @@ export function EvaluationNew() {
     noJudge: "false",
     strictProtocol: "false",
     tags: "",
+    baselinePolicy: "default",
+    baselineRun: "",
   });
   const update: FormUpdater = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
 
@@ -82,6 +87,8 @@ export function EvaluationNew() {
       noJudge: r.no_judge != null ? String(r.no_judge) : prev.noJudge,
       strictProtocol: r.strict_protocol != null ? String(r.strict_protocol) : prev.strictProtocol,
       tags: r.tags?.join(", ") ?? prev.tags,
+      baselinePolicy: r.baseline_policy ?? prev.baselinePolicy,
+      baselineRun: r.baseline_run ?? prev.baselineRun,
     }));
   };
 
@@ -114,7 +121,8 @@ export function EvaluationNew() {
     !form.agentProfile ||
     !form.benchmark ||
     !(repeatNum >= 1 && repeatNum <= 10) ||
-    !(concurrencyNum >= 1 && concurrencyNum <= 16);
+    !(concurrencyNum >= 1 && concurrencyNum <= 16) ||
+    (form.baselinePolicy === "explicit" && !form.baselineRun.trim());
 
   return (
     <div className="space-y-5">
@@ -185,6 +193,8 @@ function toRequest(form: EvaluationForm): EvalRunRequest {
       .split(",")
       .map((tag) => tag.trim())
       .filter(Boolean),
+    baseline_policy: form.baselinePolicy === "default" ? null : form.baselinePolicy,
+    baseline_run: form.baselineRun.trim() || null,
   };
 }
 
@@ -336,6 +346,29 @@ function ParamsSection({
             placeholder="smoke, regression"
           />
         </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Baseline 策略">
+            <Select value={form.baselinePolicy} onValueChange={(v) => update("baselinePolicy", v)}>
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="default">自动（Gate / 实验默认策略）</SelectItem>
+                <SelectItem value="main-latest">main 最新（main-latest）</SelectItem>
+                <SelectItem value="explicit">指定 baseline run</SelectItem>
+                <SelectItem value="NO_BASELINE">不比基线（NO_BASELINE）</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="Baseline Run ID（explicit 必填）">
+            <Input
+              value={form.baselineRun}
+              onChange={(e) => update("baselineRun", e.target.value)}
+              placeholder="run_…"
+              disabled={form.baselinePolicy !== "explicit"}
+            />
+          </Field>
+        </div>
       </div>
     </Section>
   );
