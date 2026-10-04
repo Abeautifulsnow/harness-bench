@@ -13,6 +13,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from agent_eval.api.security import enforce_exec_token
 from agent_eval.errors import InvalidCallError
+from agent_eval.evaluators.online_eval import (
+    load_eval_policies,
+)
 from agent_eval.models.events import TraceEvent
 from agent_eval.storage.production_store import ProductionStore
 from agent_eval.trace.otel import convert_otel, is_otel_payload
@@ -58,6 +61,11 @@ async def ingest_production_trace(request: Request) -> dict:
                         (raw.get("case_id") if isinstance(raw, dict) else None) or f"otel-{index}"
                     ),
                     "events": convert_otel(raw),
+                    "input": raw.get("input") if isinstance(raw, dict) else None,
+                    "expected_output": (
+                        raw.get("expected_output") if isinstance(raw, dict) else None
+                    ),
+                    "context": raw.get("context") if isinstance(raw, dict) else None,
                 }
             )
         else:
@@ -81,6 +89,12 @@ async def ingest_production_trace(request: Request) -> dict:
                 {
                     "case_id": str(case_id),
                     "events": [event.model_dump(mode="json") for event in parsed],
+                    # §61：显式评测字段（Online Eval 提取的第一优先级）
+                    "input": raw.get("input") if isinstance(raw, dict) else None,
+                    "expected_output": (
+                        raw.get("expected_output") if isinstance(raw, dict) else None
+                    ),
+                    "context": raw.get("context") if isinstance(raw, dict) else None,
                 }
             )
 
@@ -206,3 +220,92 @@ def _virtual_root(roots: list) -> Any:
         name=f"{len(roots)} roots",
         children=list(roots),
     )
+
+
+@router.get(
+    "/eval-policies",
+    summary="生产评测策略列表（Definition Plane 资产，evals/eval-policies/*.yaml）",
+)
+async def list_eval_policies(request: Request) -> list[dict]:
+
+    policies = load_eval_policies(request.app.state.workspace.evals_root)
+    return [policy.model_dump() for policy in policies]
+
+
+@router.post(
+    "/production/traces/{trace_id}/evaluate",
+    status_code=201,
+    summary="对生产 Trace 跑 Online Eval（§61：参考无关 judge，token 门）",
+    dependencies=[Depends(enforce_exec_token)],
+)
+async def evaluate_production_trace(trace_id: str, request: Request) -> dict:
+    from agent_eval.evaluators.online_eval import extract_pair as _extract
+    from agent_eval.evaluators.online_eval import run_online_evaluation as _run
+
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from None
+    policy_id = body.get("policy") if isinstance(body, dict) else None
+
+    policies = {
+        policy.id: policy for policy in load_eval_policies(request.app.state.workspace.evals_root)
+    }
+    policy = policies.get(str(policy_id))
+    if policy is None:
+        raise HTTPException(status_code=400, detail=f"unknown eval policy: {policy_id}")
+
+    store = _store(request)
+    try:
+        meta = store.get_meta(trace_id)
+    except InvalidCallError:
+        raise HTTPException(
+            status_code=404, detail=f"unknown production trace: {trace_id}"
+        ) from None
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"unknown production trace: {trace_id}")
+
+    pairs = []
+    unextractable: list[str] = []
+    for case_id, entry in (meta.get("cases") or {}).items():
+        pair = _extract(case_id, entry, store.load_events(trace_id, case_id))
+        if pair is None:
+            unextractable.append(case_id)
+        else:
+            pairs.append(pair)
+    if not pairs:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "no evaluable cases: production pairs need input+output "
+                "(explicit at ingest or extractable from events)"
+            ),
+        )
+
+    result = await _run(
+        pairs=pairs,
+        policy=policy,
+        adapter=request.app.state.production_evaluator,
+        unextractable_cases=unextractable,
+    )
+    store.save_evaluation(trace_id, result)
+    return {
+        "evaluation_id": result["evaluation_id"],
+        "trace_id": trace_id,
+        "summary": result["summary"],
+        "rows": result["rows"],
+    }
+
+
+@router.get(
+    "/production/traces/{trace_id}/evaluations",
+    summary="生产 Trace 的历次 Online Eval 结果（新→旧）",
+)
+async def list_production_evaluations(trace_id: str, request: Request) -> list[dict]:
+    store = _store(request)
+    try:
+        return store.list_evaluations(trace_id)
+    except InvalidCallError:
+        raise HTTPException(
+            status_code=404, detail=f"unknown production trace: {trace_id}"
+        ) from None

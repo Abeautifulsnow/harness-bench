@@ -182,7 +182,52 @@ export const evaluationApi = {
     get<ProductionTraceView>(
       `/production/traces/${encodeURIComponent(id)}/trace${caseId ? `?case_id=${encodeURIComponent(caseId)}` : ""}`,
     ),
+  // §61 Online Eval
+  evalPolicies: () => get<EvalPolicyRow[]>("/eval-policies"),
+  evaluateProductionTrace: (id: string, policy: string) =>
+    post<EvaluationResult>(
+      `/production/traces/${encodeURIComponent(id)}/evaluate`,
+      { policy },
+    ),
+  productionEvaluations: (id: string) =>
+    get<EvaluationResult[]>(`/production/traces/${encodeURIComponent(id)}/evaluations`),
 };
+
+export interface EvalPolicyRow {
+  id: string;
+  display_name: string;
+  description: string;
+  judge_model: string | null;
+  timeout_seconds: number;
+  metrics: { id: string; threshold: number | null }[];
+}
+
+export interface EvaluationRow {
+  case_id: string;
+  metric: string;
+  threshold: number | null;
+  score: number | null;
+  verdict: "pass" | "fail" | "error" | "skipped";
+  reason: string | null;
+}
+
+export interface EvaluationSummary {
+  policy: string;
+  cases_total: number;
+  cases_evaluated: number;
+  cases_unextractable: string[];
+  metrics: Record<
+    string,
+    { pass: number; fail: number; error: number; mean_score: number | null }
+  >;
+}
+
+export interface EvaluationResult {
+  evaluation_id: string;
+  trace_id?: string;
+  summary: EvaluationSummary;
+  rows: EvaluationRow[];
+}
 
 export interface ProductionTraceMeta {
   trace_id: string;

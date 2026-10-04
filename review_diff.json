@@ -1,0 +1,4562 @@
+{
+  "files": [
+    {
+      "old_path": "docs/web-evaluation-control-plane-design.md",
+      "new_path": "docs/web-evaluation-control-plane-design.md",
+      "diff_raw": "diff --git a/docs/web-evaluation-control-plane-design.md b/docs/web-evaluation-control-plane-design.md\nindex 7ab8278..256ef78 100644\n--- a/docs/web-evaluation-control-plane-design.md\n+++ b/docs/web-evaluation-control-plane-design.md\n@@ -2273,3 +2273,55 @@ V1 已按本文档落地。对应关系：\n benchmark dataset 的对齐语义）；Trace Replay 到 benchmark 用例（同一对齐\n 问题）；production run 投影进 runs/ 分析面（会伪造 evaluation 事实，等\n Online Eval 语义定了再做）；OTel Collector/SDK 侧的采集端集成。\n+\n+---\n+\n+# 61. V2 增量三（2026-10-03）：§53 Online Eval（参考无关 judge）\n+\n+## 61.1 对齐语义（本片的核心决策）\n+\n+Online Eval 评测的是生产 trace 自身的 (input, actual_output) 对，判定标准来自\n+**EvalPolicy**（Definition Plane 资产 `evals/eval-policies/*.yaml`：judge metric\n+清单 + 阈值 + judge model + 超时）——**参考无关，不需要 dataset 对齐**。\n+需要\"同题对比\"的 Trace Replay（生产行为 vs benchmark case 期望）是独立的\n+后续特性，不与 Online Eval 混用语义。\n+\n+## 61.2 pair 来源（优先级递减，绝不编造）\n+\n+1. 摄取时显式给出的 `input` / `expected_output` / `context`（随 meta 落账）；\n+2. 事件提取：`run.started.data.input`（兜底 `model.request` 末条 user 文本）\n+   与 `run.finished.data.output`；tool 序列取自 `tool.call/mcp.call`；\n+3. 都没有 → 该 case 记为 **unextractable，如实跳过并计数**（422 当整条\n+   trace 无可评测对）。\n+\n+## 61.3 执行与结果\n+\n+- 复用 Runner 的同一条 judge 路径（`DeepEvalCapabilityAdapter.evaluate`，\n+  含 `a_measure` 修正与 judge model 分离）；适配器经\n+  `create_app(production_evaluator=…)` 可注入（测试 stub）。\n+- 每个 (case, metric) 独立收口：score<threshold → fail；SDK 异常/超时 →\n+  error（reason 原样）；SDK 未安装 → **skipped**（与 Runner 能力探测同语义）。\n+  单格失败绝不中断整批。\n+- 结果落 `<trace>/evaluations/<eval_id>.json`（含 rows + summary：per-metric\n+  pass/fail/error/skipped/mean_score），历史可列。**不产生 Run、不算 Gate、\n+  不进 Regression**——生产 trace 没有可比基线，伪造这些只会制造假象。\n+- API：GET /eval-policies、POST /production/traces/{id}/evaluate（token 门）、\n+  GET …/evaluations。Web：生产详情页评测区（策略选择/运行/结果表/历史）。\n+\n+## 61.4 OTel 采集端（文档级）\n+\n+采集侧示例（Collector OTLP→JSON 转换后直接 POST 摄取端点）：\n+\n+```yaml\n+# otel-collector-config.yaml（节选）：exporter 把 OTLP 转 JSON 推给平台\n+exporters:\n+  otlphttp:\n+    endpoint: http://agent-eval-host:8000/api/otel-sink   # 由采集侧网关转换\n+service:\n+  pipelines:\n+    traces: { receivers: [otlp], exporters: [otlphttp] }\n+```\n+\n+V1 不内置 Collector：摄取端点吃标准 OTel traces JSON，任何能把 OTLP 导出为\n+JSON 的采集链（Collector + translate_exporter / 自定义脚本 / SDK exporter）\n+都能对接；token 走 `AGENT_EVAL_EXEC_TOKEN`。",
+      "hunks": [
+        {
+          "old_start": 2273,
+          "old_count": 3,
+          "new_start": 2273,
+          "new_count": 55,
+          "lines": [
+            {
+              "type": "context",
+              "content": "benchmark dataset 的对齐语义）；Trace Replay 到 benchmark 用例（同一对齐"
+            },
+            {
+              "type": "context",
+              "content": "问题）；production run 投影进 runs/ 分析面（会伪造 evaluation 事实，等"
+            },
+            {
+              "type": "context",
+              "content": "Online Eval 语义定了再做）；OTel Collector/SDK 侧的采集端集成。"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "---"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "# 61. V2 增量三（2026-10-03）：§53 Online Eval（参考无关 judge）"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "## 61.1 对齐语义（本片的核心决策）"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "Online Eval 评测的是生产 trace 自身的 (input, actual_output) 对，判定标准来自"
+            },
+            {
+              "type": "added",
+              "content": "**EvalPolicy**（Definition Plane 资产 `evals/eval-policies/*.yaml`：judge metric"
+            },
+            {
+              "type": "added",
+              "content": "清单 + 阈值 + judge model + 超时）——**参考无关，不需要 dataset 对齐**。"
+            },
+            {
+              "type": "added",
+              "content": "需要\"同题对比\"的 Trace Replay（生产行为 vs benchmark case 期望）是独立的"
+            },
+            {
+              "type": "added",
+              "content": "后续特性，不与 Online Eval 混用语义。"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "## 61.2 pair 来源（优先级递减，绝不编造）"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "1. 摄取时显式给出的 `input` / `expected_output` / `context`（随 meta 落账）；"
+            },
+            {
+              "type": "added",
+              "content": "2. 事件提取：`run.started.data.input`（兜底 `model.request` 末条 user 文本）"
+            },
+            {
+              "type": "added",
+              "content": "   与 `run.finished.data.output`；tool 序列取自 `tool.call/mcp.call`；"
+            },
+            {
+              "type": "added",
+              "content": "3. 都没有 → 该 case 记为 **unextractable，如实跳过并计数**（422 当整条"
+            },
+            {
+              "type": "added",
+              "content": "   trace 无可评测对）。"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "## 61.3 执行与结果"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "- 复用 Runner 的同一条 judge 路径（`DeepEvalCapabilityAdapter.evaluate`，"
+            },
+            {
+              "type": "added",
+              "content": "  含 `a_measure` 修正与 judge model 分离）；适配器经"
+            },
+            {
+              "type": "added",
+              "content": "  `create_app(production_evaluator=…)` 可注入（测试 stub）。"
+            },
+            {
+              "type": "added",
+              "content": "- 每个 (case, metric) 独立收口：score<threshold → fail；SDK 异常/超时 →"
+            },
+            {
+              "type": "added",
+              "content": "  error（reason 原样）；SDK 未安装 → **skipped**（与 Runner 能力探测同语义）。"
+            },
+            {
+              "type": "added",
+              "content": "  单格失败绝不中断整批。"
+            },
+            {
+              "type": "added",
+              "content": "- 结果落 `<trace>/evaluations/<eval_id>.json`（含 rows + summary：per-metric"
+            },
+            {
+              "type": "added",
+              "content": "  pass/fail/error/skipped/mean_score），历史可列。**不产生 Run、不算 Gate、"
+            },
+            {
+              "type": "added",
+              "content": "  不进 Regression**——生产 trace 没有可比基线，伪造这些只会制造假象。"
+            },
+            {
+              "type": "added",
+              "content": "- API：GET /eval-policies、POST /production/traces/{id}/evaluate（token 门）、"
+            },
+            {
+              "type": "added",
+              "content": "  GET …/evaluations。Web：生产详情页评测区（策略选择/运行/结果表/历史）。"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "## 61.4 OTel 采集端（文档级）"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "采集侧示例（Collector OTLP→JSON 转换后直接 POST 摄取端点）："
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "```yaml"
+            },
+            {
+              "type": "added",
+              "content": "# otel-collector-config.yaml（节选）：exporter 把 OTLP 转 JSON 推给平台"
+            },
+            {
+              "type": "added",
+              "content": "exporters:"
+            },
+            {
+              "type": "added",
+              "content": "  otlphttp:"
+            },
+            {
+              "type": "added",
+              "content": "    endpoint: http://agent-eval-host:8000/api/otel-sink   # 由采集侧网关转换"
+            },
+            {
+              "type": "added",
+              "content": "service:"
+            },
+            {
+              "type": "added",
+              "content": "  pipelines:"
+            },
+            {
+              "type": "added",
+              "content": "    traces: { receivers: [otlp], exporters: [otlphttp] }"
+            },
+            {
+              "type": "added",
+              "content": "```"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "V1 不内置 Collector：摄取端点吃标准 OTel traces JSON，任何能把 OTLP 导出为"
+            },
+            {
+              "type": "added",
+              "content": "JSON 的采集链（Collector + translate_exporter / 自定义脚本 / SDK exporter）"
+            },
+            {
+              "type": "added",
+              "content": "都能对接；token 走 `AGENT_EVAL_EXEC_TOKEN`。"
+            }
+          ]
+        }
+      ],
+      "insertions": 52,
+      "deletions": 0,
+      "is_binary": false,
+      "is_new": false,
+      "is_deleted": false,
+      "is_large": false,
+      "size_bytes": null,
+      "skipped_reason": null
+    },
+    {
+      "old_path": "src/agent_eval/api/app.py",
+      "new_path": "src/agent_eval/api/app.py",
+      "diff_raw": "diff --git a/src/agent_eval/api/app.py b/src/agent_eval/api/app.py\nindex bf9a0a7..d0c2834 100644\n--- a/src/agent_eval/api/app.py\n+++ b/src/agent_eval/api/app.py\n@@ -37,6 +37,7 @@ from agent_eval.api.routers import (\n from agent_eval.api.routers import regressions as regressions_router\n from agent_eval.api.routers import runs as runs_router\n from agent_eval.api.workspace import Workspace\n+from agent_eval.evaluators.deepeval_adapter import DeepEvalCapabilityAdapter\n from agent_eval.execution.scheduler import SchedulerService, load_schedules\n from agent_eval.execution.service import EvalRunService\n \n@@ -51,6 +52,7 @@ def create_app(\n     fixtures_root: Path | None = None,\n     static_dir: Path | None = None,\n     max_running_jobs: int = 2,\n+    production_evaluator: object | None = None,\n ) -> FastAPI:\n     service = EvalRunService(\n         evals_root=evals_root,\n@@ -85,6 +87,11 @@ def create_app(\n     app.state.version = __version__\n     app.state.eval_run_service = service\n     app.state.scheduler = scheduler\n+    # §61 Online Eval：judge 适配器可注入（测试用 stub 替身）；缺省走\n+    # DeepEvalCapabilityAdapter（SDK 惰性加载，未安装时 verdict=skipped）。\n+    app.state.production_evaluator = (\n+        production_evaluator if production_evaluator is not None else DeepEvalCapabilityAdapter()\n+    )\n \n     app.add_middleware(\n         CORSMiddleware,",
+      "hunks": [
+        {
+          "old_start": 37,
+          "old_count": 6,
+          "new_start": 37,
+          "new_count": 7,
+          "lines": [
+            {
+              "type": "context",
+              "content": "from agent_eval.api.routers import regressions as regressions_router"
+            },
+            {
+              "type": "context",
+              "content": "from agent_eval.api.routers import runs as runs_router"
+            },
+            {
+              "type": "context",
+              "content": "from agent_eval.api.workspace import Workspace"
+            },
+            {
+              "type": "added",
+              "content": "from agent_eval.evaluators.deepeval_adapter import DeepEvalCapabilityAdapter"
+            },
+            {
+              "type": "context",
+              "content": "from agent_eval.execution.scheduler import SchedulerService, load_schedules"
+            },
+            {
+              "type": "context",
+              "content": "from agent_eval.execution.service import EvalRunService"
+            },
+            {
+              "type": "context",
+              "content": ""
+            }
+          ]
+        },
+        {
+          "old_start": 51,
+          "old_count": 6,
+          "new_start": 52,
+          "new_count": 7,
+          "lines": [
+            {
+              "type": "context",
+              "content": "    fixtures_root: Path | None = None,"
+            },
+            {
+              "type": "context",
+              "content": "    static_dir: Path | None = None,"
+            },
+            {
+              "type": "context",
+              "content": "    max_running_jobs: int = 2,"
+            },
+            {
+              "type": "added",
+              "content": "    production_evaluator: object | None = None,"
+            },
+            {
+              "type": "context",
+              "content": ") -> FastAPI:"
+            },
+            {
+              "type": "context",
+              "content": "    service = EvalRunService("
+            },
+            {
+              "type": "context",
+              "content": "        evals_root=evals_root,"
+            }
+          ]
+        },
+        {
+          "old_start": 85,
+          "old_count": 6,
+          "new_start": 87,
+          "new_count": 11,
+          "lines": [
+            {
+              "type": "context",
+              "content": "    app.state.version = __version__"
+            },
+            {
+              "type": "context",
+              "content": "    app.state.eval_run_service = service"
+            },
+            {
+              "type": "context",
+              "content": "    app.state.scheduler = scheduler"
+            },
+            {
+              "type": "added",
+              "content": "    # §61 Online Eval：judge 适配器可注入（测试用 stub 替身）；缺省走"
+            },
+            {
+              "type": "added",
+              "content": "    # DeepEvalCapabilityAdapter（SDK 惰性加载，未安装时 verdict=skipped）。"
+            },
+            {
+              "type": "added",
+              "content": "    app.state.production_evaluator = ("
+            },
+            {
+              "type": "added",
+              "content": "        production_evaluator if production_evaluator is not None else DeepEvalCapabilityAdapter()"
+            },
+            {
+              "type": "added",
+              "content": "    )"
+            },
+            {
+              "type": "context",
+              "content": ""
+            },
+            {
+              "type": "context",
+              "content": "    app.add_middleware("
+            },
+            {
+              "type": "context",
+              "content": "        CORSMiddleware,"
+            }
+          ]
+        }
+      ],
+      "insertions": 7,
+      "deletions": 0,
+      "is_binary": false,
+      "is_new": false,
+      "is_deleted": false,
+      "is_large": false,
+      "size_bytes": null,
+      "skipped_reason": null
+    },
+    {
+      "old_path": "src/agent_eval/api/routers/production.py",
+      "new_path": "src/agent_eval/api/routers/production.py",
+      "diff_raw": "diff --git a/src/agent_eval/api/routers/production.py b/src/agent_eval/api/routers/production.py\nindex 6db5fe7..8feee8f 100644\n--- a/src/agent_eval/api/routers/production.py\n+++ b/src/agent_eval/api/routers/production.py\n@@ -13,6 +13,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request\n \n from agent_eval.api.security import enforce_exec_token\n from agent_eval.errors import InvalidCallError\n+from agent_eval.evaluators.online_eval import (\n+    load_eval_policies,\n+)\n from agent_eval.models.events import TraceEvent\n from agent_eval.storage.production_store import ProductionStore\n from agent_eval.trace.otel import convert_otel, is_otel_payload\n@@ -58,6 +61,11 @@ async def ingest_production_trace(request: Request) -> dict:\n                         (raw.get(\"case_id\") if isinstance(raw, dict) else None) or f\"otel-{index}\"\n                     ),\n                     \"events\": convert_otel(raw),\n+                    \"input\": raw.get(\"input\") if isinstance(raw, dict) else None,\n+                    \"expected_output\": (\n+                        raw.get(\"expected_output\") if isinstance(raw, dict) else None\n+                    ),\n+                    \"context\": raw.get(\"context\") if isinstance(raw, dict) else None,\n                 }\n             )\n         else:\n@@ -81,6 +89,12 @@ async def ingest_production_trace(request: Request) -> dict:\n                 {\n                     \"case_id\": str(case_id),\n                     \"events\": [event.model_dump(mode=\"json\") for event in parsed],\n+                    # §61：显式评测字段（Online Eval 提取的第一优先级）\n+                    \"input\": raw.get(\"input\") if isinstance(raw, dict) else None,\n+                    \"expected_output\": (\n+                        raw.get(\"expected_output\") if isinstance(raw, dict) else None\n+                    ),\n+                    \"context\": raw.get(\"context\") if isinstance(raw, dict) else None,\n                 }\n             )\n \n@@ -206,3 +220,92 @@ def _virtual_root(roots: list) -> Any:\n         name=f\"{len(roots)} roots\",\n         children=list(roots),\n     )\n+\n+\n+@router.get(\n+    \"/eval-policies\",\n+    summary=\"生产评测策略列表（Definition Plane 资产，evals/eval-policies/*.yaml）\",\n+)\n+async def list_eval_policies(request: Request) -> list[dict]:\n+\n+    policies = load_eval_policies(request.app.state.workspace.evals_root)\n+    return [policy.model_dump() for policy in policies]\n+\n+\n+@router.post(\n+    \"/production/traces/{trace_id}/evaluate\",\n+    status_code=201,\n+    summary=\"对生产 Trace 跑 Online Eval（§61：参考无关 judge，token 门）\",\n+    dependencies=[Depends(enforce_exec_token)],\n+)\n+async def evaluate_production_trace(trace_id: str, request: Request) -> dict:\n+    from agent_eval.evaluators.online_eval import extract_pair as _extract\n+    from agent_eval.evaluators.online_eval import run_online_evaluation as _run\n+\n+    try:\n+        body = await request.json()\n+    except ValueError:\n+        raise HTTPException(status_code=400, detail=\"invalid JSON body\") from None\n+    policy_id = body.get(\"policy\") if isinstance(body, dict) else None\n+\n+    policies = {\n+        policy.id: policy for policy in load_eval_policies(request.app.state.workspace.evals_root)\n+    }\n+    policy = policies.get(str(policy_id))\n+    if policy is None:\n+        raise HTTPException(status_code=400, detail=f\"unknown eval policy: {policy_id}\")\n+\n+    store = _store(request)\n+    try:\n+        meta = store.get_meta(trace_id)\n+    except InvalidCallError:\n+        raise HTTPException(\n+            status_code=404, detail=f\"unknown production trace: {trace_id}\"\n+        ) from None\n+    if meta is None:\n+        raise HTTPException(status_code=404, detail=f\"unknown production trace: {trace_id}\")\n+\n+    pairs = []\n+    unextractable: list[str] = []\n+    for case_id, entry in (meta.get(\"cases\") or {}).items():\n+        pair = _extract(case_id, entry, store.load_events(trace_id, case_id))\n+        if pair is None:\n+            unextractable.append(case_id)\n+        else:\n+            pairs.append(pair)\n+    if not pairs:\n+        raise HTTPException(\n+            status_code=422,\n+            detail=(\n+                \"no evaluable cases: production pairs need input+output \"\n+                \"(explicit at ingest or extractable from events)\"\n+            ),\n+        )\n+\n+    result = await _run(\n+        pairs=pairs,\n+        policy=policy,\n+        adapter=request.app.state.production_evaluator,\n+        unextractable_cases=unextractable,\n+    )\n+    store.save_evaluation(trace_id, result)\n+    return {\n+        \"evaluation_id\": result[\"evaluation_id\"],\n+        \"trace_id\": trace_id,\n+        \"summary\": result[\"summary\"],\n+        \"rows\": result[\"rows\"],\n+    }\n+\n+\n+@router.get(\n+    \"/production/traces/{trace_id}/evaluations\",\n+    summary=\"生产 Trace 的历次 Online Eval 结果（新→旧）\",\n+)\n+async def list_production_evaluations(trace_id: str, request: Request) -> list[dict]:\n+    store = _store(request)\n+    try:\n+        return store.list_evaluations(trace_id)\n+    except InvalidCallError:\n+        raise HTTPException(\n+            status_code=404, detail=f\"unknown production trace: {trace_id}\"\n+        ) from None",
+      "hunks": [
+        {
+          "old_start": 13,
+          "old_count": 6,
+          "new_start": 13,
+          "new_count": 9,
+          "lines": [
+            {
+              "type": "context",
+              "content": ""
+            },
+            {
+              "type": "context",
+              "content": "from agent_eval.api.security import enforce_exec_token"
+            },
+            {
+              "type": "context",
+              "content": "from agent_eval.errors import InvalidCallError"
+            },
+            {
+              "type": "added",
+              "content": "from agent_eval.evaluators.online_eval import ("
+            },
+            {
+              "type": "added",
+              "content": "    load_eval_policies,"
+            },
+            {
+              "type": "added",
+              "content": ")"
+            },
+            {
+              "type": "context",
+              "content": "from agent_eval.models.events import TraceEvent"
+            },
+            {
+              "type": "context",
+              "content": "from agent_eval.storage.production_store import ProductionStore"
+            },
+            {
+              "type": "context",
+              "content": "from agent_eval.trace.otel import convert_otel, is_otel_payload"
+            }
+          ]
+        },
+        {
+          "old_start": 58,
+          "old_count": 6,
+          "new_start": 61,
+          "new_count": 11,
+          "lines": [
+            {
+              "type": "context",
+              "content": "                        (raw.get(\"case_id\") if isinstance(raw, dict) else None) or f\"otel-{index}\""
+            },
+            {
+              "type": "context",
+              "content": "                    ),"
+            },
+            {
+              "type": "context",
+              "content": "                    \"events\": convert_otel(raw),"
+            },
+            {
+              "type": "added",
+              "content": "                    \"input\": raw.get(\"input\") if isinstance(raw, dict) else None,"
+            },
+            {
+              "type": "added",
+              "content": "                    \"expected_output\": ("
+            },
+            {
+              "type": "added",
+              "content": "                        raw.get(\"expected_output\") if isinstance(raw, dict) else None"
+            },
+            {
+              "type": "added",
+              "content": "                    ),"
+            },
+            {
+              "type": "added",
+              "content": "                    \"context\": raw.get(\"context\") if isinstance(raw, dict) else None,"
+            },
+            {
+              "type": "context",
+              "content": "                }"
+            },
+            {
+              "type": "context",
+              "content": "            )"
+            },
+            {
+              "type": "context",
+              "content": "        else:"
+            }
+          ]
+        },
+        {
+          "old_start": 81,
+          "old_count": 6,
+          "new_start": 89,
+          "new_count": 12,
+          "lines": [
+            {
+              "type": "context",
+              "content": "                {"
+            },
+            {
+              "type": "context",
+              "content": "                    \"case_id\": str(case_id),"
+            },
+            {
+              "type": "context",
+              "content": "                    \"events\": [event.model_dump(mode=\"json\") for event in parsed],"
+            },
+            {
+              "type": "added",
+              "content": "                    # §61：显式评测字段（Online Eval 提取的第一优先级）"
+            },
+            {
+              "type": "added",
+              "content": "                    \"input\": raw.get(\"input\") if isinstance(raw, dict) else None,"
+            },
+            {
+              "type": "added",
+              "content": "                    \"expected_output\": ("
+            },
+            {
+              "type": "added",
+              "content": "                        raw.get(\"expected_output\") if isinstance(raw, dict) else None"
+            },
+            {
+              "type": "added",
+              "content": "                    ),"
+            },
+            {
+              "type": "added",
+              "content": "                    \"context\": raw.get(\"context\") if isinstance(raw, dict) else None,"
+            },
+            {
+              "type": "context",
+              "content": "                }"
+            },
+            {
+              "type": "context",
+              "content": "            )"
+            },
+            {
+              "type": "context",
+              "content": ""
+            }
+          ]
+        },
+        {
+          "old_start": 206,
+          "old_count": 3,
+          "new_start": 220,
+          "new_count": 92,
+          "lines": [
+            {
+              "type": "context",
+              "content": "        name=f\"{len(roots)} roots\","
+            },
+            {
+              "type": "context",
+              "content": "        children=list(roots),"
+            },
+            {
+              "type": "context",
+              "content": "    )"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "@router.get("
+            },
+            {
+              "type": "added",
+              "content": "    \"/eval-policies\","
+            },
+            {
+              "type": "added",
+              "content": "    summary=\"生产评测策略列表（Definition Plane 资产，evals/eval-policies/*.yaml）\","
+            },
+            {
+              "type": "added",
+              "content": ")"
+            },
+            {
+              "type": "added",
+              "content": "async def list_eval_policies(request: Request) -> list[dict]:"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    policies = load_eval_policies(request.app.state.workspace.evals_root)"
+            },
+            {
+              "type": "added",
+              "content": "    return [policy.model_dump() for policy in policies]"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "@router.post("
+            },
+            {
+              "type": "added",
+              "content": "    \"/production/traces/{trace_id}/evaluate\","
+            },
+            {
+              "type": "added",
+              "content": "    status_code=201,"
+            },
+            {
+              "type": "added",
+              "content": "    summary=\"对生产 Trace 跑 Online Eval（§61：参考无关 judge，token 门）\","
+            },
+            {
+              "type": "added",
+              "content": "    dependencies=[Depends(enforce_exec_token)],"
+            },
+            {
+              "type": "added",
+              "content": ")"
+            },
+            {
+              "type": "added",
+              "content": "async def evaluate_production_trace(trace_id: str, request: Request) -> dict:"
+            },
+            {
+              "type": "added",
+              "content": "    from agent_eval.evaluators.online_eval import extract_pair as _extract"
+            },
+            {
+              "type": "added",
+              "content": "    from agent_eval.evaluators.online_eval import run_online_evaluation as _run"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    try:"
+            },
+            {
+              "type": "added",
+              "content": "        body = await request.json()"
+            },
+            {
+              "type": "added",
+              "content": "    except ValueError:"
+            },
+            {
+              "type": "added",
+              "content": "        raise HTTPException(status_code=400, detail=\"invalid JSON body\") from None"
+            },
+            {
+              "type": "added",
+              "content": "    policy_id = body.get(\"policy\") if isinstance(body, dict) else None"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    policies = {"
+            },
+            {
+              "type": "added",
+              "content": "        policy.id: policy for policy in load_eval_policies(request.app.state.workspace.evals_root)"
+            },
+            {
+              "type": "added",
+              "content": "    }"
+            },
+            {
+              "type": "added",
+              "content": "    policy = policies.get(str(policy_id))"
+            },
+            {
+              "type": "added",
+              "content": "    if policy is None:"
+            },
+            {
+              "type": "added",
+              "content": "        raise HTTPException(status_code=400, detail=f\"unknown eval policy: {policy_id}\")"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    store = _store(request)"
+            },
+            {
+              "type": "added",
+              "content": "    try:"
+            },
+            {
+              "type": "added",
+              "content": "        meta = store.get_meta(trace_id)"
+            },
+            {
+              "type": "added",
+              "content": "    except InvalidCallError:"
+            },
+            {
+              "type": "added",
+              "content": "        raise HTTPException("
+            },
+            {
+              "type": "added",
+              "content": "            status_code=404, detail=f\"unknown production trace: {trace_id}\""
+            },
+            {
+              "type": "added",
+              "content": "        ) from None"
+            },
+            {
+              "type": "added",
+              "content": "    if meta is None:"
+            },
+            {
+              "type": "added",
+              "content": "        raise HTTPException(status_code=404, detail=f\"unknown production trace: {trace_id}\")"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    pairs = []"
+            },
+            {
+              "type": "added",
+              "content": "    unextractable: list[str] = []"
+            },
+            {
+              "type": "added",
+              "content": "    for case_id, entry in (meta.get(\"cases\") or {}).items():"
+            },
+            {
+              "type": "added",
+              "content": "        pair = _extract(case_id, entry, store.load_events(trace_id, case_id))"
+            },
+            {
+              "type": "added",
+              "content": "        if pair is None:"
+            },
+            {
+              "type": "added",
+              "content": "            unextractable.append(case_id)"
+            },
+            {
+              "type": "added",
+              "content": "        else:"
+            },
+            {
+              "type": "added",
+              "content": "            pairs.append(pair)"
+            },
+            {
+              "type": "added",
+              "content": "    if not pairs:"
+            },
+            {
+              "type": "added",
+              "content": "        raise HTTPException("
+            },
+            {
+              "type": "added",
+              "content": "            status_code=422,"
+            },
+            {
+              "type": "added",
+              "content": "            detail=("
+            },
+            {
+              "type": "added",
+              "content": "                \"no evaluable cases: production pairs need input+output \""
+            },
+            {
+              "type": "added",
+              "content": "                \"(explicit at ingest or extractable from events)\""
+            },
+            {
+              "type": "added",
+              "content": "            ),"
+            },
+            {
+              "type": "added",
+              "content": "        )"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    result = await _run("
+            },
+            {
+              "type": "added",
+              "content": "        pairs=pairs,"
+            },
+            {
+              "type": "added",
+              "content": "        policy=policy,"
+            },
+            {
+              "type": "added",
+              "content": "        adapter=request.app.state.production_evaluator,"
+            },
+            {
+              "type": "added",
+              "content": "        unextractable_cases=unextractable,"
+            },
+            {
+              "type": "added",
+              "content": "    )"
+            },
+            {
+              "type": "added",
+              "content": "    store.save_evaluation(trace_id, result)"
+            },
+            {
+              "type": "added",
+              "content": "    return {"
+            },
+            {
+              "type": "added",
+              "content": "        \"evaluation_id\": result[\"evaluation_id\"],"
+            },
+            {
+              "type": "added",
+              "content": "        \"trace_id\": trace_id,"
+            },
+            {
+              "type": "added",
+              "content": "        \"summary\": result[\"summary\"],"
+            },
+            {
+              "type": "added",
+              "content": "        \"rows\": result[\"rows\"],"
+            },
+            {
+              "type": "added",
+              "content": "    }"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "@router.get("
+            },
+            {
+              "type": "added",
+              "content": "    \"/production/traces/{trace_id}/evaluations\","
+            },
+            {
+              "type": "added",
+              "content": "    summary=\"生产 Trace 的历次 Online Eval 结果（新→旧）\","
+            },
+            {
+              "type": "added",
+              "content": ")"
+            },
+            {
+              "type": "added",
+              "content": "async def list_production_evaluations(trace_id: str, request: Request) -> list[dict]:"
+            },
+            {
+              "type": "added",
+              "content": "    store = _store(request)"
+            },
+            {
+              "type": "added",
+              "content": "    try:"
+            },
+            {
+              "type": "added",
+              "content": "        return store.list_evaluations(trace_id)"
+            },
+            {
+              "type": "added",
+              "content": "    except InvalidCallError:"
+            },
+            {
+              "type": "added",
+              "content": "        raise HTTPException("
+            },
+            {
+              "type": "added",
+              "content": "            status_code=404, detail=f\"unknown production trace: {trace_id}\""
+            },
+            {
+              "type": "added",
+              "content": "        ) from None"
+            }
+          ]
+        }
+      ],
+      "insertions": 103,
+      "deletions": 0,
+      "is_binary": false,
+      "is_new": false,
+      "is_deleted": false,
+      "is_large": false,
+      "size_bytes": null,
+      "skipped_reason": null
+    },
+    {
+      "old_path": "src/agent_eval/evaluators/harness.py",
+      "new_path": "src/agent_eval/evaluators/harness.py",
+      "diff_raw": "diff --git a/src/agent_eval/evaluators/harness.py b/src/agent_eval/evaluators/harness.py\nindex 9b213bb..6d88412 100644\n--- a/src/agent_eval/evaluators/harness.py\n+++ b/src/agent_eval/evaluators/harness.py\n@@ -264,9 +264,7 @@ class SkillLoadEvaluator(EvaluatorPlugin):\n         # 未声明的加载只在**声明了集合**时才判：没声明集合就没有\"多出来的\"这回事\n         # （与 subagent_routing 一致——那时只判 expected_first / max_loaded）。\n         unexpected = (\n-            [name for name in loaded if name not in expected]\n-            if declared_loaded is not None\n-            else []\n+            [name for name in loaded if name not in expected] if declared_loaded is not None else []\n         )\n         if unexpected and not allow_extra:\n             problems.append(f\"出现未声明的 skill：{', '.join(unexpected)}\")",
+      "hunks": [
+        {
+          "old_start": 264,
+          "old_count": 9,
+          "new_start": 264,
+          "new_count": 7,
+          "lines": [
+            {
+              "type": "context",
+              "content": "        # 未声明的加载只在**声明了集合**时才判：没声明集合就没有\"多出来的\"这回事"
+            },
+            {
+              "type": "context",
+              "content": "        # （与 subagent_routing 一致——那时只判 expected_first / max_loaded）。"
+            },
+            {
+              "type": "context",
+              "content": "        unexpected = ("
+            },
+            {
+              "type": "deleted",
+              "content": "            [name for name in loaded if name not in expected]"
+            },
+            {
+              "type": "deleted",
+              "content": "            if declared_loaded is not None"
+            },
+            {
+              "type": "deleted",
+              "content": "            else []"
+            },
+            {
+              "type": "added",
+              "content": "            [name for name in loaded if name not in expected] if declared_loaded is not None else []"
+            },
+            {
+              "type": "context",
+              "content": "        )"
+            },
+            {
+              "type": "context",
+              "content": "        if unexpected and not allow_extra:"
+            },
+            {
+              "type": "context",
+              "content": "            problems.append(f\"出现未声明的 skill：{', '.join(unexpected)}\")"
+            }
+          ]
+        }
+      ],
+      "insertions": 1,
+      "deletions": 3,
+      "is_binary": false,
+      "is_new": false,
+      "is_deleted": false,
+      "is_large": false,
+      "size_bytes": null,
+      "skipped_reason": null
+    },
+    {
+      "old_path": "src/agent_eval/regression/compare.py",
+      "new_path": "src/agent_eval/regression/compare.py",
+      "diff_raw": "diff --git a/src/agent_eval/regression/compare.py b/src/agent_eval/regression/compare.py\nindex 9cc8701..ab3bfc3 100644\n--- a/src/agent_eval/regression/compare.py\n+++ b/src/agent_eval/regression/compare.py\n@@ -109,10 +109,7 @@ def _below_wall_clock_floor(metric_id: str, base: float, candidate: float) -> bo\n     \"\"\"\n     if not _is_wall_clock(metric_id):\n         return False\n-    return (\n-        abs(candidate - base) <= _WALL_CLOCK_FLOOR\n-        or min(base, candidate) < _WALL_CLOCK_FLOOR\n-    )\n+    return abs(candidate - base) <= _WALL_CLOCK_FLOOR or min(base, candidate) < _WALL_CLOCK_FLOOR\n \n \n def _within_noise(",
+      "hunks": [
+        {
+          "old_start": 109,
+          "old_count": 10,
+          "new_start": 109,
+          "new_count": 7,
+          "lines": [
+            {
+              "type": "context",
+              "content": "    \"\"\""
+            },
+            {
+              "type": "context",
+              "content": "    if not _is_wall_clock(metric_id):"
+            },
+            {
+              "type": "context",
+              "content": "        return False"
+            },
+            {
+              "type": "deleted",
+              "content": "    return ("
+            },
+            {
+              "type": "deleted",
+              "content": "        abs(candidate - base) <= _WALL_CLOCK_FLOOR"
+            },
+            {
+              "type": "deleted",
+              "content": "        or min(base, candidate) < _WALL_CLOCK_FLOOR"
+            },
+            {
+              "type": "deleted",
+              "content": "    )"
+            },
+            {
+              "type": "added",
+              "content": "    return abs(candidate - base) <= _WALL_CLOCK_FLOOR or min(base, candidate) < _WALL_CLOCK_FLOOR"
+            },
+            {
+              "type": "context",
+              "content": ""
+            },
+            {
+              "type": "context",
+              "content": ""
+            },
+            {
+              "type": "context",
+              "content": "def _within_noise("
+            }
+          ]
+        }
+      ],
+      "insertions": 1,
+      "deletions": 4,
+      "is_binary": false,
+      "is_new": false,
+      "is_deleted": false,
+      "is_large": false,
+      "size_bytes": null,
+      "skipped_reason": null
+    },
+    {
+      "old_path": "src/agent_eval/storage/production_store.py",
+      "new_path": "src/agent_eval/storage/production_store.py",
+      "diff_raw": "diff --git a/src/agent_eval/storage/production_store.py b/src/agent_eval/storage/production_store.py\nindex 041f841..4e72732 100644\n--- a/src/agent_eval/storage/production_store.py\n+++ b/src/agent_eval/storage/production_store.py\n@@ -11,6 +11,7 @@\n from __future__ import annotations\n \n import json\n+import os\n import re\n import time\n import uuid\n@@ -64,7 +65,17 @@ class ProductionStore:\n             \"trace_id\": trace_id,\n             \"source\": source,\n             \"ingested_at\": datetime.now().astimezone().isoformat(),\n-            \"cases\": {str(case[\"case_id\"]): len(case[\"events\"]) for case in cases},\n+            # §61 Online Eval：case 级显式评测字段（input/expected_output/context）\n+            # 随 meta 落账——提取优先级最高的一级；缺省仍走事件提取。\n+            \"cases\": {\n+                str(case[\"case_id\"]): {\n+                    \"events\": len(case[\"events\"]),\n+                    \"input\": case.get(\"input\"),\n+                    \"expected_output\": case.get(\"expected_output\"),\n+                    \"context\": case.get(\"context\"),\n+                }\n+                for case in cases\n+            },\n             \"total_events\": sum(len(case[\"events\"]) for case in cases),\n             \"endpoint\": endpoint,\n             \"model\": model,\n@@ -116,3 +127,48 @@ class ProductionStore:\n             if meta is not None:\n                 out.append(meta)\n         return out\n+\n+    # ------------------------------------------------ Online Eval（§61）\n+\n+    def save_evaluation(self, trace_id: str, result: dict) -> str:\n+        _require_trace_id(trace_id)\n+        directory = self.root / trace_id / \"evaluations\"\n+        directory.mkdir(parents=True, exist_ok=True)\n+        eval_id = str(result[\"evaluation_id\"])\n+        path = directory / f\"{eval_id}.json\"\n+        tmp = path.with_suffix(\".json.tmp\")\n+        record = {\n+            **result,\n+            \"trace_id\": trace_id,\n+            \"created_at\": datetime.now().astimezone().isoformat(),\n+        }\n+        tmp.write_text(\n+            json.dumps(record, ensure_ascii=False, indent=2),\n+            encoding=\"utf-8\",\n+        )\n+        os.replace(tmp, path)\n+        return eval_id\n+\n+    def list_evaluations(self, trace_id: str) -> list[dict]:\n+        _require_trace_id(trace_id)\n+        directory = self.root / trace_id / \"evaluations\"\n+        if not directory.is_dir():\n+            return []\n+        out: list[dict] = []\n+        for path in sorted(directory.glob(\"eval_*.json\"), reverse=True):\n+            try:\n+                out.append(json.loads(path.read_text(encoding=\"utf-8\")))\n+            except ValueError:\n+                continue\n+        return out\n+\n+    def get_evaluation(self, trace_id: str, evaluation_id: str) -> dict | None:\n+        _require_trace_id(trace_id)\n+        _require_trace_id(evaluation_id)\n+        path = self.root / trace_id / \"evaluations\" / f\"{evaluation_id}.json\"\n+        if not path.is_file():\n+            return None\n+        try:\n+            return json.loads(path.read_text(encoding=\"utf-8\"))\n+        except ValueError:\n+            return None",
+      "hunks": [
+        {
+          "old_start": 11,
+          "old_count": 6,
+          "new_start": 11,
+          "new_count": 7,
+          "lines": [
+            {
+              "type": "context",
+              "content": "from __future__ import annotations"
+            },
+            {
+              "type": "context",
+              "content": ""
+            },
+            {
+              "type": "context",
+              "content": "import json"
+            },
+            {
+              "type": "added",
+              "content": "import os"
+            },
+            {
+              "type": "context",
+              "content": "import re"
+            },
+            {
+              "type": "context",
+              "content": "import time"
+            },
+            {
+              "type": "context",
+              "content": "import uuid"
+            }
+          ]
+        },
+        {
+          "old_start": 64,
+          "old_count": 7,
+          "new_start": 65,
+          "new_count": 17,
+          "lines": [
+            {
+              "type": "context",
+              "content": "            \"trace_id\": trace_id,"
+            },
+            {
+              "type": "context",
+              "content": "            \"source\": source,"
+            },
+            {
+              "type": "context",
+              "content": "            \"ingested_at\": datetime.now().astimezone().isoformat(),"
+            },
+            {
+              "type": "deleted",
+              "content": "            \"cases\": {str(case[\"case_id\"]): len(case[\"events\"]) for case in cases},"
+            },
+            {
+              "type": "added",
+              "content": "            # §61 Online Eval：case 级显式评测字段（input/expected_output/context）"
+            },
+            {
+              "type": "added",
+              "content": "            # 随 meta 落账——提取优先级最高的一级；缺省仍走事件提取。"
+            },
+            {
+              "type": "added",
+              "content": "            \"cases\": {"
+            },
+            {
+              "type": "added",
+              "content": "                str(case[\"case_id\"]): {"
+            },
+            {
+              "type": "added",
+              "content": "                    \"events\": len(case[\"events\"]),"
+            },
+            {
+              "type": "added",
+              "content": "                    \"input\": case.get(\"input\"),"
+            },
+            {
+              "type": "added",
+              "content": "                    \"expected_output\": case.get(\"expected_output\"),"
+            },
+            {
+              "type": "added",
+              "content": "                    \"context\": case.get(\"context\"),"
+            },
+            {
+              "type": "added",
+              "content": "                }"
+            },
+            {
+              "type": "added",
+              "content": "                for case in cases"
+            },
+            {
+              "type": "added",
+              "content": "            },"
+            },
+            {
+              "type": "context",
+              "content": "            \"total_events\": sum(len(case[\"events\"]) for case in cases),"
+            },
+            {
+              "type": "context",
+              "content": "            \"endpoint\": endpoint,"
+            },
+            {
+              "type": "context",
+              "content": "            \"model\": model,"
+            }
+          ]
+        },
+        {
+          "old_start": 116,
+          "old_count": 3,
+          "new_start": 127,
+          "new_count": 48,
+          "lines": [
+            {
+              "type": "context",
+              "content": "            if meta is not None:"
+            },
+            {
+              "type": "context",
+              "content": "                out.append(meta)"
+            },
+            {
+              "type": "context",
+              "content": "        return out"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    # ------------------------------------------------ Online Eval（§61）"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    def save_evaluation(self, trace_id: str, result: dict) -> str:"
+            },
+            {
+              "type": "added",
+              "content": "        _require_trace_id(trace_id)"
+            },
+            {
+              "type": "added",
+              "content": "        directory = self.root / trace_id / \"evaluations\""
+            },
+            {
+              "type": "added",
+              "content": "        directory.mkdir(parents=True, exist_ok=True)"
+            },
+            {
+              "type": "added",
+              "content": "        eval_id = str(result[\"evaluation_id\"])"
+            },
+            {
+              "type": "added",
+              "content": "        path = directory / f\"{eval_id}.json\""
+            },
+            {
+              "type": "added",
+              "content": "        tmp = path.with_suffix(\".json.tmp\")"
+            },
+            {
+              "type": "added",
+              "content": "        record = {"
+            },
+            {
+              "type": "added",
+              "content": "            **result,"
+            },
+            {
+              "type": "added",
+              "content": "            \"trace_id\": trace_id,"
+            },
+            {
+              "type": "added",
+              "content": "            \"created_at\": datetime.now().astimezone().isoformat(),"
+            },
+            {
+              "type": "added",
+              "content": "        }"
+            },
+            {
+              "type": "added",
+              "content": "        tmp.write_text("
+            },
+            {
+              "type": "added",
+              "content": "            json.dumps(record, ensure_ascii=False, indent=2),"
+            },
+            {
+              "type": "added",
+              "content": "            encoding=\"utf-8\","
+            },
+            {
+              "type": "added",
+              "content": "        )"
+            },
+            {
+              "type": "added",
+              "content": "        os.replace(tmp, path)"
+            },
+            {
+              "type": "added",
+              "content": "        return eval_id"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    def list_evaluations(self, trace_id: str) -> list[dict]:"
+            },
+            {
+              "type": "added",
+              "content": "        _require_trace_id(trace_id)"
+            },
+            {
+              "type": "added",
+              "content": "        directory = self.root / trace_id / \"evaluations\""
+            },
+            {
+              "type": "added",
+              "content": "        if not directory.is_dir():"
+            },
+            {
+              "type": "added",
+              "content": "            return []"
+            },
+            {
+              "type": "added",
+              "content": "        out: list[dict] = []"
+            },
+            {
+              "type": "added",
+              "content": "        for path in sorted(directory.glob(\"eval_*.json\"), reverse=True):"
+            },
+            {
+              "type": "added",
+              "content": "            try:"
+            },
+            {
+              "type": "added",
+              "content": "                out.append(json.loads(path.read_text(encoding=\"utf-8\")))"
+            },
+            {
+              "type": "added",
+              "content": "            except ValueError:"
+            },
+            {
+              "type": "added",
+              "content": "                continue"
+            },
+            {
+              "type": "added",
+              "content": "        return out"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    def get_evaluation(self, trace_id: str, evaluation_id: str) -> dict | None:"
+            },
+            {
+              "type": "added",
+              "content": "        _require_trace_id(trace_id)"
+            },
+            {
+              "type": "added",
+              "content": "        _require_trace_id(evaluation_id)"
+            },
+            {
+              "type": "added",
+              "content": "        path = self.root / trace_id / \"evaluations\" / f\"{evaluation_id}.json\""
+            },
+            {
+              "type": "added",
+              "content": "        if not path.is_file():"
+            },
+            {
+              "type": "added",
+              "content": "            return None"
+            },
+            {
+              "type": "added",
+              "content": "        try:"
+            },
+            {
+              "type": "added",
+              "content": "            return json.loads(path.read_text(encoding=\"utf-8\"))"
+            },
+            {
+              "type": "added",
+              "content": "        except ValueError:"
+            },
+            {
+              "type": "added",
+              "content": "            return None"
+            }
+          ]
+        }
+      ],
+      "insertions": 57,
+      "deletions": 1,
+      "is_binary": false,
+      "is_new": false,
+      "is_deleted": false,
+      "is_large": false,
+      "size_bytes": null,
+      "skipped_reason": null
+    },
+    {
+      "old_path": "tests/test_production_and_events.py",
+      "new_path": "tests/test_production_and_events.py",
+      "diff_raw": "diff --git a/tests/test_production_and_events.py b/tests/test_production_and_events.py\nindex cbcb82c..34964e0 100644\n--- a/tests/test_production_and_events.py\n+++ b/tests/test_production_and_events.py\n@@ -30,6 +30,8 @@ enabled: true\n def workspace(tmp_path: Path):\n     evals_root = tmp_path / \"evals\"\n     shutil.copytree(REPO / \"evals\", evals_root)\n+    # 仓库自带的 eval-policies 示例不进本套件：测试自写可控策略\n+    shutil.rmtree(evals_root / \"eval-policies\", ignore_errors=True)\n     shutil.copytree(REPO / \"fixtures\", tmp_path / \"fixtures\")\n     (evals_root / \"agents\" / \"local-fake.yaml\").write_text(LOCAL_AGENT, encoding=\"utf-8\")\n     data_root = tmp_path / \"data\"\n@@ -336,3 +338,243 @@ class TestTraceIdTraversal:\n             store.get_meta(\"../escape\")\n         with pytest.raises(InvalidCallError):\n             store.load_events(\"../escape\")\n+\n+\n+class TestOnlineEval:\n+    \"\"\"§61：参考无关 judge——pair 提取、策略执行、结果落账。\"\"\"\n+\n+    @staticmethod\n+    def _client(workspace, evaluator) -> httpx.AsyncClient:\n+        evals_root, data_root = workspace\n+        app = create_app(\n+            evals_root=evals_root,\n+            data_root=data_root,\n+            fixtures_root=REPO / \"fixtures\",\n+            production_evaluator=evaluator,\n+        )\n+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=\"http://test\")\n+\n+    @staticmethod\n+    def _stub(scores: dict[str, float] | None = None, fail: bool = False):\n+        class StubAdapter:\n+            def version(self) -> str | None:\n+                return \"stub-1.0\"\n+\n+            async def evaluate(self, metric_id, threshold, trace, model=None):\n+                if fail:\n+                    raise RuntimeError(\"judge provider down\")\n+                score = (scores or {}).get(metric_id, 0.9)\n+                return score, \"stub reason\"\n+\n+        return StubAdapter()\n+\n+    @pytest.fixture()\n+    def policy(self, workspace) -> None:\n+        evals_root, _ = workspace\n+        (evals_root / \"eval-policies\").mkdir(exist_ok=True)\n+        (evals_root / \"eval-policies\" / \"qa.yaml\").write_text(\n+            \"id: qa\\n\"\n+            \"display_name: QA judge\\n\"\n+            \"metrics:\\n\"\n+            \"  - id: agent.task_completion\\n\"\n+            \"    threshold: 0.7\\n\"\n+            \"  - id: agent.step_efficiency\\n\"\n+            \"    threshold: 0.5\\n\",\n+            encoding=\"utf-8\",\n+        )\n+\n+    async def _ingest(self, client) -> str:\n+        events = [\n+            {\n+                \"event_id\": \"e1\",\n+                \"trace_id\": \"t1\",\n+                \"type\": \"run.started\",\n+                \"timestamp\": \"2026-10-03T10:00:00+08:00\",\n+                \"data\": {\"input\": \"帮我查订单\"},\n+            },\n+            {\n+                \"event_id\": \"e2\",\n+                \"trace_id\": \"t1\",\n+                \"type\": \"tool.call\",\n+                \"timestamp\": \"2026-10-03T10:00:01+08:00\",\n+                \"data\": {\"name\": \"order.search\"},\n+            },\n+            {\n+                \"event_id\": \"e3\",\n+                \"trace_id\": \"t1\",\n+                \"type\": \"run.finished\",\n+                \"timestamp\": \"2026-10-03T10:00:02+08:00\",\n+                \"data\": {\"output\": \"订单已发货\", \"status\": \"success\"},\n+            },\n+        ]\n+        response = await client.post(\n+            \"/api/production/traces\",\n+            json={\n+                \"source\": \"platform\",\n+                \"cases\": [\n+                    {\"case_id\": \"conv-ok\", \"events\": events, \"expected_output\": \"已发货\"},\n+                    # 无 input/output：unextractable，如实计数\n+                    {\"case_id\": \"conv-empty\", \"events\": [events[1]]},\n+                ],\n+            },\n+        )\n+        assert response.status_code == 201, response.text\n+        return response.json()[\"trace_id\"]\n+\n+    @pytest.mark.asyncio\n+    async def test_evaluate_full_flow(self, workspace, policy) -> None:\n+        async with self._client(workspace, self._stub()) as client:\n+            trace_id = await self._ingest(client)\n+            response = await client.post(\n+                f\"/api/production/traces/{trace_id}/evaluate\",\n+                json={\"policy\": \"qa\"},\n+            )\n+            assert response.status_code == 201, response.text\n+            payload = response.json()\n+            summary = payload[\"summary\"]\n+            assert summary[\"cases_evaluated\"] == 1\n+            assert summary[\"cases_unextractable\"] == [\"conv-empty\"]\n+            # 事件提取：input 来自 run.started，output 来自 run.finished\n+            row = next(r for r in payload[\"rows\"] if r[\"metric\"] == \"agent.task_completion\")\n+            assert row[\"case_id\"] == \"conv-ok\"\n+            assert row[\"verdict\"] == \"pass\"  # 0.9 >= 0.7\n+            eff = next(r for r in payload[\"rows\"] if r[\"metric\"] == \"agent.step_efficiency\")\n+            assert eff[\"verdict\"] == \"pass\"  # 0.9 >= 0.5\n+\n+            # 历史可读\n+            history = (await client.get(f\"/api/production/traces/{trace_id}/evaluations\")).json()\n+            assert history and history[0][\"evaluation_id\"] == payload[\"evaluation_id\"]\n+\n+    @pytest.mark.asyncio\n+    async def test_score_below_threshold_fails(self, workspace, policy) -> None:\n+        stub = self._stub(scores={\"agent.task_completion\": 0.4, \"agent.step_efficiency\": 0.2})\n+        async with self._client(workspace, stub) as client:\n+            trace_id = await self._ingest(client)\n+            payload = (\n+                await client.post(\n+                    f\"/api/production/traces/{trace_id}/evaluate\", json={\"policy\": \"qa\"}\n+                )\n+            ).json()\n+            verdicts = {r[\"metric\"]: r[\"verdict\"] for r in payload[\"rows\"]}\n+            assert verdicts == {\n+                \"agent.task_completion\": \"fail\",\n+                \"agent.step_efficiency\": \"fail\",\n+            }\n+            assert payload[\"summary\"][\"metrics\"][\"agent.task_completion\"][\"mean_score\"] == 0.4\n+\n+    @pytest.mark.asyncio\n+    async def test_judge_error_lands_as_error_row(self, workspace, policy) -> None:\n+        async with self._client(workspace, self._stub(fail=True)) as client:\n+            trace_id = await self._ingest(client)\n+            payload = (\n+                await client.post(\n+                    f\"/api/production/traces/{trace_id}/evaluate\", json={\"policy\": \"qa\"}\n+                )\n+            ).json()\n+            assert all(r[\"verdict\"] == \"error\" for r in payload[\"rows\"])\n+            assert \"judge provider down\" in payload[\"rows\"][0][\"reason\"]\n+\n+    @pytest.mark.asyncio\n+    async def test_missing_sdk_is_skipped(self, workspace, policy) -> None:\n+        class NoSDK:\n+            def version(self) -> str | None:\n+                return None\n+\n+        async with self._client(workspace, NoSDK()) as client:\n+            trace_id = await self._ingest(client)\n+            payload = (\n+                await client.post(\n+                    f\"/api/production/traces/{trace_id}/evaluate\", json={\"policy\": \"qa\"}\n+                )\n+            ).json()\n+            assert all(r[\"verdict\"] == \"skipped\" for r in payload[\"rows\"])\n+\n+    @pytest.mark.asyncio\n+    async def test_unknown_policy_or_trace_or_empty(self, workspace, policy) -> None:\n+        async with self._client(workspace, self._stub()) as client:\n+            trace_id = await self._ingest(client)\n+            assert (\n+                await client.post(\n+                    f\"/api/production/traces/{trace_id}/evaluate\", json={\"policy\": \"nope\"}\n+                )\n+            ).status_code == 400\n+            assert (\n+                await client.post(\n+                    \"/api/production/traces/prod_missing/evaluate\", json={\"policy\": \"qa\"}\n+                )\n+            ).status_code == 404\n+\n+    @pytest.mark.asyncio\n+    async def test_no_evaluable_cases_is_422(self, workspace, policy) -> None:\n+        async with self._client(workspace, self._stub()) as client:\n+            response = await client.post(\n+                \"/api/production/traces\",\n+                json={\n+                    \"source\": \"platform\",\n+                    \"cases\": [\n+                        {\n+                            \"case_id\": \"c\",\n+                            \"events\": [{\"event_id\": \"e\", \"trace_id\": \"t\", \"type\": \"tool.call\"}],\n+                        }\n+                    ],\n+                },\n+            )\n+            trace_id = response.json()[\"trace_id\"]\n+            response = await client.post(\n+                f\"/api/production/traces/{trace_id}/evaluate\", json={\"policy\": \"qa\"}\n+            )\n+            assert response.status_code == 422\n+\n+    @pytest.mark.asyncio\n+    async def test_explicit_ingest_fields_win_over_events(self, workspace, policy) -> None:\n+        class Probe:\n+            def version(self) -> str | None:\n+                return \"probe\"\n+\n+            async def evaluate(self, metric_id, threshold, trace, model=None):\n+                self.seen = trace\n+                return 1.0, \"ok\"\n+\n+        probe = Probe()\n+        async with self._client(workspace, probe) as client:\n+            events = [\n+                {\n+                    \"event_id\": \"e1\",\n+                    \"trace_id\": \"t\",\n+                    \"type\": \"run.started\",\n+                    \"timestamp\": \"2026-10-03T10:00:00+08:00\",\n+                    \"data\": {\"input\": \"事件里的输入\"},\n+                },\n+                {\n+                    \"event_id\": \"e2\",\n+                    \"trace_id\": \"t\",\n+                    \"type\": \"run.finished\",\n+                    \"timestamp\": \"2026-10-03T10:00:01+08:00\",\n+                    \"data\": {\"output\": \"事件里的输出\"},\n+                },\n+            ]\n+            response = await client.post(\n+                \"/api/production/traces\",\n+                json={\n+                    \"source\": \"platform\",\n+                    \"cases\": [\n+                        {\n+                            \"case_id\": \"c\",\n+                            \"events\": events,\n+                            \"input\": \"显式输入\",\n+                            \"expected_output\": \"显式期望\",\n+                        }\n+                    ],\n+                },\n+            )\n+            trace_id = response.json()[\"trace_id\"]\n+            await client.post(f\"/api/production/traces/{trace_id}/evaluate\", json={\"policy\": \"qa\"})\n+            assert probe.seen[\"input\"] == \"显式输入\"\n+            assert probe.seen[\"expected_output\"] == \"显式期望\"\n+\n+    @pytest.mark.asyncio\n+    async def test_policies_listed_over_http(self, workspace, policy) -> None:\n+        async with self._client(workspace, self._stub()) as client:\n+            rows = (await client.get(\"/api/eval-policies\")).json()\n+            assert [row[\"id\"] for row in rows] == [\"qa\"]\n+            assert rows[0][\"metrics\"][0][\"threshold\"] == 0.7",
+      "hunks": [
+        {
+          "old_start": 30,
+          "old_count": 6,
+          "new_start": 30,
+          "new_count": 8,
+          "lines": [
+            {
+              "type": "context",
+              "content": "def workspace(tmp_path: Path):"
+            },
+            {
+              "type": "context",
+              "content": "    evals_root = tmp_path / \"evals\""
+            },
+            {
+              "type": "context",
+              "content": "    shutil.copytree(REPO / \"evals\", evals_root)"
+            },
+            {
+              "type": "added",
+              "content": "    # 仓库自带的 eval-policies 示例不进本套件：测试自写可控策略"
+            },
+            {
+              "type": "added",
+              "content": "    shutil.rmtree(evals_root / \"eval-policies\", ignore_errors=True)"
+            },
+            {
+              "type": "context",
+              "content": "    shutil.copytree(REPO / \"fixtures\", tmp_path / \"fixtures\")"
+            },
+            {
+              "type": "context",
+              "content": "    (evals_root / \"agents\" / \"local-fake.yaml\").write_text(LOCAL_AGENT, encoding=\"utf-8\")"
+            },
+            {
+              "type": "context",
+              "content": "    data_root = tmp_path / \"data\""
+            }
+          ]
+        },
+        {
+          "old_start": 336,
+          "old_count": 3,
+          "new_start": 338,
+          "new_count": 243,
+          "lines": [
+            {
+              "type": "context",
+              "content": "            store.get_meta(\"../escape\")"
+            },
+            {
+              "type": "context",
+              "content": "        with pytest.raises(InvalidCallError):"
+            },
+            {
+              "type": "context",
+              "content": "            store.load_events(\"../escape\")"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "class TestOnlineEval:"
+            },
+            {
+              "type": "added",
+              "content": "    \"\"\"§61：参考无关 judge——pair 提取、策略执行、结果落账。\"\"\""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    @staticmethod"
+            },
+            {
+              "type": "added",
+              "content": "    def _client(workspace, evaluator) -> httpx.AsyncClient:"
+            },
+            {
+              "type": "added",
+              "content": "        evals_root, data_root = workspace"
+            },
+            {
+              "type": "added",
+              "content": "        app = create_app("
+            },
+            {
+              "type": "added",
+              "content": "            evals_root=evals_root,"
+            },
+            {
+              "type": "added",
+              "content": "            data_root=data_root,"
+            },
+            {
+              "type": "added",
+              "content": "            fixtures_root=REPO / \"fixtures\","
+            },
+            {
+              "type": "added",
+              "content": "            production_evaluator=evaluator,"
+            },
+            {
+              "type": "added",
+              "content": "        )"
+            },
+            {
+              "type": "added",
+              "content": "        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=\"http://test\")"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    @staticmethod"
+            },
+            {
+              "type": "added",
+              "content": "    def _stub(scores: dict[str, float] | None = None, fail: bool = False):"
+            },
+            {
+              "type": "added",
+              "content": "        class StubAdapter:"
+            },
+            {
+              "type": "added",
+              "content": "            def version(self) -> str | None:"
+            },
+            {
+              "type": "added",
+              "content": "                return \"stub-1.0\""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "            async def evaluate(self, metric_id, threshold, trace, model=None):"
+            },
+            {
+              "type": "added",
+              "content": "                if fail:"
+            },
+            {
+              "type": "added",
+              "content": "                    raise RuntimeError(\"judge provider down\")"
+            },
+            {
+              "type": "added",
+              "content": "                score = (scores or {}).get(metric_id, 0.9)"
+            },
+            {
+              "type": "added",
+              "content": "                return score, \"stub reason\""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "        return StubAdapter()"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    @pytest.fixture()"
+            },
+            {
+              "type": "added",
+              "content": "    def policy(self, workspace) -> None:"
+            },
+            {
+              "type": "added",
+              "content": "        evals_root, _ = workspace"
+            },
+            {
+              "type": "added",
+              "content": "        (evals_root / \"eval-policies\").mkdir(exist_ok=True)"
+            },
+            {
+              "type": "added",
+              "content": "        (evals_root / \"eval-policies\" / \"qa.yaml\").write_text("
+            },
+            {
+              "type": "added",
+              "content": "            \"id: qa\\n\""
+            },
+            {
+              "type": "added",
+              "content": "            \"display_name: QA judge\\n\""
+            },
+            {
+              "type": "added",
+              "content": "            \"metrics:\\n\""
+            },
+            {
+              "type": "added",
+              "content": "            \"  - id: agent.task_completion\\n\""
+            },
+            {
+              "type": "added",
+              "content": "            \"    threshold: 0.7\\n\""
+            },
+            {
+              "type": "added",
+              "content": "            \"  - id: agent.step_efficiency\\n\""
+            },
+            {
+              "type": "added",
+              "content": "            \"    threshold: 0.5\\n\","
+            },
+            {
+              "type": "added",
+              "content": "            encoding=\"utf-8\","
+            },
+            {
+              "type": "added",
+              "content": "        )"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    async def _ingest(self, client) -> str:"
+            },
+            {
+              "type": "added",
+              "content": "        events = ["
+            },
+            {
+              "type": "added",
+              "content": "            {"
+            },
+            {
+              "type": "added",
+              "content": "                \"event_id\": \"e1\","
+            },
+            {
+              "type": "added",
+              "content": "                \"trace_id\": \"t1\","
+            },
+            {
+              "type": "added",
+              "content": "                \"type\": \"run.started\","
+            },
+            {
+              "type": "added",
+              "content": "                \"timestamp\": \"2026-10-03T10:00:00+08:00\","
+            },
+            {
+              "type": "added",
+              "content": "                \"data\": {\"input\": \"帮我查订单\"},"
+            },
+            {
+              "type": "added",
+              "content": "            },"
+            },
+            {
+              "type": "added",
+              "content": "            {"
+            },
+            {
+              "type": "added",
+              "content": "                \"event_id\": \"e2\","
+            },
+            {
+              "type": "added",
+              "content": "                \"trace_id\": \"t1\","
+            },
+            {
+              "type": "added",
+              "content": "                \"type\": \"tool.call\","
+            },
+            {
+              "type": "added",
+              "content": "                \"timestamp\": \"2026-10-03T10:00:01+08:00\","
+            },
+            {
+              "type": "added",
+              "content": "                \"data\": {\"name\": \"order.search\"},"
+            },
+            {
+              "type": "added",
+              "content": "            },"
+            },
+            {
+              "type": "added",
+              "content": "            {"
+            },
+            {
+              "type": "added",
+              "content": "                \"event_id\": \"e3\","
+            },
+            {
+              "type": "added",
+              "content": "                \"trace_id\": \"t1\","
+            },
+            {
+              "type": "added",
+              "content": "                \"type\": \"run.finished\","
+            },
+            {
+              "type": "added",
+              "content": "                \"timestamp\": \"2026-10-03T10:00:02+08:00\","
+            },
+            {
+              "type": "added",
+              "content": "                \"data\": {\"output\": \"订单已发货\", \"status\": \"success\"},"
+            },
+            {
+              "type": "added",
+              "content": "            },"
+            },
+            {
+              "type": "added",
+              "content": "        ]"
+            },
+            {
+              "type": "added",
+              "content": "        response = await client.post("
+            },
+            {
+              "type": "added",
+              "content": "            \"/api/production/traces\","
+            },
+            {
+              "type": "added",
+              "content": "            json={"
+            },
+            {
+              "type": "added",
+              "content": "                \"source\": \"platform\","
+            },
+            {
+              "type": "added",
+              "content": "                \"cases\": ["
+            },
+            {
+              "type": "added",
+              "content": "                    {\"case_id\": \"conv-ok\", \"events\": events, \"expected_output\": \"已发货\"},"
+            },
+            {
+              "type": "added",
+              "content": "                    # 无 input/output：unextractable，如实计数"
+            },
+            {
+              "type": "added",
+              "content": "                    {\"case_id\": \"conv-empty\", \"events\": [events[1]]},"
+            },
+            {
+              "type": "added",
+              "content": "                ],"
+            },
+            {
+              "type": "added",
+              "content": "            },"
+            },
+            {
+              "type": "added",
+              "content": "        )"
+            },
+            {
+              "type": "added",
+              "content": "        assert response.status_code == 201, response.text"
+            },
+            {
+              "type": "added",
+              "content": "        return response.json()[\"trace_id\"]"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    @pytest.mark.asyncio"
+            },
+            {
+              "type": "added",
+              "content": "    async def test_evaluate_full_flow(self, workspace, policy) -> None:"
+            },
+            {
+              "type": "added",
+              "content": "        async with self._client(workspace, self._stub()) as client:"
+            },
+            {
+              "type": "added",
+              "content": "            trace_id = await self._ingest(client)"
+            },
+            {
+              "type": "added",
+              "content": "            response = await client.post("
+            },
+            {
+              "type": "added",
+              "content": "                f\"/api/production/traces/{trace_id}/evaluate\","
+            },
+            {
+              "type": "added",
+              "content": "                json={\"policy\": \"qa\"},"
+            },
+            {
+              "type": "added",
+              "content": "            )"
+            },
+            {
+              "type": "added",
+              "content": "            assert response.status_code == 201, response.text"
+            },
+            {
+              "type": "added",
+              "content": "            payload = response.json()"
+            },
+            {
+              "type": "added",
+              "content": "            summary = payload[\"summary\"]"
+            },
+            {
+              "type": "added",
+              "content": "            assert summary[\"cases_evaluated\"] == 1"
+            },
+            {
+              "type": "added",
+              "content": "            assert summary[\"cases_unextractable\"] == [\"conv-empty\"]"
+            },
+            {
+              "type": "added",
+              "content": "            # 事件提取：input 来自 run.started，output 来自 run.finished"
+            },
+            {
+              "type": "added",
+              "content": "            row = next(r for r in payload[\"rows\"] if r[\"metric\"] == \"agent.task_completion\")"
+            },
+            {
+              "type": "added",
+              "content": "            assert row[\"case_id\"] == \"conv-ok\""
+            },
+            {
+              "type": "added",
+              "content": "            assert row[\"verdict\"] == \"pass\"  # 0.9 >= 0.7"
+            },
+            {
+              "type": "added",
+              "content": "            eff = next(r for r in payload[\"rows\"] if r[\"metric\"] == \"agent.step_efficiency\")"
+            },
+            {
+              "type": "added",
+              "content": "            assert eff[\"verdict\"] == \"pass\"  # 0.9 >= 0.5"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "            # 历史可读"
+            },
+            {
+              "type": "added",
+              "content": "            history = (await client.get(f\"/api/production/traces/{trace_id}/evaluations\")).json()"
+            },
+            {
+              "type": "added",
+              "content": "            assert history and history[0][\"evaluation_id\"] == payload[\"evaluation_id\"]"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    @pytest.mark.asyncio"
+            },
+            {
+              "type": "added",
+              "content": "    async def test_score_below_threshold_fails(self, workspace, policy) -> None:"
+            },
+            {
+              "type": "added",
+              "content": "        stub = self._stub(scores={\"agent.task_completion\": 0.4, \"agent.step_efficiency\": 0.2})"
+            },
+            {
+              "type": "added",
+              "content": "        async with self._client(workspace, stub) as client:"
+            },
+            {
+              "type": "added",
+              "content": "            trace_id = await self._ingest(client)"
+            },
+            {
+              "type": "added",
+              "content": "            payload = ("
+            },
+            {
+              "type": "added",
+              "content": "                await client.post("
+            },
+            {
+              "type": "added",
+              "content": "                    f\"/api/production/traces/{trace_id}/evaluate\", json={\"policy\": \"qa\"}"
+            },
+            {
+              "type": "added",
+              "content": "                )"
+            },
+            {
+              "type": "added",
+              "content": "            ).json()"
+            },
+            {
+              "type": "added",
+              "content": "            verdicts = {r[\"metric\"]: r[\"verdict\"] for r in payload[\"rows\"]}"
+            },
+            {
+              "type": "added",
+              "content": "            assert verdicts == {"
+            },
+            {
+              "type": "added",
+              "content": "                \"agent.task_completion\": \"fail\","
+            },
+            {
+              "type": "added",
+              "content": "                \"agent.step_efficiency\": \"fail\","
+            },
+            {
+              "type": "added",
+              "content": "            }"
+            },
+            {
+              "type": "added",
+              "content": "            assert payload[\"summary\"][\"metrics\"][\"agent.task_completion\"][\"mean_score\"] == 0.4"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    @pytest.mark.asyncio"
+            },
+            {
+              "type": "added",
+              "content": "    async def test_judge_error_lands_as_error_row(self, workspace, policy) -> None:"
+            },
+            {
+              "type": "added",
+              "content": "        async with self._client(workspace, self._stub(fail=True)) as client:"
+            },
+            {
+              "type": "added",
+              "content": "            trace_id = await self._ingest(client)"
+            },
+            {
+              "type": "added",
+              "content": "            payload = ("
+            },
+            {
+              "type": "added",
+              "content": "                await client.post("
+            },
+            {
+              "type": "added",
+              "content": "                    f\"/api/production/traces/{trace_id}/evaluate\", json={\"policy\": \"qa\"}"
+            },
+            {
+              "type": "added",
+              "content": "                )"
+            },
+            {
+              "type": "added",
+              "content": "            ).json()"
+            },
+            {
+              "type": "added",
+              "content": "            assert all(r[\"verdict\"] == \"error\" for r in payload[\"rows\"])"
+            },
+            {
+              "type": "added",
+              "content": "            assert \"judge provider down\" in payload[\"rows\"][0][\"reason\"]"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    @pytest.mark.asyncio"
+            },
+            {
+              "type": "added",
+              "content": "    async def test_missing_sdk_is_skipped(self, workspace, policy) -> None:"
+            },
+            {
+              "type": "added",
+              "content": "        class NoSDK:"
+            },
+            {
+              "type": "added",
+              "content": "            def version(self) -> str | None:"
+            },
+            {
+              "type": "added",
+              "content": "                return None"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "        async with self._client(workspace, NoSDK()) as client:"
+            },
+            {
+              "type": "added",
+              "content": "            trace_id = await self._ingest(client)"
+            },
+            {
+              "type": "added",
+              "content": "            payload = ("
+            },
+            {
+              "type": "added",
+              "content": "                await client.post("
+            },
+            {
+              "type": "added",
+              "content": "                    f\"/api/production/traces/{trace_id}/evaluate\", json={\"policy\": \"qa\"}"
+            },
+            {
+              "type": "added",
+              "content": "                )"
+            },
+            {
+              "type": "added",
+              "content": "            ).json()"
+            },
+            {
+              "type": "added",
+              "content": "            assert all(r[\"verdict\"] == \"skipped\" for r in payload[\"rows\"])"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    @pytest.mark.asyncio"
+            },
+            {
+              "type": "added",
+              "content": "    async def test_unknown_policy_or_trace_or_empty(self, workspace, policy) -> None:"
+            },
+            {
+              "type": "added",
+              "content": "        async with self._client(workspace, self._stub()) as client:"
+            },
+            {
+              "type": "added",
+              "content": "            trace_id = await self._ingest(client)"
+            },
+            {
+              "type": "added",
+              "content": "            assert ("
+            },
+            {
+              "type": "added",
+              "content": "                await client.post("
+            },
+            {
+              "type": "added",
+              "content": "                    f\"/api/production/traces/{trace_id}/evaluate\", json={\"policy\": \"nope\"}"
+            },
+            {
+              "type": "added",
+              "content": "                )"
+            },
+            {
+              "type": "added",
+              "content": "            ).status_code == 400"
+            },
+            {
+              "type": "added",
+              "content": "            assert ("
+            },
+            {
+              "type": "added",
+              "content": "                await client.post("
+            },
+            {
+              "type": "added",
+              "content": "                    \"/api/production/traces/prod_missing/evaluate\", json={\"policy\": \"qa\"}"
+            },
+            {
+              "type": "added",
+              "content": "                )"
+            },
+            {
+              "type": "added",
+              "content": "            ).status_code == 404"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    @pytest.mark.asyncio"
+            },
+            {
+              "type": "added",
+              "content": "    async def test_no_evaluable_cases_is_422(self, workspace, policy) -> None:"
+            },
+            {
+              "type": "added",
+              "content": "        async with self._client(workspace, self._stub()) as client:"
+            },
+            {
+              "type": "added",
+              "content": "            response = await client.post("
+            },
+            {
+              "type": "added",
+              "content": "                \"/api/production/traces\","
+            },
+            {
+              "type": "added",
+              "content": "                json={"
+            },
+            {
+              "type": "added",
+              "content": "                    \"source\": \"platform\","
+            },
+            {
+              "type": "added",
+              "content": "                    \"cases\": ["
+            },
+            {
+              "type": "added",
+              "content": "                        {"
+            },
+            {
+              "type": "added",
+              "content": "                            \"case_id\": \"c\","
+            },
+            {
+              "type": "added",
+              "content": "                            \"events\": [{\"event_id\": \"e\", \"trace_id\": \"t\", \"type\": \"tool.call\"}],"
+            },
+            {
+              "type": "added",
+              "content": "                        }"
+            },
+            {
+              "type": "added",
+              "content": "                    ],"
+            },
+            {
+              "type": "added",
+              "content": "                },"
+            },
+            {
+              "type": "added",
+              "content": "            )"
+            },
+            {
+              "type": "added",
+              "content": "            trace_id = response.json()[\"trace_id\"]"
+            },
+            {
+              "type": "added",
+              "content": "            response = await client.post("
+            },
+            {
+              "type": "added",
+              "content": "                f\"/api/production/traces/{trace_id}/evaluate\", json={\"policy\": \"qa\"}"
+            },
+            {
+              "type": "added",
+              "content": "            )"
+            },
+            {
+              "type": "added",
+              "content": "            assert response.status_code == 422"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    @pytest.mark.asyncio"
+            },
+            {
+              "type": "added",
+              "content": "    async def test_explicit_ingest_fields_win_over_events(self, workspace, policy) -> None:"
+            },
+            {
+              "type": "added",
+              "content": "        class Probe:"
+            },
+            {
+              "type": "added",
+              "content": "            def version(self) -> str | None:"
+            },
+            {
+              "type": "added",
+              "content": "                return \"probe\""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "            async def evaluate(self, metric_id, threshold, trace, model=None):"
+            },
+            {
+              "type": "added",
+              "content": "                self.seen = trace"
+            },
+            {
+              "type": "added",
+              "content": "                return 1.0, \"ok\""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "        probe = Probe()"
+            },
+            {
+              "type": "added",
+              "content": "        async with self._client(workspace, probe) as client:"
+            },
+            {
+              "type": "added",
+              "content": "            events = ["
+            },
+            {
+              "type": "added",
+              "content": "                {"
+            },
+            {
+              "type": "added",
+              "content": "                    \"event_id\": \"e1\","
+            },
+            {
+              "type": "added",
+              "content": "                    \"trace_id\": \"t\","
+            },
+            {
+              "type": "added",
+              "content": "                    \"type\": \"run.started\","
+            },
+            {
+              "type": "added",
+              "content": "                    \"timestamp\": \"2026-10-03T10:00:00+08:00\","
+            },
+            {
+              "type": "added",
+              "content": "                    \"data\": {\"input\": \"事件里的输入\"},"
+            },
+            {
+              "type": "added",
+              "content": "                },"
+            },
+            {
+              "type": "added",
+              "content": "                {"
+            },
+            {
+              "type": "added",
+              "content": "                    \"event_id\": \"e2\","
+            },
+            {
+              "type": "added",
+              "content": "                    \"trace_id\": \"t\","
+            },
+            {
+              "type": "added",
+              "content": "                    \"type\": \"run.finished\","
+            },
+            {
+              "type": "added",
+              "content": "                    \"timestamp\": \"2026-10-03T10:00:01+08:00\","
+            },
+            {
+              "type": "added",
+              "content": "                    \"data\": {\"output\": \"事件里的输出\"},"
+            },
+            {
+              "type": "added",
+              "content": "                },"
+            },
+            {
+              "type": "added",
+              "content": "            ]"
+            },
+            {
+              "type": "added",
+              "content": "            response = await client.post("
+            },
+            {
+              "type": "added",
+              "content": "                \"/api/production/traces\","
+            },
+            {
+              "type": "added",
+              "content": "                json={"
+            },
+            {
+              "type": "added",
+              "content": "                    \"source\": \"platform\","
+            },
+            {
+              "type": "added",
+              "content": "                    \"cases\": ["
+            },
+            {
+              "type": "added",
+              "content": "                        {"
+            },
+            {
+              "type": "added",
+              "content": "                            \"case_id\": \"c\","
+            },
+            {
+              "type": "added",
+              "content": "                            \"events\": events,"
+            },
+            {
+              "type": "added",
+              "content": "                            \"input\": \"显式输入\","
+            },
+            {
+              "type": "added",
+              "content": "                            \"expected_output\": \"显式期望\","
+            },
+            {
+              "type": "added",
+              "content": "                        }"
+            },
+            {
+              "type": "added",
+              "content": "                    ],"
+            },
+            {
+              "type": "added",
+              "content": "                },"
+            },
+            {
+              "type": "added",
+              "content": "            )"
+            },
+            {
+              "type": "added",
+              "content": "            trace_id = response.json()[\"trace_id\"]"
+            },
+            {
+              "type": "added",
+              "content": "            await client.post(f\"/api/production/traces/{trace_id}/evaluate\", json={\"policy\": \"qa\"})"
+            },
+            {
+              "type": "added",
+              "content": "            assert probe.seen[\"input\"] == \"显式输入\""
+            },
+            {
+              "type": "added",
+              "content": "            assert probe.seen[\"expected_output\"] == \"显式期望\""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    @pytest.mark.asyncio"
+            },
+            {
+              "type": "added",
+              "content": "    async def test_policies_listed_over_http(self, workspace, policy) -> None:"
+            },
+            {
+              "type": "added",
+              "content": "        async with self._client(workspace, self._stub()) as client:"
+            },
+            {
+              "type": "added",
+              "content": "            rows = (await client.get(\"/api/eval-policies\")).json()"
+            },
+            {
+              "type": "added",
+              "content": "            assert [row[\"id\"] for row in rows] == [\"qa\"]"
+            },
+            {
+              "type": "added",
+              "content": "            assert rows[0][\"metrics\"][0][\"threshold\"] == 0.7"
+            }
+          ]
+        }
+      ],
+      "insertions": 242,
+      "deletions": 0,
+      "is_binary": false,
+      "is_new": false,
+      "is_deleted": false,
+      "is_large": false,
+      "size_bytes": null,
+      "skipped_reason": null
+    },
+    {
+      "old_path": "web/src/lib/evaluation-api.ts",
+      "new_path": "web/src/lib/evaluation-api.ts",
+      "diff_raw": "diff --git a/web/src/lib/evaluation-api.ts b/web/src/lib/evaluation-api.ts\nindex 5d69b02..1da7a4a 100644\n--- a/web/src/lib/evaluation-api.ts\n+++ b/web/src/lib/evaluation-api.ts\n@@ -182,8 +182,53 @@ export const evaluationApi = {\n     get<ProductionTraceView>(\n       `/production/traces/${encodeURIComponent(id)}/trace${caseId ? `?case_id=${encodeURIComponent(caseId)}` : \"\"}`,\n     ),\n+  // §61 Online Eval\n+  evalPolicies: () => get<EvalPolicyRow[]>(\"/eval-policies\"),\n+  evaluateProductionTrace: (id: string, policy: string) =>\n+    post<EvaluationResult>(\n+      `/production/traces/${encodeURIComponent(id)}/evaluate`,\n+      { policy },\n+    ),\n+  productionEvaluations: (id: string) =>\n+    get<EvaluationResult[]>(`/production/traces/${encodeURIComponent(id)}/evaluations`),\n };\n \n+export interface EvalPolicyRow {\n+  id: string;\n+  display_name: string;\n+  description: string;\n+  judge_model: string | null;\n+  timeout_seconds: number;\n+  metrics: { id: string; threshold: number | null }[];\n+}\n+\n+export interface EvaluationRow {\n+  case_id: string;\n+  metric: string;\n+  threshold: number | null;\n+  score: number | null;\n+  verdict: \"pass\" | \"fail\" | \"error\" | \"skipped\";\n+  reason: string | null;\n+}\n+\n+export interface EvaluationSummary {\n+  policy: string;\n+  cases_total: number;\n+  cases_evaluated: number;\n+  cases_unextractable: string[];\n+  metrics: Record<\n+    string,\n+    { pass: number; fail: number; error: number; mean_score: number | null }\n+  >;\n+}\n+\n+export interface EvaluationResult {\n+  evaluation_id: string;\n+  trace_id?: string;\n+  summary: EvaluationSummary;\n+  rows: EvaluationRow[];\n+}\n+\n export interface ProductionTraceMeta {\n   trace_id: string;\n   source: string;",
+      "hunks": [
+        {
+          "old_start": 182,
+          "old_count": 8,
+          "new_start": 182,
+          "new_count": 53,
+          "lines": [
+            {
+              "type": "context",
+              "content": "    get<ProductionTraceView>("
+            },
+            {
+              "type": "context",
+              "content": "      `/production/traces/${encodeURIComponent(id)}/trace${caseId ? `?case_id=${encodeURIComponent(caseId)}` : \"\"}`,"
+            },
+            {
+              "type": "context",
+              "content": "    ),"
+            },
+            {
+              "type": "added",
+              "content": "  // §61 Online Eval"
+            },
+            {
+              "type": "added",
+              "content": "  evalPolicies: () => get<EvalPolicyRow[]>(\"/eval-policies\"),"
+            },
+            {
+              "type": "added",
+              "content": "  evaluateProductionTrace: (id: string, policy: string) =>"
+            },
+            {
+              "type": "added",
+              "content": "    post<EvaluationResult>("
+            },
+            {
+              "type": "added",
+              "content": "      `/production/traces/${encodeURIComponent(id)}/evaluate`,"
+            },
+            {
+              "type": "added",
+              "content": "      { policy },"
+            },
+            {
+              "type": "added",
+              "content": "    ),"
+            },
+            {
+              "type": "added",
+              "content": "  productionEvaluations: (id: string) =>"
+            },
+            {
+              "type": "added",
+              "content": "    get<EvaluationResult[]>(`/production/traces/${encodeURIComponent(id)}/evaluations`),"
+            },
+            {
+              "type": "context",
+              "content": "};"
+            },
+            {
+              "type": "context",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "export interface EvalPolicyRow {"
+            },
+            {
+              "type": "added",
+              "content": "  id: string;"
+            },
+            {
+              "type": "added",
+              "content": "  display_name: string;"
+            },
+            {
+              "type": "added",
+              "content": "  description: string;"
+            },
+            {
+              "type": "added",
+              "content": "  judge_model: string | null;"
+            },
+            {
+              "type": "added",
+              "content": "  timeout_seconds: number;"
+            },
+            {
+              "type": "added",
+              "content": "  metrics: { id: string; threshold: number | null }[];"
+            },
+            {
+              "type": "added",
+              "content": "}"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "export interface EvaluationRow {"
+            },
+            {
+              "type": "added",
+              "content": "  case_id: string;"
+            },
+            {
+              "type": "added",
+              "content": "  metric: string;"
+            },
+            {
+              "type": "added",
+              "content": "  threshold: number | null;"
+            },
+            {
+              "type": "added",
+              "content": "  score: number | null;"
+            },
+            {
+              "type": "added",
+              "content": "  verdict: \"pass\" | \"fail\" | \"error\" | \"skipped\";"
+            },
+            {
+              "type": "added",
+              "content": "  reason: string | null;"
+            },
+            {
+              "type": "added",
+              "content": "}"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "export interface EvaluationSummary {"
+            },
+            {
+              "type": "added",
+              "content": "  policy: string;"
+            },
+            {
+              "type": "added",
+              "content": "  cases_total: number;"
+            },
+            {
+              "type": "added",
+              "content": "  cases_evaluated: number;"
+            },
+            {
+              "type": "added",
+              "content": "  cases_unextractable: string[];"
+            },
+            {
+              "type": "added",
+              "content": "  metrics: Record<"
+            },
+            {
+              "type": "added",
+              "content": "    string,"
+            },
+            {
+              "type": "added",
+              "content": "    { pass: number; fail: number; error: number; mean_score: number | null }"
+            },
+            {
+              "type": "added",
+              "content": "  >;"
+            },
+            {
+              "type": "added",
+              "content": "}"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "export interface EvaluationResult {"
+            },
+            {
+              "type": "added",
+              "content": "  evaluation_id: string;"
+            },
+            {
+              "type": "added",
+              "content": "  trace_id?: string;"
+            },
+            {
+              "type": "added",
+              "content": "  summary: EvaluationSummary;"
+            },
+            {
+              "type": "added",
+              "content": "  rows: EvaluationRow[];"
+            },
+            {
+              "type": "added",
+              "content": "}"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "context",
+              "content": "export interface ProductionTraceMeta {"
+            },
+            {
+              "type": "context",
+              "content": "  trace_id: string;"
+            },
+            {
+              "type": "context",
+              "content": "  source: string;"
+            }
+          ]
+        }
+      ],
+      "insertions": 45,
+      "deletions": 0,
+      "is_binary": false,
+      "is_new": false,
+      "is_deleted": false,
+      "is_large": false,
+      "size_bytes": null,
+      "skipped_reason": null
+    },
+    {
+      "old_path": "web/src/pages/Production.tsx",
+      "new_path": "web/src/pages/Production.tsx",
+      "diff_raw": "diff --git a/web/src/pages/Production.tsx b/web/src/pages/Production.tsx\nindex 214cd79..99bca0c 100644\n--- a/web/src/pages/Production.tsx\n+++ b/web/src/pages/Production.tsx\n@@ -1,7 +1,7 @@\n import * as React from \"react\";\n-import { useQuery } from \"@tanstack/react-query\";\n+import { useMutation, useQuery, useQueryClient } from \"@tanstack/react-query\";\n import { Link, useParams } from \"react-router\";\n-import { ArrowLeft, Radio } from \"lucide-react\";\n+import { ArrowLeft, Play, Radio } from \"lucide-react\";\n \n import { Mono, PageHeader, Section } from \"@/components/common/primitives\";\n import { QueryState } from \"@/components/common/states\";\n@@ -15,9 +15,25 @@ import {\n   SelectTrigger,\n   SelectValue,\n } from \"@/components/ui/select\";\n+import {\n+  Table,\n+  TableBody,\n+  TableCell,\n+  TableHead,\n+  TableHeader,\n+  TableRow,\n+} from \"@/components/ui/table\";\n import type { SpanNode } from \"@/lib/api-types\";\n import { fmtRelative } from \"@/lib/format\";\n-import { evaluationApi } from \"@/lib/evaluation-api\";\n+import { evaluationApi, type EvaluationResult } from \"@/lib/evaluation-api\";\n+\n+function eventCount(entry: unknown): number {\n+  if (typeof entry === \"number\") return entry;\n+  if (entry && typeof entry === \"object\" && \"events\" in entry) {\n+    return Number((entry as { events: number }).events);\n+  }\n+  return 0;\n+}\n \n /** §53 Production Trace：摄取自生产侧的链路（OTel / 平台事件），只读查看。\n  *  Span Tree 与 Run Trace Viewer 共用同一构建器——分析面同构的第一步。 */\n@@ -128,7 +144,7 @@ export function ProductionTraceDetail() {\n               <SelectContent>\n                 {caseIds.map((id) => (\n                   <SelectItem key={id} value={id}>\n-                    {id}（{data.cases[id]} events）\n+                    {id}（{eventCount(data.cases[id])} events）\n                   </SelectItem>\n                 ))}\n               </SelectContent>\n@@ -149,6 +165,145 @@ export function ProductionTraceDetail() {\n           <TraceTree root={(view.data?.root ?? null) as SpanNode | null} />\n         </QueryState>\n       </Section>\n+      <EvaluationSection traceId={traceId} />\n     </div>\n   );\n }\n+\n+/** §61 Online Eval：参考无关 judge——选策略、运行、看结果与历史。 */\n+function EvaluationSection({ traceId }: { traceId: string }) {\n+  const queryClient = useQueryClient();\n+  const policies = useQuery({ queryKey: [\"eval-policies\"], queryFn: evaluationApi.evalPolicies });\n+  const history = useQuery({\n+    queryKey: [\"production-evaluations\", traceId],\n+    queryFn: () => evaluationApi.productionEvaluations(traceId),\n+  });\n+  const [policyId, setPolicyId] = React.useState(\"\");\n+  const [latest, setLatest] = React.useState<EvaluationResult | null>(null);\n+\n+  React.useEffect(() => {\n+    if (!policyId && policies.data?.length) setPolicyId(policies.data[0].id);\n+  }, [policies.data, policyId]);\n+\n+  const run = useMutation({\n+    mutationFn: () => evaluationApi.evaluateProductionTrace(traceId, policyId),\n+    onSuccess: (result) => {\n+      setLatest(result);\n+      void queryClient.invalidateQueries({ queryKey: [\"production-evaluations\", traceId] });\n+    },\n+  });\n+\n+  const shown = latest ?? history.data?.[0] ?? null;\n+  const summary = shown?.summary;\n+\n+  return (\n+    <Section\n+      title=\"Online Eval\"\n+      description=\"§61：参考无关 judge——评测生产对话自身的 (input, output) 对；无 dataset 对齐、无 Gate、不落 Run。\"\n+      actions={\n+        <div className=\"flex items-center gap-2\">\n+          {policies.data && policies.data.length > 0 && (\n+            <Select value={policyId} onValueChange={setPolicyId}>\n+              <SelectTrigger className=\"w-52\">\n+                <SelectValue placeholder=\"选择评测策略\" />\n+              </SelectTrigger>\n+              <SelectContent>\n+                {policies.data.map((p) => (\n+                  <SelectItem key={p.id} value={p.id}>\n+                    {p.display_name}\n+                  </SelectItem>\n+                ))}\n+              </SelectContent>\n+            </Select>\n+          )}\n+          <Button\n+            size=\"sm\"\n+            disabled={!policyId || run.isPending}\n+            onClick={() => run.mutate()}\n+          >\n+            <Play /> {run.isPending ? \"评测中…\" : \"Run Evaluation\"}\n+          </Button>\n+        </div>\n+      }\n+    >\n+      {run.error && (\n+        <p className=\"mb-3 rounded-md border border-[var(--fail)]/30 bg-[var(--fail)]/5 px-3 py-2 text-xs text-[var(--fail)]\">\n+          {(run.error as Error).message}\n+        </p>\n+      )}\n+      {!shown && (\n+        <p className=\"text-xs text-muted-foreground\">\n+          {policies.data?.length\n+            ? \"选择策略后运行；judge 需要 deepeval + 模型凭证。\"\n+            : \"在 evals/eval-policies/*.yaml 定义评测策略后刷新。\"}\n+        </p>\n+      )}\n+      {summary && (\n+        <div className=\"space-y-3\">\n+          <div className=\"flex flex-wrap gap-2 text-xs\">\n+            <Badge variant=\"outline\">\n+              {summary.cases_evaluated} / {summary.cases_total} cases\n+            </Badge>\n+            {summary.cases_unextractable.length > 0 && (\n+              <Badge variant=\"outline\" className=\"text-muted-foreground\">\n+                {summary.cases_unextractable.length} 条无法提取（跳过）\n+              </Badge>\n+            )}\n+            {Object.entries(summary.metrics).map(([metric, stat]) => (\n+              <Badge\n+                key={metric}\n+                variant=\"outline\"\n+                className={stat.fail > 0 || stat.error > 0 ? \"text-[var(--fail)]\" : \"text-[var(--pass)]\"}\n+              >\n+                {metric}: {stat.pass}✓ {stat.fail}✗ {stat.error}err\n+                {stat.mean_score != null && ` · mean ${stat.mean_score}`}\n+              </Badge>\n+            ))}\n+          </div>\n+          <Table>\n+            <TableHeader>\n+              <TableRow>\n+                <TableHead>Case</TableHead>\n+                <TableHead>Metric</TableHead>\n+                <TableHead>Score</TableHead>\n+                <TableHead>Verdict</TableHead>\n+                <TableHead>Reason</TableHead>\n+              </TableRow>\n+            </TableHeader>\n+            <TableBody>\n+              {shown.rows.map((row, index) => (\n+                <TableRow key={`${row.case_id}-${row.metric}-${index}`}>\n+                  <TableCell className=\"font-mono text-xs\">{row.case_id}</TableCell>\n+                  <TableCell className=\"text-xs\">{row.metric}</TableCell>\n+                  <TableCell className=\"tabular text-xs\">{row.score ?? \"—\"}</TableCell>\n+                  <TableCell>\n+                    <Badge\n+                      variant=\"outline\"\n+                      className={\n+                        row.verdict === \"pass\"\n+                          ? \"text-[var(--pass)]\"\n+                          : row.verdict === \"fail\"\n+                            ? \"text-[var(--fail)]\"\n+                            : \"text-muted-foreground\"\n+                      }\n+                    >\n+                      {row.verdict}\n+                    </Badge>\n+                  </TableCell>\n+                  <TableCell className=\"max-w-md truncate text-xs text-muted-foreground\">\n+                    {row.reason ?? \"—\"}\n+                  </TableCell>\n+                </TableRow>\n+              ))}\n+            </TableBody>\n+          </Table>\n+          {history.data && history.data.length > 1 && (\n+            <p className=\"text-xs text-muted-foreground\">\n+              共 {history.data.length} 次评测；最新 {shown.evaluation_id}。\n+            </p>\n+          )}\n+        </div>\n+      )}\n+    </Section>\n+  );\n+}",
+      "hunks": [
+        {
+          "old_start": 1,
+          "old_count": 7,
+          "new_start": 1,
+          "new_count": 7,
+          "lines": [
+            {
+              "type": "context",
+              "content": "import * as React from \"react\";"
+            },
+            {
+              "type": "deleted",
+              "content": "import { useQuery } from \"@tanstack/react-query\";"
+            },
+            {
+              "type": "added",
+              "content": "import { useMutation, useQuery, useQueryClient } from \"@tanstack/react-query\";"
+            },
+            {
+              "type": "context",
+              "content": "import { Link, useParams } from \"react-router\";"
+            },
+            {
+              "type": "deleted",
+              "content": "import { ArrowLeft, Radio } from \"lucide-react\";"
+            },
+            {
+              "type": "added",
+              "content": "import { ArrowLeft, Play, Radio } from \"lucide-react\";"
+            },
+            {
+              "type": "context",
+              "content": ""
+            },
+            {
+              "type": "context",
+              "content": "import { Mono, PageHeader, Section } from \"@/components/common/primitives\";"
+            },
+            {
+              "type": "context",
+              "content": "import { QueryState } from \"@/components/common/states\";"
+            }
+          ]
+        },
+        {
+          "old_start": 15,
+          "old_count": 9,
+          "new_start": 15,
+          "new_count": 25,
+          "lines": [
+            {
+              "type": "context",
+              "content": "  SelectTrigger,"
+            },
+            {
+              "type": "context",
+              "content": "  SelectValue,"
+            },
+            {
+              "type": "context",
+              "content": "} from \"@/components/ui/select\";"
+            },
+            {
+              "type": "added",
+              "content": "import {"
+            },
+            {
+              "type": "added",
+              "content": "  Table,"
+            },
+            {
+              "type": "added",
+              "content": "  TableBody,"
+            },
+            {
+              "type": "added",
+              "content": "  TableCell,"
+            },
+            {
+              "type": "added",
+              "content": "  TableHead,"
+            },
+            {
+              "type": "added",
+              "content": "  TableHeader,"
+            },
+            {
+              "type": "added",
+              "content": "  TableRow,"
+            },
+            {
+              "type": "added",
+              "content": "} from \"@/components/ui/table\";"
+            },
+            {
+              "type": "context",
+              "content": "import type { SpanNode } from \"@/lib/api-types\";"
+            },
+            {
+              "type": "context",
+              "content": "import { fmtRelative } from \"@/lib/format\";"
+            },
+            {
+              "type": "deleted",
+              "content": "import { evaluationApi } from \"@/lib/evaluation-api\";"
+            },
+            {
+              "type": "added",
+              "content": "import { evaluationApi, type EvaluationResult } from \"@/lib/evaluation-api\";"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "function eventCount(entry: unknown): number {"
+            },
+            {
+              "type": "added",
+              "content": "  if (typeof entry === \"number\") return entry;"
+            },
+            {
+              "type": "added",
+              "content": "  if (entry && typeof entry === \"object\" && \"events\" in entry) {"
+            },
+            {
+              "type": "added",
+              "content": "    return Number((entry as { events: number }).events);"
+            },
+            {
+              "type": "added",
+              "content": "  }"
+            },
+            {
+              "type": "added",
+              "content": "  return 0;"
+            },
+            {
+              "type": "added",
+              "content": "}"
+            },
+            {
+              "type": "context",
+              "content": ""
+            },
+            {
+              "type": "context",
+              "content": "/** §53 Production Trace：摄取自生产侧的链路（OTel / 平台事件），只读查看。"
+            },
+            {
+              "type": "context",
+              "content": " *  Span Tree 与 Run Trace Viewer 共用同一构建器——分析面同构的第一步。 */"
+            }
+          ]
+        },
+        {
+          "old_start": 128,
+          "old_count": 7,
+          "new_start": 144,
+          "new_count": 7,
+          "lines": [
+            {
+              "type": "context",
+              "content": "              <SelectContent>"
+            },
+            {
+              "type": "context",
+              "content": "                {caseIds.map((id) => ("
+            },
+            {
+              "type": "context",
+              "content": "                  <SelectItem key={id} value={id}>"
+            },
+            {
+              "type": "deleted",
+              "content": "                    {id}（{data.cases[id]} events）"
+            },
+            {
+              "type": "added",
+              "content": "                    {id}（{eventCount(data.cases[id])} events）"
+            },
+            {
+              "type": "context",
+              "content": "                  </SelectItem>"
+            },
+            {
+              "type": "context",
+              "content": "                ))}"
+            },
+            {
+              "type": "context",
+              "content": "              </SelectContent>"
+            }
+          ]
+        },
+        {
+          "old_start": 149,
+          "old_count": 6,
+          "new_start": 165,
+          "new_count": 145,
+          "lines": [
+            {
+              "type": "context",
+              "content": "          <TraceTree root={(view.data?.root ?? null) as SpanNode | null} />"
+            },
+            {
+              "type": "context",
+              "content": "        </QueryState>"
+            },
+            {
+              "type": "context",
+              "content": "      </Section>"
+            },
+            {
+              "type": "added",
+              "content": "      <EvaluationSection traceId={traceId} />"
+            },
+            {
+              "type": "context",
+              "content": "    </div>"
+            },
+            {
+              "type": "context",
+              "content": "  );"
+            },
+            {
+              "type": "context",
+              "content": "}"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "/** §61 Online Eval：参考无关 judge——选策略、运行、看结果与历史。 */"
+            },
+            {
+              "type": "added",
+              "content": "function EvaluationSection({ traceId }: { traceId: string }) {"
+            },
+            {
+              "type": "added",
+              "content": "  const queryClient = useQueryClient();"
+            },
+            {
+              "type": "added",
+              "content": "  const policies = useQuery({ queryKey: [\"eval-policies\"], queryFn: evaluationApi.evalPolicies });"
+            },
+            {
+              "type": "added",
+              "content": "  const history = useQuery({"
+            },
+            {
+              "type": "added",
+              "content": "    queryKey: [\"production-evaluations\", traceId],"
+            },
+            {
+              "type": "added",
+              "content": "    queryFn: () => evaluationApi.productionEvaluations(traceId),"
+            },
+            {
+              "type": "added",
+              "content": "  });"
+            },
+            {
+              "type": "added",
+              "content": "  const [policyId, setPolicyId] = React.useState(\"\");"
+            },
+            {
+              "type": "added",
+              "content": "  const [latest, setLatest] = React.useState<EvaluationResult | null>(null);"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "  React.useEffect(() => {"
+            },
+            {
+              "type": "added",
+              "content": "    if (!policyId && policies.data?.length) setPolicyId(policies.data[0].id);"
+            },
+            {
+              "type": "added",
+              "content": "  }, [policies.data, policyId]);"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "  const run = useMutation({"
+            },
+            {
+              "type": "added",
+              "content": "    mutationFn: () => evaluationApi.evaluateProductionTrace(traceId, policyId),"
+            },
+            {
+              "type": "added",
+              "content": "    onSuccess: (result) => {"
+            },
+            {
+              "type": "added",
+              "content": "      setLatest(result);"
+            },
+            {
+              "type": "added",
+              "content": "      void queryClient.invalidateQueries({ queryKey: [\"production-evaluations\", traceId] });"
+            },
+            {
+              "type": "added",
+              "content": "    },"
+            },
+            {
+              "type": "added",
+              "content": "  });"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "  const shown = latest ?? history.data?.[0] ?? null;"
+            },
+            {
+              "type": "added",
+              "content": "  const summary = shown?.summary;"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "  return ("
+            },
+            {
+              "type": "added",
+              "content": "    <Section"
+            },
+            {
+              "type": "added",
+              "content": "      title=\"Online Eval\""
+            },
+            {
+              "type": "added",
+              "content": "      description=\"§61：参考无关 judge——评测生产对话自身的 (input, output) 对；无 dataset 对齐、无 Gate、不落 Run。\""
+            },
+            {
+              "type": "added",
+              "content": "      actions={"
+            },
+            {
+              "type": "added",
+              "content": "        <div className=\"flex items-center gap-2\">"
+            },
+            {
+              "type": "added",
+              "content": "          {policies.data && policies.data.length > 0 && ("
+            },
+            {
+              "type": "added",
+              "content": "            <Select value={policyId} onValueChange={setPolicyId}>"
+            },
+            {
+              "type": "added",
+              "content": "              <SelectTrigger className=\"w-52\">"
+            },
+            {
+              "type": "added",
+              "content": "                <SelectValue placeholder=\"选择评测策略\" />"
+            },
+            {
+              "type": "added",
+              "content": "              </SelectTrigger>"
+            },
+            {
+              "type": "added",
+              "content": "              <SelectContent>"
+            },
+            {
+              "type": "added",
+              "content": "                {policies.data.map((p) => ("
+            },
+            {
+              "type": "added",
+              "content": "                  <SelectItem key={p.id} value={p.id}>"
+            },
+            {
+              "type": "added",
+              "content": "                    {p.display_name}"
+            },
+            {
+              "type": "added",
+              "content": "                  </SelectItem>"
+            },
+            {
+              "type": "added",
+              "content": "                ))}"
+            },
+            {
+              "type": "added",
+              "content": "              </SelectContent>"
+            },
+            {
+              "type": "added",
+              "content": "            </Select>"
+            },
+            {
+              "type": "added",
+              "content": "          )}"
+            },
+            {
+              "type": "added",
+              "content": "          <Button"
+            },
+            {
+              "type": "added",
+              "content": "            size=\"sm\""
+            },
+            {
+              "type": "added",
+              "content": "            disabled={!policyId || run.isPending}"
+            },
+            {
+              "type": "added",
+              "content": "            onClick={() => run.mutate()}"
+            },
+            {
+              "type": "added",
+              "content": "          >"
+            },
+            {
+              "type": "added",
+              "content": "            <Play /> {run.isPending ? \"评测中…\" : \"Run Evaluation\"}"
+            },
+            {
+              "type": "added",
+              "content": "          </Button>"
+            },
+            {
+              "type": "added",
+              "content": "        </div>"
+            },
+            {
+              "type": "added",
+              "content": "      }"
+            },
+            {
+              "type": "added",
+              "content": "    >"
+            },
+            {
+              "type": "added",
+              "content": "      {run.error && ("
+            },
+            {
+              "type": "added",
+              "content": "        <p className=\"mb-3 rounded-md border border-[var(--fail)]/30 bg-[var(--fail)]/5 px-3 py-2 text-xs text-[var(--fail)]\">"
+            },
+            {
+              "type": "added",
+              "content": "          {(run.error as Error).message}"
+            },
+            {
+              "type": "added",
+              "content": "        </p>"
+            },
+            {
+              "type": "added",
+              "content": "      )}"
+            },
+            {
+              "type": "added",
+              "content": "      {!shown && ("
+            },
+            {
+              "type": "added",
+              "content": "        <p className=\"text-xs text-muted-foreground\">"
+            },
+            {
+              "type": "added",
+              "content": "          {policies.data?.length"
+            },
+            {
+              "type": "added",
+              "content": "            ? \"选择策略后运行；judge 需要 deepeval + 模型凭证。\""
+            },
+            {
+              "type": "added",
+              "content": "            : \"在 evals/eval-policies/*.yaml 定义评测策略后刷新。\"}"
+            },
+            {
+              "type": "added",
+              "content": "        </p>"
+            },
+            {
+              "type": "added",
+              "content": "      )}"
+            },
+            {
+              "type": "added",
+              "content": "      {summary && ("
+            },
+            {
+              "type": "added",
+              "content": "        <div className=\"space-y-3\">"
+            },
+            {
+              "type": "added",
+              "content": "          <div className=\"flex flex-wrap gap-2 text-xs\">"
+            },
+            {
+              "type": "added",
+              "content": "            <Badge variant=\"outline\">"
+            },
+            {
+              "type": "added",
+              "content": "              {summary.cases_evaluated} / {summary.cases_total} cases"
+            },
+            {
+              "type": "added",
+              "content": "            </Badge>"
+            },
+            {
+              "type": "added",
+              "content": "            {summary.cases_unextractable.length > 0 && ("
+            },
+            {
+              "type": "added",
+              "content": "              <Badge variant=\"outline\" className=\"text-muted-foreground\">"
+            },
+            {
+              "type": "added",
+              "content": "                {summary.cases_unextractable.length} 条无法提取（跳过）"
+            },
+            {
+              "type": "added",
+              "content": "              </Badge>"
+            },
+            {
+              "type": "added",
+              "content": "            )}"
+            },
+            {
+              "type": "added",
+              "content": "            {Object.entries(summary.metrics).map(([metric, stat]) => ("
+            },
+            {
+              "type": "added",
+              "content": "              <Badge"
+            },
+            {
+              "type": "added",
+              "content": "                key={metric}"
+            },
+            {
+              "type": "added",
+              "content": "                variant=\"outline\""
+            },
+            {
+              "type": "added",
+              "content": "                className={stat.fail > 0 || stat.error > 0 ? \"text-[var(--fail)]\" : \"text-[var(--pass)]\"}"
+            },
+            {
+              "type": "added",
+              "content": "              >"
+            },
+            {
+              "type": "added",
+              "content": "                {metric}: {stat.pass}✓ {stat.fail}✗ {stat.error}err"
+            },
+            {
+              "type": "added",
+              "content": "                {stat.mean_score != null && ` · mean ${stat.mean_score}`}"
+            },
+            {
+              "type": "added",
+              "content": "              </Badge>"
+            },
+            {
+              "type": "added",
+              "content": "            ))}"
+            },
+            {
+              "type": "added",
+              "content": "          </div>"
+            },
+            {
+              "type": "added",
+              "content": "          <Table>"
+            },
+            {
+              "type": "added",
+              "content": "            <TableHeader>"
+            },
+            {
+              "type": "added",
+              "content": "              <TableRow>"
+            },
+            {
+              "type": "added",
+              "content": "                <TableHead>Case</TableHead>"
+            },
+            {
+              "type": "added",
+              "content": "                <TableHead>Metric</TableHead>"
+            },
+            {
+              "type": "added",
+              "content": "                <TableHead>Score</TableHead>"
+            },
+            {
+              "type": "added",
+              "content": "                <TableHead>Verdict</TableHead>"
+            },
+            {
+              "type": "added",
+              "content": "                <TableHead>Reason</TableHead>"
+            },
+            {
+              "type": "added",
+              "content": "              </TableRow>"
+            },
+            {
+              "type": "added",
+              "content": "            </TableHeader>"
+            },
+            {
+              "type": "added",
+              "content": "            <TableBody>"
+            },
+            {
+              "type": "added",
+              "content": "              {shown.rows.map((row, index) => ("
+            },
+            {
+              "type": "added",
+              "content": "                <TableRow key={`${row.case_id}-${row.metric}-${index}`}>"
+            },
+            {
+              "type": "added",
+              "content": "                  <TableCell className=\"font-mono text-xs\">{row.case_id}</TableCell>"
+            },
+            {
+              "type": "added",
+              "content": "                  <TableCell className=\"text-xs\">{row.metric}</TableCell>"
+            },
+            {
+              "type": "added",
+              "content": "                  <TableCell className=\"tabular text-xs\">{row.score ?? \"—\"}</TableCell>"
+            },
+            {
+              "type": "added",
+              "content": "                  <TableCell>"
+            },
+            {
+              "type": "added",
+              "content": "                    <Badge"
+            },
+            {
+              "type": "added",
+              "content": "                      variant=\"outline\""
+            },
+            {
+              "type": "added",
+              "content": "                      className={"
+            },
+            {
+              "type": "added",
+              "content": "                        row.verdict === \"pass\""
+            },
+            {
+              "type": "added",
+              "content": "                          ? \"text-[var(--pass)]\""
+            },
+            {
+              "type": "added",
+              "content": "                          : row.verdict === \"fail\""
+            },
+            {
+              "type": "added",
+              "content": "                            ? \"text-[var(--fail)]\""
+            },
+            {
+              "type": "added",
+              "content": "                            : \"text-muted-foreground\""
+            },
+            {
+              "type": "added",
+              "content": "                      }"
+            },
+            {
+              "type": "added",
+              "content": "                    >"
+            },
+            {
+              "type": "added",
+              "content": "                      {row.verdict}"
+            },
+            {
+              "type": "added",
+              "content": "                    </Badge>"
+            },
+            {
+              "type": "added",
+              "content": "                  </TableCell>"
+            },
+            {
+              "type": "added",
+              "content": "                  <TableCell className=\"max-w-md truncate text-xs text-muted-foreground\">"
+            },
+            {
+              "type": "added",
+              "content": "                    {row.reason ?? \"—\"}"
+            },
+            {
+              "type": "added",
+              "content": "                  </TableCell>"
+            },
+            {
+              "type": "added",
+              "content": "                </TableRow>"
+            },
+            {
+              "type": "added",
+              "content": "              ))}"
+            },
+            {
+              "type": "added",
+              "content": "            </TableBody>"
+            },
+            {
+              "type": "added",
+              "content": "          </Table>"
+            },
+            {
+              "type": "added",
+              "content": "          {history.data && history.data.length > 1 && ("
+            },
+            {
+              "type": "added",
+              "content": "            <p className=\"text-xs text-muted-foreground\">"
+            },
+            {
+              "type": "added",
+              "content": "              共 {history.data.length} 次评测；最新 {shown.evaluation_id}。"
+            },
+            {
+              "type": "added",
+              "content": "            </p>"
+            },
+            {
+              "type": "added",
+              "content": "          )}"
+            },
+            {
+              "type": "added",
+              "content": "        </div>"
+            },
+            {
+              "type": "added",
+              "content": "      )}"
+            },
+            {
+              "type": "added",
+              "content": "    </Section>"
+            },
+            {
+              "type": "added",
+              "content": "  );"
+            },
+            {
+              "type": "added",
+              "content": "}"
+            }
+          ]
+        }
+      ],
+      "insertions": 159,
+      "deletions": 4,
+      "is_binary": false,
+      "is_new": false,
+      "is_deleted": false,
+      "is_large": false,
+      "size_bytes": null,
+      "skipped_reason": null
+    },
+    {
+      "old_path": "evals/eval-policies/production-qa.yaml",
+      "new_path": "evals/eval-policies/production-qa.yaml",
+      "diff_raw": "diff --git a/evals/eval-policies/production-qa.yaml b/evals/eval-policies/production-qa.yaml\nnew file mode 100644\nreview-workflow-meta: size_bytes=598 is_large=false\n--- /dev/null\n+++ b/evals/eval-policies/production-qa.yaml\n@@ -0,0 +1,13 @@\n+# Online Eval 策略（§61，Definition Plane 资产）。\n+# metrics 必须是 judge 类（agent.* / 自定义 LLM 判定）；运行时需要\n+# deepeval + judge 模型（未装 SDK 时对应 metric 如实 skipped）。\n+id: production-qa\n+display_name: 生产对话质量\n+description: 参考无关 judge：任务完成度 + 步骤效率，对摄取的生产对话逐条打分\n+judge_model: null        # 缺省走 SDK 默认 judge 模型；PRD §91 分离时填模型名\n+timeout_seconds: 120\n+metrics:\n+  - id: agent.task_completion\n+    threshold: 0.7\n+  - id: agent.step_efficiency\n+    threshold: 0.5",
+      "hunks": [
+        {
+          "old_start": 0,
+          "old_count": 0,
+          "new_start": 1,
+          "new_count": 13,
+          "lines": [
+            {
+              "type": "added",
+              "content": "# Online Eval 策略（§61，Definition Plane 资产）。"
+            },
+            {
+              "type": "added",
+              "content": "# metrics 必须是 judge 类（agent.* / 自定义 LLM 判定）；运行时需要"
+            },
+            {
+              "type": "added",
+              "content": "# deepeval + judge 模型（未装 SDK 时对应 metric 如实 skipped）。"
+            },
+            {
+              "type": "added",
+              "content": "id: production-qa"
+            },
+            {
+              "type": "added",
+              "content": "display_name: 生产对话质量"
+            },
+            {
+              "type": "added",
+              "content": "description: 参考无关 judge：任务完成度 + 步骤效率，对摄取的生产对话逐条打分"
+            },
+            {
+              "type": "added",
+              "content": "judge_model: null        # 缺省走 SDK 默认 judge 模型；PRD §91 分离时填模型名"
+            },
+            {
+              "type": "added",
+              "content": "timeout_seconds: 120"
+            },
+            {
+              "type": "added",
+              "content": "metrics:"
+            },
+            {
+              "type": "added",
+              "content": "  - id: agent.task_completion"
+            },
+            {
+              "type": "added",
+              "content": "    threshold: 0.7"
+            },
+            {
+              "type": "added",
+              "content": "  - id: agent.step_efficiency"
+            },
+            {
+              "type": "added",
+              "content": "    threshold: 0.5"
+            }
+          ]
+        }
+      ],
+      "insertions": 13,
+      "deletions": 0,
+      "is_binary": false,
+      "is_new": true,
+      "is_deleted": false,
+      "is_large": false,
+      "size_bytes": 598,
+      "skipped_reason": null
+    },
+    {
+      "old_path": "review_diff.json",
+      "new_path": "review_diff.json",
+      "diff_raw": "diff --git a/review_diff.json b/review_diff.json\nnew file mode 100644\n--- /dev/null\n+++ b/review_diff.json",
+      "hunks": [],
+      "insertions": 0,
+      "deletions": 0,
+      "is_binary": false,
+      "is_new": true,
+      "is_deleted": false,
+      "is_large": false,
+      "size_bytes": null,
+      "skipped_reason": null
+    },
+    {
+      "old_path": "src/agent_eval/evaluators/online_eval.py",
+      "new_path": "src/agent_eval/evaluators/online_eval.py",
+      "diff_raw": "diff --git a/src/agent_eval/evaluators/online_eval.py b/src/agent_eval/evaluators/online_eval.py\nnew file mode 100644\nreview-workflow-meta: size_bytes=8761 is_large=false\n--- /dev/null\n+++ b/src/agent_eval/evaluators/online_eval.py\n@@ -0,0 +1,247 @@\n+\"\"\"Online Eval（§53 第二片：对摄取的生产 Trace 跑 judge 评测）。\n+\n+**对齐语义（本片的设计决策，§61 有记录）**：参考无关（reference-free）——\n+评测对象是生产 trace 自身的 (input, actual_output) 对，judge 从 policy 取\n+判定标准；**不做**生产 Q/A 到 benchmark dataset 的伪映射。需要 dataset\n+对齐的 Trace Replay 仍是独立后续特性。\n+\n+pair 来源（优先级递减，全部显式、绝不编造）：\n+  1. 摄取时显式给出的 input / expected_output / context（meta 落账）；\n+  2. 事件提取：``run.started.data.input`` / ``model.request`` 末条 user 文本；\n+     ``run.finished.data.output``；\n+  3. 都没有 → 该 case 记为 unextractable，**跳过并如实计数**，不构造空 pair。\n+\n+执行复用 Runner 的同一条 judge 路径（DeepEvalCapabilityAdapter.evaluate），\n+每个 (case, metric) 独立收口：error / timeout 都落行，绝不中断整批。\n+\"\"\"\n+\n+from __future__ import annotations\n+\n+import asyncio\n+import time\n+import uuid\n+from dataclasses import dataclass, field\n+from pathlib import Path\n+from typing import Any\n+\n+from pydantic import BaseModel, Field\n+from yaml import SafeLoader\n+from yaml import load as _yaml_load\n+\n+from agent_eval.errors import InvalidCallError\n+from agent_eval.models.events import TraceEvent\n+\n+DEFAULT_EVAL_TIMEOUT_SECONDS = 120.0\n+\n+\n+# ----------------------------------------------------------------- policy\n+\n+\n+class EvalPolicyMetric(BaseModel):\n+    id: str\n+    threshold: float | None = None\n+\n+\n+class EvalPolicy(BaseModel):\n+    \"\"\"生产评测策略（Definition Plane 资产，`evals/eval-policies/*.yaml`）。\"\"\"\n+\n+    id: str\n+    display_name: str\n+    description: str = \"\"\n+    judge_model: str | None = None\n+    timeout_seconds: float = DEFAULT_EVAL_TIMEOUT_SECONDS\n+    metrics: list[EvalPolicyMetric] = Field(default_factory=list)\n+\n+\n+def load_eval_policies(evals_root: Path) -> list[EvalPolicy]:\n+    directory = evals_root / \"eval-policies\"\n+    if not directory.is_dir():\n+        return []\n+    policies: list[EvalPolicy] = []\n+    for path in sorted(directory.glob(\"*.yaml\")):\n+        with path.open(\"r\", encoding=\"utf-8\") as fh:\n+            raw = _yaml_load(fh, SafeLoader)\n+        try:\n+            policies.append(EvalPolicy.model_validate(raw))\n+        except Exception as exc:\n+            raise InvalidCallError(f\"invalid eval policy '{path.name}': {exc}\") from exc\n+    return policies\n+\n+\n+# ----------------------------------------------------------------- pairs\n+\n+\n+@dataclass\n+class EvalPair:\n+    case_id: str\n+    input: str | None\n+    actual_output: str | None\n+    expected_output: str | None = None\n+    context: list[str] = field(default_factory=list)\n+    tools_called: list[str] = field(default_factory=list)\n+\n+    def to_trace(self) -> dict[str, Any]:\n+        \"\"\"构造 DeepEvalCapabilityAdapter.evaluate 消费的 trace dict。\"\"\"\n+\n+        return {\n+            \"input\": self.input,\n+            \"actual_output\": self.actual_output,\n+            \"expected_output\": self.expected_output,\n+            \"context\": self.context or None,\n+            \"tools_called\": [{\"name\": name} for name in self.tools_called] or None,\n+            \"completion_time\": None,\n+        }\n+\n+\n+def extract_pair(\n+    case_id: str,\n+    meta_entry: dict | None,\n+    events: list[dict],\n+) -> EvalPair | None:\n+    \"\"\"从摄取 meta（显式字段）+ 事件流提取评测对；提取不出返回 None。\"\"\"\n+\n+    meta_entry = meta_entry or {}\n+\n+    def _explicit(key: str) -> Any:\n+        return meta_entry.get(key)\n+\n+    user_input = _explicit(\"input\") or _input_from_events(events)\n+    output = _explicit(\"actual_output\") or _output_from_events(events)\n+    if not user_input or not output:\n+        # 观测不足 ≠ 编造：skip 并由上层如实计数。\n+        return None\n+    return EvalPair(\n+        case_id=case_id,\n+        input=str(user_input),\n+        actual_output=str(output),\n+        expected_output=(\n+            str(_explicit(\"expected_output\")) if _explicit(\"expected_output\") else None\n+        ),\n+        context=[str(item) for item in _explicit(\"context\") or []],\n+        tools_called=_tools_from_events(events),\n+    )\n+\n+\n+def _input_from_events(events: list[dict]) -> str | None:\n+    for event in events:\n+        if event.get(\"type\") == \"run.started\":\n+            value = (event.get(\"data\") or {}).get(\"input\")\n+            if value:\n+                return str(value)\n+    # model.request 的末条 user 文本兜底（多轮取最后一问，与 Runner 终局切片同语义）\n+    for event in reversed(events):\n+        if event.get(\"type\") == \"model.request\":\n+            messages = (event.get(\"data\") or {}).get(\"messages\")\n+            if isinstance(messages, list) and messages:\n+                last = messages[-1]\n+                text = last.get(\"content\") if isinstance(last, dict) else last\n+                if text:\n+                    return str(text)\n+    return None\n+\n+\n+def _output_from_events(events: list[dict]) -> str | None:\n+    for event in reversed(events):\n+        if event.get(\"type\") == \"run.finished\":\n+            value = (event.get(\"data\") or {}).get(\"output\")\n+            if value:\n+                return str(value)\n+    return None\n+\n+\n+def _tools_from_events(events: list[dict]) -> list[str]:\n+    names: list[str] = []\n+    for event in events:\n+        if event.get(\"type\") in {\"tool.call\", \"mcp.call\"}:\n+            data = event.get(\"data\") or {}\n+            name = data.get(\"name\") or data.get(\"tool\")\n+            if name:\n+                names.append(str(name))\n+    return names\n+\n+\n+def validate_events_are_platform(events: list[dict]) -> None:\n+    \"\"\"摄取侧复用：平台事件逐条过 TraceEvent 模型（宁炸勿静默）。\"\"\"\n+\n+    for event in events:\n+        TraceEvent.model_validate(event)\n+\n+\n+# ----------------------------------------------------------------- runner\n+\n+\n+async def run_online_evaluation(\n+    *,\n+    pairs: list[EvalPair],\n+    policy: EvalPolicy,\n+    adapter: Any,\n+    unextractable_cases: list[str],\n+) -> dict:\n+    \"\"\"执行一次 Online Eval，返回可落盘的完整结果（含 rows 与 summary）。\"\"\"\n+\n+    rows: list[dict] = []\n+    for pair in pairs:\n+        trace = pair.to_trace()\n+        for metric in policy.metrics:\n+            rows.append(await _evaluate_one(pair, metric, trace, policy, adapter))\n+\n+    by_metric: dict[str, dict[str, Any]] = {}\n+    for row in rows:\n+        bucket = by_metric.setdefault(\n+            row[\"metric\"], {\"pass\": 0, \"fail\": 0, \"error\": 0, \"skipped\": 0, \"scores\": []}\n+        )\n+        bucket[row[\"verdict\"]] += 1\n+        if row[\"score\"] is not None:\n+            bucket[\"scores\"].append(row[\"score\"])\n+    summary = {\n+        \"policy\": policy.id,\n+        \"cases_total\": len(pairs) + len(unextractable_cases),\n+        \"cases_evaluated\": len(pairs),\n+        \"cases_unextractable\": unextractable_cases,\n+        \"metrics\": {\n+            metric: {\n+                \"pass\": bucket[\"pass\"],\n+                \"fail\": bucket[\"fail\"],\n+                \"error\": bucket[\"error\"],\n+                \"skipped\": bucket[\"skipped\"],\n+                \"mean_score\": (\n+                    round(sum(bucket[\"scores\"]) / len(bucket[\"scores\"]), 4)\n+                    if bucket[\"scores\"]\n+                    else None\n+                ),\n+            }\n+            for metric, bucket in sorted(by_metric.items())\n+        },\n+    }\n+    return {\n+        \"evaluation_id\": f\"eval_{int(time.time() * 1000):08x}{uuid.uuid4().hex[:8]}\",\n+        \"rows\": rows,\n+        \"summary\": summary,\n+    }\n+\n+\n+async def _evaluate_one(\n+    pair: EvalPair, metric: EvalPolicyMetric, trace: dict, policy: EvalPolicy, adapter: Any\n+) -> dict:\n+    base = {\"case_id\": pair.case_id, \"metric\": metric.id, \"threshold\": metric.threshold}\n+    if getattr(adapter, \"version\", lambda: None)() is None:\n+        # 缺 DeepEval SDK：如实 skipped（与 Runner 的能力探测同语义）。\n+        return {**base, \"score\": None, \"verdict\": \"skipped\", \"reason\": \"deepeval unavailable\"}\n+    try:\n+        score, reason = await asyncio.wait_for(\n+            adapter.evaluate(metric.id, metric.threshold, trace, model=policy.judge_model),\n+            timeout=policy.timeout_seconds,\n+        )\n+    except TimeoutError:\n+        return {**base, \"score\": None, \"verdict\": \"error\", \"reason\": \"evaluation timeout\"}\n+    except Exception as exc:  # noqa: BLE001 - 单格失败不中断整批\n+        return {\n+            **base,\n+            \"score\": None,\n+            \"verdict\": \"error\",\n+            \"reason\": f\"{type(exc).__name__}: {exc}\",\n+        }\n+    if score is None:\n+        return {**base, \"score\": None, \"verdict\": \"error\", \"reason\": reason or \"no score\"}\n+    verdict = \"pass\" if metric.threshold is None or score >= metric.threshold else \"fail\"\n+    return {**base, \"score\": score, \"verdict\": verdict, \"reason\": reason}",
+      "hunks": [
+        {
+          "old_start": 0,
+          "old_count": 0,
+          "new_start": 1,
+          "new_count": 247,
+          "lines": [
+            {
+              "type": "added",
+              "content": "\"\"\"Online Eval（§53 第二片：对摄取的生产 Trace 跑 judge 评测）。"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "**对齐语义（本片的设计决策，§61 有记录）**：参考无关（reference-free）——"
+            },
+            {
+              "type": "added",
+              "content": "评测对象是生产 trace 自身的 (input, actual_output) 对，judge 从 policy 取"
+            },
+            {
+              "type": "added",
+              "content": "判定标准；**不做**生产 Q/A 到 benchmark dataset 的伪映射。需要 dataset"
+            },
+            {
+              "type": "added",
+              "content": "对齐的 Trace Replay 仍是独立后续特性。"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "pair 来源（优先级递减，全部显式、绝不编造）："
+            },
+            {
+              "type": "added",
+              "content": "  1. 摄取时显式给出的 input / expected_output / context（meta 落账）；"
+            },
+            {
+              "type": "added",
+              "content": "  2. 事件提取：``run.started.data.input`` / ``model.request`` 末条 user 文本；"
+            },
+            {
+              "type": "added",
+              "content": "     ``run.finished.data.output``；"
+            },
+            {
+              "type": "added",
+              "content": "  3. 都没有 → 该 case 记为 unextractable，**跳过并如实计数**，不构造空 pair。"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "执行复用 Runner 的同一条 judge 路径（DeepEvalCapabilityAdapter.evaluate），"
+            },
+            {
+              "type": "added",
+              "content": "每个 (case, metric) 独立收口：error / timeout 都落行，绝不中断整批。"
+            },
+            {
+              "type": "added",
+              "content": "\"\"\""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "from __future__ import annotations"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "import asyncio"
+            },
+            {
+              "type": "added",
+              "content": "import time"
+            },
+            {
+              "type": "added",
+              "content": "import uuid"
+            },
+            {
+              "type": "added",
+              "content": "from dataclasses import dataclass, field"
+            },
+            {
+              "type": "added",
+              "content": "from pathlib import Path"
+            },
+            {
+              "type": "added",
+              "content": "from typing import Any"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "from pydantic import BaseModel, Field"
+            },
+            {
+              "type": "added",
+              "content": "from yaml import SafeLoader"
+            },
+            {
+              "type": "added",
+              "content": "from yaml import load as _yaml_load"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "from agent_eval.errors import InvalidCallError"
+            },
+            {
+              "type": "added",
+              "content": "from agent_eval.models.events import TraceEvent"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "DEFAULT_EVAL_TIMEOUT_SECONDS = 120.0"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "# ----------------------------------------------------------------- policy"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "class EvalPolicyMetric(BaseModel):"
+            },
+            {
+              "type": "added",
+              "content": "    id: str"
+            },
+            {
+              "type": "added",
+              "content": "    threshold: float | None = None"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "class EvalPolicy(BaseModel):"
+            },
+            {
+              "type": "added",
+              "content": "    \"\"\"生产评测策略（Definition Plane 资产，`evals/eval-policies/*.yaml`）。\"\"\""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    id: str"
+            },
+            {
+              "type": "added",
+              "content": "    display_name: str"
+            },
+            {
+              "type": "added",
+              "content": "    description: str = \"\""
+            },
+            {
+              "type": "added",
+              "content": "    judge_model: str | None = None"
+            },
+            {
+              "type": "added",
+              "content": "    timeout_seconds: float = DEFAULT_EVAL_TIMEOUT_SECONDS"
+            },
+            {
+              "type": "added",
+              "content": "    metrics: list[EvalPolicyMetric] = Field(default_factory=list)"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "def load_eval_policies(evals_root: Path) -> list[EvalPolicy]:"
+            },
+            {
+              "type": "added",
+              "content": "    directory = evals_root / \"eval-policies\""
+            },
+            {
+              "type": "added",
+              "content": "    if not directory.is_dir():"
+            },
+            {
+              "type": "added",
+              "content": "        return []"
+            },
+            {
+              "type": "added",
+              "content": "    policies: list[EvalPolicy] = []"
+            },
+            {
+              "type": "added",
+              "content": "    for path in sorted(directory.glob(\"*.yaml\")):"
+            },
+            {
+              "type": "added",
+              "content": "        with path.open(\"r\", encoding=\"utf-8\") as fh:"
+            },
+            {
+              "type": "added",
+              "content": "            raw = _yaml_load(fh, SafeLoader)"
+            },
+            {
+              "type": "added",
+              "content": "        try:"
+            },
+            {
+              "type": "added",
+              "content": "            policies.append(EvalPolicy.model_validate(raw))"
+            },
+            {
+              "type": "added",
+              "content": "        except Exception as exc:"
+            },
+            {
+              "type": "added",
+              "content": "            raise InvalidCallError(f\"invalid eval policy '{path.name}': {exc}\") from exc"
+            },
+            {
+              "type": "added",
+              "content": "    return policies"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "# ----------------------------------------------------------------- pairs"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "@dataclass"
+            },
+            {
+              "type": "added",
+              "content": "class EvalPair:"
+            },
+            {
+              "type": "added",
+              "content": "    case_id: str"
+            },
+            {
+              "type": "added",
+              "content": "    input: str | None"
+            },
+            {
+              "type": "added",
+              "content": "    actual_output: str | None"
+            },
+            {
+              "type": "added",
+              "content": "    expected_output: str | None = None"
+            },
+            {
+              "type": "added",
+              "content": "    context: list[str] = field(default_factory=list)"
+            },
+            {
+              "type": "added",
+              "content": "    tools_called: list[str] = field(default_factory=list)"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    def to_trace(self) -> dict[str, Any]:"
+            },
+            {
+              "type": "added",
+              "content": "        \"\"\"构造 DeepEvalCapabilityAdapter.evaluate 消费的 trace dict。\"\"\""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "        return {"
+            },
+            {
+              "type": "added",
+              "content": "            \"input\": self.input,"
+            },
+            {
+              "type": "added",
+              "content": "            \"actual_output\": self.actual_output,"
+            },
+            {
+              "type": "added",
+              "content": "            \"expected_output\": self.expected_output,"
+            },
+            {
+              "type": "added",
+              "content": "            \"context\": self.context or None,"
+            },
+            {
+              "type": "added",
+              "content": "            \"tools_called\": [{\"name\": name} for name in self.tools_called] or None,"
+            },
+            {
+              "type": "added",
+              "content": "            \"completion_time\": None,"
+            },
+            {
+              "type": "added",
+              "content": "        }"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "def extract_pair("
+            },
+            {
+              "type": "added",
+              "content": "    case_id: str,"
+            },
+            {
+              "type": "added",
+              "content": "    meta_entry: dict | None,"
+            },
+            {
+              "type": "added",
+              "content": "    events: list[dict],"
+            },
+            {
+              "type": "added",
+              "content": ") -> EvalPair | None:"
+            },
+            {
+              "type": "added",
+              "content": "    \"\"\"从摄取 meta（显式字段）+ 事件流提取评测对；提取不出返回 None。\"\"\""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    meta_entry = meta_entry or {}"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    def _explicit(key: str) -> Any:"
+            },
+            {
+              "type": "added",
+              "content": "        return meta_entry.get(key)"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    user_input = _explicit(\"input\") or _input_from_events(events)"
+            },
+            {
+              "type": "added",
+              "content": "    output = _explicit(\"actual_output\") or _output_from_events(events)"
+            },
+            {
+              "type": "added",
+              "content": "    if not user_input or not output:"
+            },
+            {
+              "type": "added",
+              "content": "        # 观测不足 ≠ 编造：skip 并由上层如实计数。"
+            },
+            {
+              "type": "added",
+              "content": "        return None"
+            },
+            {
+              "type": "added",
+              "content": "    return EvalPair("
+            },
+            {
+              "type": "added",
+              "content": "        case_id=case_id,"
+            },
+            {
+              "type": "added",
+              "content": "        input=str(user_input),"
+            },
+            {
+              "type": "added",
+              "content": "        actual_output=str(output),"
+            },
+            {
+              "type": "added",
+              "content": "        expected_output=("
+            },
+            {
+              "type": "added",
+              "content": "            str(_explicit(\"expected_output\")) if _explicit(\"expected_output\") else None"
+            },
+            {
+              "type": "added",
+              "content": "        ),"
+            },
+            {
+              "type": "added",
+              "content": "        context=[str(item) for item in _explicit(\"context\") or []],"
+            },
+            {
+              "type": "added",
+              "content": "        tools_called=_tools_from_events(events),"
+            },
+            {
+              "type": "added",
+              "content": "    )"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "def _input_from_events(events: list[dict]) -> str | None:"
+            },
+            {
+              "type": "added",
+              "content": "    for event in events:"
+            },
+            {
+              "type": "added",
+              "content": "        if event.get(\"type\") == \"run.started\":"
+            },
+            {
+              "type": "added",
+              "content": "            value = (event.get(\"data\") or {}).get(\"input\")"
+            },
+            {
+              "type": "added",
+              "content": "            if value:"
+            },
+            {
+              "type": "added",
+              "content": "                return str(value)"
+            },
+            {
+              "type": "added",
+              "content": "    # model.request 的末条 user 文本兜底（多轮取最后一问，与 Runner 终局切片同语义）"
+            },
+            {
+              "type": "added",
+              "content": "    for event in reversed(events):"
+            },
+            {
+              "type": "added",
+              "content": "        if event.get(\"type\") == \"model.request\":"
+            },
+            {
+              "type": "added",
+              "content": "            messages = (event.get(\"data\") or {}).get(\"messages\")"
+            },
+            {
+              "type": "added",
+              "content": "            if isinstance(messages, list) and messages:"
+            },
+            {
+              "type": "added",
+              "content": "                last = messages[-1]"
+            },
+            {
+              "type": "added",
+              "content": "                text = last.get(\"content\") if isinstance(last, dict) else last"
+            },
+            {
+              "type": "added",
+              "content": "                if text:"
+            },
+            {
+              "type": "added",
+              "content": "                    return str(text)"
+            },
+            {
+              "type": "added",
+              "content": "    return None"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "def _output_from_events(events: list[dict]) -> str | None:"
+            },
+            {
+              "type": "added",
+              "content": "    for event in reversed(events):"
+            },
+            {
+              "type": "added",
+              "content": "        if event.get(\"type\") == \"run.finished\":"
+            },
+            {
+              "type": "added",
+              "content": "            value = (event.get(\"data\") or {}).get(\"output\")"
+            },
+            {
+              "type": "added",
+              "content": "            if value:"
+            },
+            {
+              "type": "added",
+              "content": "                return str(value)"
+            },
+            {
+              "type": "added",
+              "content": "    return None"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "def _tools_from_events(events: list[dict]) -> list[str]:"
+            },
+            {
+              "type": "added",
+              "content": "    names: list[str] = []"
+            },
+            {
+              "type": "added",
+              "content": "    for event in events:"
+            },
+            {
+              "type": "added",
+              "content": "        if event.get(\"type\") in {\"tool.call\", \"mcp.call\"}:"
+            },
+            {
+              "type": "added",
+              "content": "            data = event.get(\"data\") or {}"
+            },
+            {
+              "type": "added",
+              "content": "            name = data.get(\"name\") or data.get(\"tool\")"
+            },
+            {
+              "type": "added",
+              "content": "            if name:"
+            },
+            {
+              "type": "added",
+              "content": "                names.append(str(name))"
+            },
+            {
+              "type": "added",
+              "content": "    return names"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "def validate_events_are_platform(events: list[dict]) -> None:"
+            },
+            {
+              "type": "added",
+              "content": "    \"\"\"摄取侧复用：平台事件逐条过 TraceEvent 模型（宁炸勿静默）。\"\"\""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    for event in events:"
+            },
+            {
+              "type": "added",
+              "content": "        TraceEvent.model_validate(event)"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "# ----------------------------------------------------------------- runner"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "async def run_online_evaluation("
+            },
+            {
+              "type": "added",
+              "content": "    *,"
+            },
+            {
+              "type": "added",
+              "content": "    pairs: list[EvalPair],"
+            },
+            {
+              "type": "added",
+              "content": "    policy: EvalPolicy,"
+            },
+            {
+              "type": "added",
+              "content": "    adapter: Any,"
+            },
+            {
+              "type": "added",
+              "content": "    unextractable_cases: list[str],"
+            },
+            {
+              "type": "added",
+              "content": ") -> dict:"
+            },
+            {
+              "type": "added",
+              "content": "    \"\"\"执行一次 Online Eval，返回可落盘的完整结果（含 rows 与 summary）。\"\"\""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    rows: list[dict] = []"
+            },
+            {
+              "type": "added",
+              "content": "    for pair in pairs:"
+            },
+            {
+              "type": "added",
+              "content": "        trace = pair.to_trace()"
+            },
+            {
+              "type": "added",
+              "content": "        for metric in policy.metrics:"
+            },
+            {
+              "type": "added",
+              "content": "            rows.append(await _evaluate_one(pair, metric, trace, policy, adapter))"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "    by_metric: dict[str, dict[str, Any]] = {}"
+            },
+            {
+              "type": "added",
+              "content": "    for row in rows:"
+            },
+            {
+              "type": "added",
+              "content": "        bucket = by_metric.setdefault("
+            },
+            {
+              "type": "added",
+              "content": "            row[\"metric\"], {\"pass\": 0, \"fail\": 0, \"error\": 0, \"skipped\": 0, \"scores\": []}"
+            },
+            {
+              "type": "added",
+              "content": "        )"
+            },
+            {
+              "type": "added",
+              "content": "        bucket[row[\"verdict\"]] += 1"
+            },
+            {
+              "type": "added",
+              "content": "        if row[\"score\"] is not None:"
+            },
+            {
+              "type": "added",
+              "content": "            bucket[\"scores\"].append(row[\"score\"])"
+            },
+            {
+              "type": "added",
+              "content": "    summary = {"
+            },
+            {
+              "type": "added",
+              "content": "        \"policy\": policy.id,"
+            },
+            {
+              "type": "added",
+              "content": "        \"cases_total\": len(pairs) + len(unextractable_cases),"
+            },
+            {
+              "type": "added",
+              "content": "        \"cases_evaluated\": len(pairs),"
+            },
+            {
+              "type": "added",
+              "content": "        \"cases_unextractable\": unextractable_cases,"
+            },
+            {
+              "type": "added",
+              "content": "        \"metrics\": {"
+            },
+            {
+              "type": "added",
+              "content": "            metric: {"
+            },
+            {
+              "type": "added",
+              "content": "                \"pass\": bucket[\"pass\"],"
+            },
+            {
+              "type": "added",
+              "content": "                \"fail\": bucket[\"fail\"],"
+            },
+            {
+              "type": "added",
+              "content": "                \"error\": bucket[\"error\"],"
+            },
+            {
+              "type": "added",
+              "content": "                \"skipped\": bucket[\"skipped\"],"
+            },
+            {
+              "type": "added",
+              "content": "                \"mean_score\": ("
+            },
+            {
+              "type": "added",
+              "content": "                    round(sum(bucket[\"scores\"]) / len(bucket[\"scores\"]), 4)"
+            },
+            {
+              "type": "added",
+              "content": "                    if bucket[\"scores\"]"
+            },
+            {
+              "type": "added",
+              "content": "                    else None"
+            },
+            {
+              "type": "added",
+              "content": "                ),"
+            },
+            {
+              "type": "added",
+              "content": "            }"
+            },
+            {
+              "type": "added",
+              "content": "            for metric, bucket in sorted(by_metric.items())"
+            },
+            {
+              "type": "added",
+              "content": "        },"
+            },
+            {
+              "type": "added",
+              "content": "    }"
+            },
+            {
+              "type": "added",
+              "content": "    return {"
+            },
+            {
+              "type": "added",
+              "content": "        \"evaluation_id\": f\"eval_{int(time.time() * 1000):08x}{uuid.uuid4().hex[:8]}\","
+            },
+            {
+              "type": "added",
+              "content": "        \"rows\": rows,"
+            },
+            {
+              "type": "added",
+              "content": "        \"summary\": summary,"
+            },
+            {
+              "type": "added",
+              "content": "    }"
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": ""
+            },
+            {
+              "type": "added",
+              "content": "async def _evaluate_one("
+            },
+            {
+              "type": "added",
+              "content": "    pair: EvalPair, metric: EvalPolicyMetric, trace: dict, policy: EvalPolicy, adapter: Any"
+            },
+            {
+              "type": "added",
+              "content": ") -> dict:"
+            },
+            {
+              "type": "added",
+              "content": "    base = {\"case_id\": pair.case_id, \"metric\": metric.id, \"threshold\": metric.threshold}"
+            },
+            {
+              "type": "added",
+              "content": "    if getattr(adapter, \"version\", lambda: None)() is None:"
+            },
+            {
+              "type": "added",
+              "content": "        # 缺 DeepEval SDK：如实 skipped（与 Runner 的能力探测同语义）。"
+            },
+            {
+              "type": "added",
+              "content": "        return {**base, \"score\": None, \"verdict\": \"skipped\", \"reason\": \"deepeval unavailable\"}"
+            },
+            {
+              "type": "added",
+              "content": "    try:"
+            },
+            {
+              "type": "added",
+              "content": "        score, reason = await asyncio.wait_for("
+            },
+            {
+              "type": "added",
+              "content": "            adapter.evaluate(metric.id, metric.threshold, trace, model=policy.judge_model),"
+            },
+            {
+              "type": "added",
+              "content": "            timeout=policy.timeout_seconds,"
+            },
+            {
+              "type": "added",
+              "content": "        )"
+            },
+            {
+              "type": "added",
+              "content": "    except TimeoutError:"
+            },
+            {
+              "type": "added",
+              "content": "        return {**base, \"score\": None, \"verdict\": \"error\", \"reason\": \"evaluation timeout\"}"
+            },
+            {
+              "type": "added",
+              "content": "    except Exception as exc:  # noqa: BLE001 - 单格失败不中断整批"
+            },
+            {
+              "type": "added",
+              "content": "        return {"
+            },
+            {
+              "type": "added",
+              "content": "            **base,"
+            },
+            {
+              "type": "added",
+              "content": "            \"score\": None,"
+            },
+            {
+              "type": "added",
+              "content": "            \"verdict\": \"error\","
+            },
+            {
+              "type": "added",
+              "content": "            \"reason\": f\"{type(exc).__name__}: {exc}\","
+            },
+            {
+              "type": "added",
+              "content": "        }"
+            },
+            {
+              "type": "added",
+              "content": "    if score is None:"
+            },
+            {
+              "type": "added",
+              "content": "        return {**base, \"score\": None, \"verdict\": \"error\", \"reason\": reason or \"no score\"}"
+            },
+            {
+              "type": "added",
+              "content": "    verdict = \"pass\" if metric.threshold is None or score >= metric.threshold else \"fail\""
+            },
+            {
+              "type": "added",
+              "content": "    return {**base, \"score\": score, \"verdict\": verdict, \"reason\": reason}"
+            }
+          ]
+        }
+      ],
+      "insertions": 247,
+      "deletions": 0,
+      "is_binary": false,
+      "is_new": true,
+      "is_deleted": false,
+      "is_large": false,
+      "size_bytes": 8761,
+      "skipped_reason": null
+    }
+  ],
+  "total_files": 12,
+  "total_insertions": 927,
+  "total_deletions": 12
+}

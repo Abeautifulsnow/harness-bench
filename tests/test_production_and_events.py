@@ -30,6 +30,8 @@ enabled: true
 def workspace(tmp_path: Path):
     evals_root = tmp_path / "evals"
     shutil.copytree(REPO / "evals", evals_root)
+    # 仓库自带的 eval-policies 示例不进本套件：测试自写可控策略
+    shutil.rmtree(evals_root / "eval-policies", ignore_errors=True)
     shutil.copytree(REPO / "fixtures", tmp_path / "fixtures")
     (evals_root / "agents" / "local-fake.yaml").write_text(LOCAL_AGENT, encoding="utf-8")
     data_root = tmp_path / "data"
@@ -336,3 +338,243 @@ class TestTraceIdTraversal:
             store.get_meta("../escape")
         with pytest.raises(InvalidCallError):
             store.load_events("../escape")
+
+
+class TestOnlineEval:
+    """§61：参考无关 judge——pair 提取、策略执行、结果落账。"""
+
+    @staticmethod
+    def _client(workspace, evaluator) -> httpx.AsyncClient:
+        evals_root, data_root = workspace
+        app = create_app(
+            evals_root=evals_root,
+            data_root=data_root,
+            fixtures_root=REPO / "fixtures",
+            production_evaluator=evaluator,
+        )
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+
+    @staticmethod
+    def _stub(scores: dict[str, float] | None = None, fail: bool = False):
+        class StubAdapter:
+            def version(self) -> str | None:
+                return "stub-1.0"
+
+            async def evaluate(self, metric_id, threshold, trace, model=None):
+                if fail:
+                    raise RuntimeError("judge provider down")
+                score = (scores or {}).get(metric_id, 0.9)
+                return score, "stub reason"
+
+        return StubAdapter()
+
+    @pytest.fixture()
+    def policy(self, workspace) -> None:
+        evals_root, _ = workspace
+        (evals_root / "eval-policies").mkdir(exist_ok=True)
+        (evals_root / "eval-policies" / "qa.yaml").write_text(
+            "id: qa\n"
+            "display_name: QA judge\n"
+            "metrics:\n"
+            "  - id: agent.task_completion\n"
+            "    threshold: 0.7\n"
+            "  - id: agent.step_efficiency\n"
+            "    threshold: 0.5\n",
+            encoding="utf-8",
+        )
+
+    async def _ingest(self, client) -> str:
+        events = [
+            {
+                "event_id": "e1",
+                "trace_id": "t1",
+                "type": "run.started",
+                "timestamp": "2026-10-03T10:00:00+08:00",
+                "data": {"input": "帮我查订单"},
+            },
+            {
+                "event_id": "e2",
+                "trace_id": "t1",
+                "type": "tool.call",
+                "timestamp": "2026-10-03T10:00:01+08:00",
+                "data": {"name": "order.search"},
+            },
+            {
+                "event_id": "e3",
+                "trace_id": "t1",
+                "type": "run.finished",
+                "timestamp": "2026-10-03T10:00:02+08:00",
+                "data": {"output": "订单已发货", "status": "success"},
+            },
+        ]
+        response = await client.post(
+            "/api/production/traces",
+            json={
+                "source": "platform",
+                "cases": [
+                    {"case_id": "conv-ok", "events": events, "expected_output": "已发货"},
+                    # 无 input/output：unextractable，如实计数
+                    {"case_id": "conv-empty", "events": [events[1]]},
+                ],
+            },
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["trace_id"]
+
+    @pytest.mark.asyncio
+    async def test_evaluate_full_flow(self, workspace, policy) -> None:
+        async with self._client(workspace, self._stub()) as client:
+            trace_id = await self._ingest(client)
+            response = await client.post(
+                f"/api/production/traces/{trace_id}/evaluate",
+                json={"policy": "qa"},
+            )
+            assert response.status_code == 201, response.text
+            payload = response.json()
+            summary = payload["summary"]
+            assert summary["cases_evaluated"] == 1
+            assert summary["cases_unextractable"] == ["conv-empty"]
+            # 事件提取：input 来自 run.started，output 来自 run.finished
+            row = next(r for r in payload["rows"] if r["metric"] == "agent.task_completion")
+            assert row["case_id"] == "conv-ok"
+            assert row["verdict"] == "pass"  # 0.9 >= 0.7
+            eff = next(r for r in payload["rows"] if r["metric"] == "agent.step_efficiency")
+            assert eff["verdict"] == "pass"  # 0.9 >= 0.5
+
+            # 历史可读
+            history = (await client.get(f"/api/production/traces/{trace_id}/evaluations")).json()
+            assert history and history[0]["evaluation_id"] == payload["evaluation_id"]
+
+    @pytest.mark.asyncio
+    async def test_score_below_threshold_fails(self, workspace, policy) -> None:
+        stub = self._stub(scores={"agent.task_completion": 0.4, "agent.step_efficiency": 0.2})
+        async with self._client(workspace, stub) as client:
+            trace_id = await self._ingest(client)
+            payload = (
+                await client.post(
+                    f"/api/production/traces/{trace_id}/evaluate", json={"policy": "qa"}
+                )
+            ).json()
+            verdicts = {r["metric"]: r["verdict"] for r in payload["rows"]}
+            assert verdicts == {
+                "agent.task_completion": "fail",
+                "agent.step_efficiency": "fail",
+            }
+            assert payload["summary"]["metrics"]["agent.task_completion"]["mean_score"] == 0.4
+
+    @pytest.mark.asyncio
+    async def test_judge_error_lands_as_error_row(self, workspace, policy) -> None:
+        async with self._client(workspace, self._stub(fail=True)) as client:
+            trace_id = await self._ingest(client)
+            payload = (
+                await client.post(
+                    f"/api/production/traces/{trace_id}/evaluate", json={"policy": "qa"}
+                )
+            ).json()
+            assert all(r["verdict"] == "error" for r in payload["rows"])
+            assert "judge provider down" in payload["rows"][0]["reason"]
+
+    @pytest.mark.asyncio
+    async def test_missing_sdk_is_skipped(self, workspace, policy) -> None:
+        class NoSDK:
+            def version(self) -> str | None:
+                return None
+
+        async with self._client(workspace, NoSDK()) as client:
+            trace_id = await self._ingest(client)
+            payload = (
+                await client.post(
+                    f"/api/production/traces/{trace_id}/evaluate", json={"policy": "qa"}
+                )
+            ).json()
+            assert all(r["verdict"] == "skipped" for r in payload["rows"])
+
+    @pytest.mark.asyncio
+    async def test_unknown_policy_or_trace_or_empty(self, workspace, policy) -> None:
+        async with self._client(workspace, self._stub()) as client:
+            trace_id = await self._ingest(client)
+            assert (
+                await client.post(
+                    f"/api/production/traces/{trace_id}/evaluate", json={"policy": "nope"}
+                )
+            ).status_code == 400
+            assert (
+                await client.post(
+                    "/api/production/traces/prod_missing/evaluate", json={"policy": "qa"}
+                )
+            ).status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_no_evaluable_cases_is_422(self, workspace, policy) -> None:
+        async with self._client(workspace, self._stub()) as client:
+            response = await client.post(
+                "/api/production/traces",
+                json={
+                    "source": "platform",
+                    "cases": [
+                        {
+                            "case_id": "c",
+                            "events": [{"event_id": "e", "trace_id": "t", "type": "tool.call"}],
+                        }
+                    ],
+                },
+            )
+            trace_id = response.json()["trace_id"]
+            response = await client.post(
+                f"/api/production/traces/{trace_id}/evaluate", json={"policy": "qa"}
+            )
+            assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_explicit_ingest_fields_win_over_events(self, workspace, policy) -> None:
+        class Probe:
+            def version(self) -> str | None:
+                return "probe"
+
+            async def evaluate(self, metric_id, threshold, trace, model=None):
+                self.seen = trace
+                return 1.0, "ok"
+
+        probe = Probe()
+        async with self._client(workspace, probe) as client:
+            events = [
+                {
+                    "event_id": "e1",
+                    "trace_id": "t",
+                    "type": "run.started",
+                    "timestamp": "2026-10-03T10:00:00+08:00",
+                    "data": {"input": "事件里的输入"},
+                },
+                {
+                    "event_id": "e2",
+                    "trace_id": "t",
+                    "type": "run.finished",
+                    "timestamp": "2026-10-03T10:00:01+08:00",
+                    "data": {"output": "事件里的输出"},
+                },
+            ]
+            response = await client.post(
+                "/api/production/traces",
+                json={
+                    "source": "platform",
+                    "cases": [
+                        {
+                            "case_id": "c",
+                            "events": events,
+                            "input": "显式输入",
+                            "expected_output": "显式期望",
+                        }
+                    ],
+                },
+            )
+            trace_id = response.json()["trace_id"]
+            await client.post(f"/api/production/traces/{trace_id}/evaluate", json={"policy": "qa"})
+            assert probe.seen["input"] == "显式输入"
+            assert probe.seen["expected_output"] == "显式期望"
+
+    @pytest.mark.asyncio
+    async def test_policies_listed_over_http(self, workspace, policy) -> None:
+        async with self._client(workspace, self._stub()) as client:
+            rows = (await client.get("/api/eval-policies")).json()
+            assert [row["id"] for row in rows] == ["qa"]
+            assert rows[0]["metrics"][0]["threshold"] == 0.7

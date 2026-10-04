@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import uuid
@@ -64,7 +65,17 @@ class ProductionStore:
             "trace_id": trace_id,
             "source": source,
             "ingested_at": datetime.now().astimezone().isoformat(),
-            "cases": {str(case["case_id"]): len(case["events"]) for case in cases},
+            # §61 Online Eval：case 级显式评测字段（input/expected_output/context）
+            # 随 meta 落账——提取优先级最高的一级；缺省仍走事件提取。
+            "cases": {
+                str(case["case_id"]): {
+                    "events": len(case["events"]),
+                    "input": case.get("input"),
+                    "expected_output": case.get("expected_output"),
+                    "context": case.get("context"),
+                }
+                for case in cases
+            },
             "total_events": sum(len(case["events"]) for case in cases),
             "endpoint": endpoint,
             "model": model,
@@ -116,3 +127,48 @@ class ProductionStore:
             if meta is not None:
                 out.append(meta)
         return out
+
+    # ------------------------------------------------ Online Eval（§61）
+
+    def save_evaluation(self, trace_id: str, result: dict) -> str:
+        _require_trace_id(trace_id)
+        directory = self.root / trace_id / "evaluations"
+        directory.mkdir(parents=True, exist_ok=True)
+        eval_id = str(result["evaluation_id"])
+        path = directory / f"{eval_id}.json"
+        tmp = path.with_suffix(".json.tmp")
+        record = {
+            **result,
+            "trace_id": trace_id,
+            "created_at": datetime.now().astimezone().isoformat(),
+        }
+        tmp.write_text(
+            json.dumps(record, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+        return eval_id
+
+    def list_evaluations(self, trace_id: str) -> list[dict]:
+        _require_trace_id(trace_id)
+        directory = self.root / trace_id / "evaluations"
+        if not directory.is_dir():
+            return []
+        out: list[dict] = []
+        for path in sorted(directory.glob("eval_*.json"), reverse=True):
+            try:
+                out.append(json.loads(path.read_text(encoding="utf-8")))
+            except ValueError:
+                continue
+        return out
+
+    def get_evaluation(self, trace_id: str, evaluation_id: str) -> dict | None:
+        _require_trace_id(trace_id)
+        _require_trace_id(evaluation_id)
+        path = self.root / trace_id / "evaluations" / f"{evaluation_id}.json"
+        if not path.is_file():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            return None

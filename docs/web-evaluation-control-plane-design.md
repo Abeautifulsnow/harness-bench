@@ -2273,3 +2273,55 @@ V1 已按本文档落地。对应关系：
 benchmark dataset 的对齐语义）；Trace Replay 到 benchmark 用例（同一对齐
 问题）；production run 投影进 runs/ 分析面（会伪造 evaluation 事实，等
 Online Eval 语义定了再做）；OTel Collector/SDK 侧的采集端集成。
+
+---
+
+# 61. V2 增量三（2026-10-03）：§53 Online Eval（参考无关 judge）
+
+## 61.1 对齐语义（本片的核心决策）
+
+Online Eval 评测的是生产 trace 自身的 (input, actual_output) 对，判定标准来自
+**EvalPolicy**（Definition Plane 资产 `evals/eval-policies/*.yaml`：judge metric
+清单 + 阈值 + judge model + 超时）——**参考无关，不需要 dataset 对齐**。
+需要"同题对比"的 Trace Replay（生产行为 vs benchmark case 期望）是独立的
+后续特性，不与 Online Eval 混用语义。
+
+## 61.2 pair 来源（优先级递减，绝不编造）
+
+1. 摄取时显式给出的 `input` / `expected_output` / `context`（随 meta 落账）；
+2. 事件提取：`run.started.data.input`（兜底 `model.request` 末条 user 文本）
+   与 `run.finished.data.output`；tool 序列取自 `tool.call/mcp.call`；
+3. 都没有 → 该 case 记为 **unextractable，如实跳过并计数**（422 当整条
+   trace 无可评测对）。
+
+## 61.3 执行与结果
+
+- 复用 Runner 的同一条 judge 路径（`DeepEvalCapabilityAdapter.evaluate`，
+  含 `a_measure` 修正与 judge model 分离）；适配器经
+  `create_app(production_evaluator=…)` 可注入（测试 stub）。
+- 每个 (case, metric) 独立收口：score<threshold → fail；SDK 异常/超时 →
+  error（reason 原样）；SDK 未安装 → **skipped**（与 Runner 能力探测同语义）。
+  单格失败绝不中断整批。
+- 结果落 `<trace>/evaluations/<eval_id>.json`（含 rows + summary：per-metric
+  pass/fail/error/skipped/mean_score），历史可列。**不产生 Run、不算 Gate、
+  不进 Regression**——生产 trace 没有可比基线，伪造这些只会制造假象。
+- API：GET /eval-policies、POST /production/traces/{id}/evaluate（token 门）、
+  GET …/evaluations。Web：生产详情页评测区（策略选择/运行/结果表/历史）。
+
+## 61.4 OTel 采集端（文档级）
+
+采集侧示例（Collector OTLP→JSON 转换后直接 POST 摄取端点）：
+
+```yaml
+# otel-collector-config.yaml（节选）：exporter 把 OTLP 转 JSON 推给平台
+exporters:
+  otlphttp:
+    endpoint: http://agent-eval-host:8000/api/otel-sink   # 由采集侧网关转换
+service:
+  pipelines:
+    traces: { receivers: [otlp], exporters: [otlphttp] }
+```
+
+V1 不内置 Collector：摄取端点吃标准 OTel traces JSON，任何能把 OTLP 导出为
+JSON 的采集链（Collector + translate_exporter / 自定义脚本 / SDK exporter）
+都能对接；token 走 `AGENT_EVAL_EXEC_TOKEN`。

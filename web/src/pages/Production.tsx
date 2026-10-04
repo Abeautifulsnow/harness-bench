@@ -1,7 +1,7 @@
 import * as React from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router";
-import { ArrowLeft, Radio } from "lucide-react";
+import { ArrowLeft, Play, Radio } from "lucide-react";
 
 import { Mono, PageHeader, Section } from "@/components/common/primitives";
 import { QueryState } from "@/components/common/states";
@@ -15,9 +15,25 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import type { SpanNode } from "@/lib/api-types";
 import { fmtRelative } from "@/lib/format";
-import { evaluationApi } from "@/lib/evaluation-api";
+import { evaluationApi, type EvaluationResult } from "@/lib/evaluation-api";
+
+function eventCount(entry: unknown): number {
+  if (typeof entry === "number") return entry;
+  if (entry && typeof entry === "object" && "events" in entry) {
+    return Number((entry as { events: number }).events);
+  }
+  return 0;
+}
 
 /** §53 Production Trace：摄取自生产侧的链路（OTel / 平台事件），只读查看。
  *  Span Tree 与 Run Trace Viewer 共用同一构建器——分析面同构的第一步。 */
@@ -128,7 +144,7 @@ export function ProductionTraceDetail() {
               <SelectContent>
                 {caseIds.map((id) => (
                   <SelectItem key={id} value={id}>
-                    {id}（{data.cases[id]} events）
+                    {id}（{eventCount(data.cases[id])} events）
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -149,6 +165,145 @@ export function ProductionTraceDetail() {
           <TraceTree root={(view.data?.root ?? null) as SpanNode | null} />
         </QueryState>
       </Section>
+      <EvaluationSection traceId={traceId} />
     </div>
+  );
+}
+
+/** §61 Online Eval：参考无关 judge——选策略、运行、看结果与历史。 */
+function EvaluationSection({ traceId }: { traceId: string }) {
+  const queryClient = useQueryClient();
+  const policies = useQuery({ queryKey: ["eval-policies"], queryFn: evaluationApi.evalPolicies });
+  const history = useQuery({
+    queryKey: ["production-evaluations", traceId],
+    queryFn: () => evaluationApi.productionEvaluations(traceId),
+  });
+  const [policyId, setPolicyId] = React.useState("");
+  const [latest, setLatest] = React.useState<EvaluationResult | null>(null);
+
+  React.useEffect(() => {
+    if (!policyId && policies.data?.length) setPolicyId(policies.data[0].id);
+  }, [policies.data, policyId]);
+
+  const run = useMutation({
+    mutationFn: () => evaluationApi.evaluateProductionTrace(traceId, policyId),
+    onSuccess: (result) => {
+      setLatest(result);
+      void queryClient.invalidateQueries({ queryKey: ["production-evaluations", traceId] });
+    },
+  });
+
+  const shown = latest ?? history.data?.[0] ?? null;
+  const summary = shown?.summary;
+
+  return (
+    <Section
+      title="Online Eval"
+      description="§61：参考无关 judge——评测生产对话自身的 (input, output) 对；无 dataset 对齐、无 Gate、不落 Run。"
+      actions={
+        <div className="flex items-center gap-2">
+          {policies.data && policies.data.length > 0 && (
+            <Select value={policyId} onValueChange={setPolicyId}>
+              <SelectTrigger className="w-52">
+                <SelectValue placeholder="选择评测策略" />
+              </SelectTrigger>
+              <SelectContent>
+                {policies.data.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.display_name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          <Button
+            size="sm"
+            disabled={!policyId || run.isPending}
+            onClick={() => run.mutate()}
+          >
+            <Play /> {run.isPending ? "评测中…" : "Run Evaluation"}
+          </Button>
+        </div>
+      }
+    >
+      {run.error && (
+        <p className="mb-3 rounded-md border border-[var(--fail)]/30 bg-[var(--fail)]/5 px-3 py-2 text-xs text-[var(--fail)]">
+          {(run.error as Error).message}
+        </p>
+      )}
+      {!shown && (
+        <p className="text-xs text-muted-foreground">
+          {policies.data?.length
+            ? "选择策略后运行；judge 需要 deepeval + 模型凭证。"
+            : "在 evals/eval-policies/*.yaml 定义评测策略后刷新。"}
+        </p>
+      )}
+      {summary && (
+        <div className="space-y-3">
+          <div className="flex flex-wrap gap-2 text-xs">
+            <Badge variant="outline">
+              {summary.cases_evaluated} / {summary.cases_total} cases
+            </Badge>
+            {summary.cases_unextractable.length > 0 && (
+              <Badge variant="outline" className="text-muted-foreground">
+                {summary.cases_unextractable.length} 条无法提取（跳过）
+              </Badge>
+            )}
+            {Object.entries(summary.metrics).map(([metric, stat]) => (
+              <Badge
+                key={metric}
+                variant="outline"
+                className={stat.fail > 0 || stat.error > 0 ? "text-[var(--fail)]" : "text-[var(--pass)]"}
+              >
+                {metric}: {stat.pass}✓ {stat.fail}✗ {stat.error}err
+                {stat.mean_score != null && ` · mean ${stat.mean_score}`}
+              </Badge>
+            ))}
+          </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Case</TableHead>
+                <TableHead>Metric</TableHead>
+                <TableHead>Score</TableHead>
+                <TableHead>Verdict</TableHead>
+                <TableHead>Reason</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {shown.rows.map((row, index) => (
+                <TableRow key={`${row.case_id}-${row.metric}-${index}`}>
+                  <TableCell className="font-mono text-xs">{row.case_id}</TableCell>
+                  <TableCell className="text-xs">{row.metric}</TableCell>
+                  <TableCell className="tabular text-xs">{row.score ?? "—"}</TableCell>
+                  <TableCell>
+                    <Badge
+                      variant="outline"
+                      className={
+                        row.verdict === "pass"
+                          ? "text-[var(--pass)]"
+                          : row.verdict === "fail"
+                            ? "text-[var(--fail)]"
+                            : "text-muted-foreground"
+                      }
+                    >
+                      {row.verdict}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="max-w-md truncate text-xs text-muted-foreground">
+                    {row.reason ?? "—"}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          {history.data && history.data.length > 1 && (
+            <p className="text-xs text-muted-foreground">
+              共 {history.data.length} 次评测；最新 {shown.evaluation_id}。
+            </p>
+          )}
+        </div>
+      )}
+    </Section>
   );
 }

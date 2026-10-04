@@ -1,0 +1,13 @@
+# Online Eval 策略（§61，Definition Plane 资产）。
+# metrics 必须是 judge 类（agent.* / 自定义 LLM 判定）；运行时需要
+# deepeval + judge 模型（未装 SDK 时对应 metric 如实 skipped）。
+id: production-qa
+display_name: 生产对话质量
+description: 参考无关 judge：任务完成度 + 步骤效率，对摄取的生产对话逐条打分
+judge_model: null        # 缺省走 SDK 默认 judge 模型；PRD §91 分离时填模型名
+timeout_seconds: 120
+metrics:
+  - id: agent.task_completion
+    threshold: 0.7
+  - id: agent.step_efficiency
+    threshold: 0.5

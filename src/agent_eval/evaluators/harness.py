@@ -264,9 +264,7 @@ class SkillLoadEvaluator(EvaluatorPlugin):
         # 未声明的加载只在**声明了集合**时才判：没声明集合就没有"多出来的"这回事
         # （与 subagent_routing 一致——那时只判 expected_first / max_loaded）。
         unexpected = (
-            [name for name in loaded if name not in expected]
-            if declared_loaded is not None
-            else []
+            [name for name in loaded if name not in expected] if declared_loaded is not None else []
         )
         if unexpected and not allow_extra:
             problems.append(f"出现未声明的 skill：{', '.join(unexpected)}")

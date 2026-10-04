@@ -109,10 +109,7 @@ def _below_wall_clock_floor(metric_id: str, base: float, candidate: float) -> bo
     """
     if not _is_wall_clock(metric_id):
         return False
-    return (
-        abs(candidate - base) <= _WALL_CLOCK_FLOOR
-        or min(base, candidate) < _WALL_CLOCK_FLOOR
-    )
+    return abs(candidate - base) <= _WALL_CLOCK_FLOOR or min(base, candidate) < _WALL_CLOCK_FLOOR
 
 
 def _within_noise(

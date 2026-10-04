@@ -37,6 +37,7 @@ from agent_eval.api.routers import (
 from agent_eval.api.routers import regressions as regressions_router
 from agent_eval.api.routers import runs as runs_router
 from agent_eval.api.workspace import Workspace
+from agent_eval.evaluators.deepeval_adapter import DeepEvalCapabilityAdapter
 from agent_eval.execution.scheduler import SchedulerService, load_schedules
 from agent_eval.execution.service import EvalRunService
 
@@ -51,6 +52,7 @@ def create_app(
     fixtures_root: Path | None = None,
     static_dir: Path | None = None,
     max_running_jobs: int = 2,
+    production_evaluator: object | None = None,
 ) -> FastAPI:
     service = EvalRunService(
         evals_root=evals_root,
@@ -85,6 +87,14 @@ def create_app(
     app.state.version = __version__
     app.state.eval_run_service = service
     app.state.scheduler = scheduler
+    # §61 Online Eval：judge 适配器可注入（测试用 stub 替身）；缺省走
+    # DeepEvalCapabilityAdapter（SDK 惰性加载，未安装时 verdict=skipped）。
+    # 注入契约：须实现 async evaluate(metric_id, threshold, trace, model=)
+    # -> (score|None, reason) 与 version() -> str|None（返回 None = SDK 缺失，
+    # 全部 metric 判 skipped）。
+    app.state.production_evaluator = (
+        production_evaluator if production_evaluator is not None else DeepEvalCapabilityAdapter()
+    )
 
     app.add_middleware(
         CORSMiddleware,
