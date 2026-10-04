@@ -9,6 +9,7 @@ import {
   ClipboardCheck,
   FlaskConical,
   GitCompareArrows,
+  Globe,
   LayoutDashboard,
   ListTree,
   Menu,
@@ -88,6 +89,12 @@ const EvaluationDetail = React.lazy(() =>
 const Automation = React.lazy(() =>
   import("@/pages/Automation").then((module) => ({ default: module.Automation })),
 );
+const Production = React.lazy(() =>
+  import("@/pages/Production").then((module) => ({ default: module.Production })),
+);
+const ProductionTraceDetail = React.lazy(() =>
+  import("@/pages/Production").then((module) => ({ default: module.ProductionTraceDetail })),
+);
 
 /** PRD §72–§78 的导航面。Review / Cost / Trends 是**一级入口**（PRD §9.2），
  *  不塞进"管理"折叠菜单——它们回答的是每天都会问的问题。 */
@@ -97,6 +104,7 @@ const NAV: { group: string; items: { to: string; label: string; icon: React.Elem
     items: [
       { to: "/", label: "Dashboard", icon: LayoutDashboard },
       { to: "/trends", label: "趋势", icon: TrendingUp },
+      { to: "/production", label: "生产 Trace", icon: Globe },
     ],
   },
   {
@@ -240,6 +248,8 @@ export function AppRoutes() {
           <Route path="/evaluations/new" element={<EvaluationNew />} />
           <Route path="/evaluations/:jobId" element={<EvaluationDetail />} />
           <Route path="/automation" element={<Automation />} />
+          <Route path="/production" element={<Production />} />
+          <Route path="/production/:traceId" element={<ProductionTraceDetail />} />
           <Route path="/traces" element={<TraceViewer />} />
           <Route path="/experiments" element={<Experiments />} />
           <Route path="/experiments/:experimentId" element={<ExperimentDetail />} />

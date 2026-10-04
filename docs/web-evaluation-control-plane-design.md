@@ -2235,3 +2235,41 @@ V1 已按本文档落地。对应关系：
   （上限 500，超限丢最旧）。`POST /api/notifications/read` 只改 UI 状态，
   是 §42 边界的第三类合法 POST（非 Definition、非评测事实）。
 - Web：侧栏底部通知铃铛（未读计数、最近 12 条、单条点击即已读、全部已读）。
+
+---
+
+# 60. V2 增量二（2026-10-03）：§18 细粒度实时事件 + §53 Production Trace 第一片
+
+## 60.1 §18 细粒度实时事件（case/turn/tool 级）
+
+- Runner 挂 `on_event` sink（实例级、run 期重置）：case.started/completed、
+  turn.started/completed、tool/mcp/子代理/压缩/异常活动事件。
+- 转发是**白名单标量**：name/tool/status 等小字段进实时流；工具参数与 LLM
+  响应等大 payload 留在落盘 trace（走 Trace Viewer），`model.request/response`
+  不转发（高频大帧）。
+- JobEventHub：跨线程投递（执行线程 loop → 订阅者请求 loop），有界队列 500、
+  慢订阅者丢帧——观测面 best-effort，事实源仍是 Job 快照（§35 分工不变）。
+- SSE：`/api/eval-runs/{id}/events` 合并两条流——job.* 快照 + `job.activity`
+  （具体 type 在 data 里；EventSource 无法通配监听，故统一事件名）。
+- Web：Evaluation 详情页运行中显示"实时活动"滚动区（最近 8 条），终态后隐藏。
+- 观测面故障绝不影响评测：sink 抛异常即摘除。
+
+## 60.2 §53 Production Trace Ingestion 第一片
+
+已做（摄取 + 只读查看，分析面同构第一步）：
+
+- **OTel 转换器**（`trace/otel.py`）：OTel traces JSON → 平台事件。span 名
+  **保真保留**（不映射进 §8 词汇表——生产命名是被观测系统的事实）；
+  gen_ai/openinference 语义约定只提取展示用 hints。
+- **摄取入口** `POST /api/production/traces`（执行 token 门 + 8 MiB 上限）：
+  platform（TraceEvent）与 OTel 双格式自动识别，逐 case 校验。
+- **存储** `<data_root>/production/<trace_id>/`（meta.json + events.jsonl，
+  append-only 事实源，派生视图可重建）。
+- **查看**：GET 列表/详情/`/trace`（Span Tree）。树构建双路径：带 parent 结构
+  的事件直构（OTel 天生带树）；平台事件流回落 TraceBuilder。与 Run Trace
+  Viewer 共用 SpanNode/SpanTree 组件。Web 新增"生产 Trace"页（总览）。
+
+**未做（后续片）**：Online Eval（对摄取 trace 跑评测——需先定生产 Q/A 与
+benchmark dataset 的对齐语义）；Trace Replay 到 benchmark 用例（同一对齐
+问题）；production run 投影进 runs/ 分析面（会伪造 evaluation 事实，等
+Online Eval 语义定了再做）；OTel Collector/SDK 侧的采集端集成。

@@ -27,6 +27,7 @@ from agent_eval.execution.connections import (
     AgentConnectionProfile,
     load_agent_connections,
 )
+from agent_eval.execution.events import JobEventHub
 from agent_eval.execution.executor import JobExecutor, LocalJobExecutor
 from agent_eval.execution.models import (
     TERMINAL_STATUSES,
@@ -81,6 +82,7 @@ class EvalRunService:
         self.fixtures_root = fixtures_root if fixtures_root is not None else Path("fixtures")
         self.repo = JobRepository(data_root / "jobs")
         self._notification_log = data_root / "state" / "notifications.jsonl"
+        self.hub = JobEventHub()
         self.repeat_cap = repeat_cap
         self.agent_concurrency_cap = agent_concurrency_cap
         # §23：执行机制可替换（LocalJobExecutor 之外，未来可换 RemoteWorker 等）；
@@ -338,11 +340,17 @@ class EvalRunService:
 
         def on_run_created(run_id: str) -> None:
             self._apply(job_id, run_id=run_id)
+            self.hub.publish(job_id, {"job_id": job_id, "type": "run.created", "run_id": run_id})
 
         def on_progress(counts: dict[str, int]) -> None:
             current = self._jobs.get(job_id)
             if current is not None:
                 self._apply(job_id, progress=current.progress.merged(counts))
+
+        def on_event(event: dict) -> None:
+            # §18 细粒度事件：Runner 的 case/turn/tool 生命周期 → hub → SSE。
+            # 帧契约与 job.* 一致：必须带 job_id（订阅端对全帧统一断言/路由）。
+            self.hub.publish(job_id, {"job_id": job_id, "run_id": None, **event})
 
         self._apply(
             job_id,
@@ -352,7 +360,9 @@ class EvalRunService:
 
         runner = Runner(cfg)
         try:
-            outcome = await runner.run(on_run_created=on_run_created, on_progress=on_progress)
+            outcome = await runner.run(
+                on_run_created=on_run_created, on_progress=on_progress, on_event=on_event
+            )
         except asyncio.CancelledError:
             # Runner 已把 run.json 收口成 cancelled；Job 侧由
             # _on_executor_cancelled 统一落账。这里原样上抛。

@@ -57,17 +57,22 @@ class TestReadOnlyContract:
 
         ``Definition mutation verbs = forbidden``；
         ``Execution mutation verbs = allowed``（eval-runs 发起/取消、triggers 触发），
-        另有一类 **UI 状态动词**（notifications/read 已读标记——不是 Definition、
-        也不是评测事实）。PUT/DELETE/PATCH 任何资源都不存在。
+        另有两类辅助动词：**UI 状态**（notifications/read 已读标记）与
+        **生产摄取**（production/traces，token 门，§60.2）——都不是 Definition。
+        PUT/DELETE/PATCH 任何资源都不存在。
         """
         schema = client.get("/api/openapi.json").json()
         for path, operations in schema["paths"].items():
             for verb in operations:
                 assert verb in {"get", "post"}, f"unexpected verb {verb!r} on {path}"
                 if verb == "post":
-                    assert path.startswith(
-                        ("/api/eval-runs", "/api/triggers", "/api/notifications/read")
-                    ), f"unexpected POST path: {verb.upper()} {path}"
+                    allowed = (
+                        "/api/eval-runs",
+                        "/api/triggers",
+                        "/api/notifications/read",
+                        "/api/production",
+                    )
+                    assert path.startswith(allowed), f"unexpected POST path: {verb.upper()} {path}"
 
     def test_definition_mutation_verbs_are_rejected(self, client: TestClient) -> None:
         """对 Definition 资源发写入动词必须被路由层拒绝（405：不存在该动词的端点）。"""

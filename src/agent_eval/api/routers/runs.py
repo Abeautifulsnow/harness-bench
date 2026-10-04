@@ -198,11 +198,40 @@ def _trace_view(store: RunStore, run_id: str, case_id: str, iteration: int) -> T
     events = store.load_events(run_id, f"{_safe(case_id)}.iter{iteration}")
     if not events:
         return TraceView(run_id=run_id, case_id=case_id, iteration=iteration)
+    return _trace_view_from_events(
+        events,
+        run_id=run_id,
+        case_id=case_id,
+        iteration=iteration,
+        metrics=_metric_index(store, run_id, case_id, iteration),
+    )
+
+
+def _trace_view_from_events(
+    events,
+    *,
+    trace_id: str | None = None,
+    case_id: str | None,
+    run_id: str = "",
+    iteration: int = 0,
+    metrics: list[dict] | None = None,
+) -> TraceView:
+    """事件列表 → Span Tree 视图（Run Trace Viewer 与 Production 查看共用）。
+
+    ``metrics`` 给定时按 Run 视图语义把判定挂到根节点；缺省（Production 摄取
+    流，无判定）同形状返回、判定为空——review #C02：两个消费面统一一个模型，
+    不再 dict | TraceView 联合返回。
+    """
+    from agent_eval.models.events import TraceEvent as _TraceEvent
+
+    parsed = [
+        event if isinstance(event, _TraceEvent) else _TraceEvent.model_validate(event)
+        for event in events
+    ]
     builder = TraceBuilder()
-    builder.feed_all(events)
+    builder.feed_all(parsed)
     tree = builder.build()
-    case_metrics = _metric_index(store, run_id, case_id, iteration)
-    nodes = {span.id: _span_node(span, case_metrics) for span in tree.spans}
+    nodes = {span.id: _span_node(span, metrics or []) for span in tree.spans}
     root: SpanNode | None = None
     for span in tree.spans:
         node = nodes[span.id]
@@ -212,9 +241,9 @@ def _trace_view(store: RunStore, run_id: str, case_id: str, iteration: int) -> T
             root = node
     return TraceView(
         run_id=run_id,
-        case_id=case_id,
+        case_id=case_id or "",
         iteration=iteration,
-        trace_id=tree.trace_id,
+        trace_id=tree.trace_id or trace_id,
         span_count=len(tree.spans),
         tokens=tree.token_count(),
         root=root,

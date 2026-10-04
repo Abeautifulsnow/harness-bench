@@ -173,9 +173,38 @@ export const evaluationApi = {
   notifications: () => get<NotificationItem[]>("/notifications"),
   markNotificationsRead: (jobIds: string[]) =>
     post<{ marked_read: number }>("/notifications/read", { job_ids: jobIds }),
+
+  // §53 Production Trace（只读；摄取走 CI/采集器的 token 化 POST）。
+  productionTraces: () => get<ProductionTraceMeta[]>("/production/traces"),
+  productionTrace: (id: string) =>
+    get<ProductionTraceMeta>(`/production/traces/${encodeURIComponent(id)}`),
+  productionTraceView: (id: string, caseId?: string) =>
+    get<ProductionTraceView>(
+      `/production/traces/${encodeURIComponent(id)}/trace${caseId ? `?case_id=${encodeURIComponent(caseId)}` : ""}`,
+    ),
 };
 
-/** §18：订阅 Job 的 run-level progress SSE。
+export interface ProductionTraceMeta {
+  trace_id: string;
+  source: string;
+  ingested_at: string;
+  cases: Record<string, number>;
+  total_events: number;
+  endpoint: string | null;
+  model: string | null;
+}
+
+/** Span Tree 视图（与 Run Trace Viewer 同构；节点结构见 api-types SpanNode）。 */
+export interface ProductionTraceView {
+  trace_id: string;
+  case_id: string | null;
+  span_count: number;
+  tokens: number;
+  root: unknown;
+  tool_sequence: string[];
+}
+
+/** §18：订阅 Job 的实时流——run-level 快照（job.*）+ 细粒度活动（job.activity）。
  *
  * 返回取消订阅函数。终态事件到达后由调用方决定何时退订（本函数不自动退订，
  * 让 Detail 页在收到终态后还能做一次收尾刷新）。
@@ -184,6 +213,7 @@ export function subscribeJobEvents(
   jobId: string,
   onEvent: (job: EvalRunJob, event: string) => void,
   onError?: () => void,
+  onActivity?: (activity: JobActivityEvent) => void,
 ): () => void {
   const source = new EventSource(`${BASE}/eval-runs/${encodeURIComponent(jobId)}/events`);
   const handle = (event: MessageEvent) => {
@@ -193,11 +223,33 @@ export function subscribeJobEvents(
       /* 半截帧：等下一帧 */
     }
   };
+  const activityHandler = (event: MessageEvent) => {
+    if (!onActivity) return;
+    try {
+      onActivity(JSON.parse(event.data) as JobActivityEvent);
+    } catch {
+      /* 半截帧：等下一帧 */
+    }
+  };
   for (const name of ["job.updated", "job.completed", "job.failed", "job.cancelled"]) {
     source.addEventListener(name, handle as EventListener);
   }
+  source.addEventListener("job.activity", activityHandler as EventListener);
   if (onError) source.onerror = onError;
   return () => source.close();
+}
+
+/** §18 细粒度活动事件（case/turn/tool 生命周期）。data 字段只含白名单标量。 */
+export interface JobActivityEvent {
+  type: string;
+  case_id?: string;
+  iteration?: number;
+  turn?: number;
+  run_id?: string | null;
+  status?: string;
+  name?: string;
+  tool?: string;
+  event_id?: string;
 }
 
 export const JOB_STATUS_LABEL: Record<JobStatus, string> = {

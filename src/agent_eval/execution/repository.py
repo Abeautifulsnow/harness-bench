@@ -8,9 +8,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 from agent_eval.execution.models import EvalRunJob
+
+# review #I02（纵深防御）：job_id 来自 API 路径参数且会拼进文件路径。
+# 当前读出后还要过 EvalRunJob 模型校验（泄露面≈0），但仍按同族模式一次修齐。
+_JOB_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 class JobRepository:
@@ -26,6 +31,8 @@ class JobRepository:
         os.replace(tmp, path)
 
     def get(self, job_id: str) -> EvalRunJob | None:
+        if not _JOB_ID_RE.fullmatch(job_id):
+            return None
         # 与 list() 共用 _read：半截文件（进程在 replace 前被杀）按"读不到"
         # 处理，坏了哪条就少哪条，不让详情页 500。
         return _read(self.root / f"{job_id}.json")

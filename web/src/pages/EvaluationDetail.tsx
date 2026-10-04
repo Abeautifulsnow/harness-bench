@@ -13,9 +13,13 @@ import {
   JOB_TERMINAL,
   evaluationApi,
   subscribeJobEvents,
+  type JobActivityEvent,
 } from "@/lib/evaluation-api";
 import type { EvalRunJob } from "@/lib/evaluation-api";
 import { JobStatusBadge } from "@/pages/Evaluations";
+
+/** §18：实时活动流保留最近 N 条（tool.call 等高频事件会被自然滚动淘汰）。 */
+const ACTIVITY_BUFFER = 8;
 
 /** 设计文档 §19/§43.3：Evaluation Detail —— 实时进度 / Cancel / 错误 / 跳转 Run。 */
 export function EvaluationDetail() {
@@ -30,7 +34,8 @@ export function EvaluationDetail() {
       q.state.data && !JOB_TERMINAL.has(q.state.data.status) ? 5000 : false,
   });
 
-  // §35：SSE 只负责订阅，不承载任务本身。组件卸载即退订，任务继续跑。
+  // §18：SSE 只负责订阅，不承载任务本身。组件卸载即退订，任务继续跑。
+  const [activity, setActivity] = React.useState<JobActivityEvent[]>([]);
   React.useEffect(() => {
     if (!jobId) return;
     return subscribeJobEvents(
@@ -44,8 +49,14 @@ export function EvaluationDetail() {
       () => {
         /* 断线由轮询兜底；无需特殊处理 */
       },
+      (event) =>
+        setActivity((prev) => [event, ...prev].slice(0, ACTIVITY_BUFFER)),
     );
   }, [jobId, queryClient]);
+  React.useEffect(() => {
+    // Job 终态后清空活动流（完成后的页面不再显示执行期瞬态）
+    if (query.data && JOB_TERMINAL.has(query.data.status)) setActivity([]);
+  }, [query.data?.status, query.data]);
 
   const cancel = useMutation({
     mutationFn: () => evaluationApi.cancelEvalRun(jobId),
@@ -99,9 +110,47 @@ export function EvaluationDetail() {
       {cancel.error && <CancelError message={(cancel.error as Error).message} />}
       {job.error && <FailureSection job={job} />}
       <ProgressSection job={job} />
+      {!terminal && activity.length > 0 && <ActivitySection activity={activity} />}
       <ConfigSection job={job} />
       {job.run_id && <RunSection job={job} />}
     </div>
+  );
+}
+
+/** §18：执行期实时活动（case/turn/tool 级）。终态后隐藏。 */
+function ActivitySection({ activity }: { activity: JobActivityEvent[] }) {
+  return (
+    <Section title="实时活动" description="case / turn / tool 生命周期事件（SSE best-effort）。">
+      <div className="space-y-1">
+        {activity.map((event, index) => (
+          <div
+            key={`${event.event_id ?? event.type}-${index}`}
+            className="flex items-center gap-2 text-xs"
+            style={{ opacity: 1 - index * 0.08 }}
+          >
+            <Badge
+              variant="outline"
+              className={
+                event.type.endsWith(".started")
+                  ? "text-primary"
+                  : event.type === "error"
+                    ? "text-[var(--fail)]"
+                    : "text-muted-foreground"
+              }
+            >
+              {event.type}
+            </Badge>
+            <span className="text-muted-foreground">
+              {event.case_id && <span className="font-mono">{event.case_id}</span>}
+              {event.iteration != null && ` · iter ${event.iteration}`}
+              {event.turn != null && ` · turn ${event.turn}`}
+              {(event.name || event.tool) && ` · ${event.name ?? event.tool}`}
+              {event.status && ` · ${event.status}`}
+            </span>
+          </div>
+        ))}
+      </div>
+    </Section>
   );
 }
 

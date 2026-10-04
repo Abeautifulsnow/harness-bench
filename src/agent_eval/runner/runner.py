@@ -106,6 +106,26 @@ _PROGRESS_KEYS = {
 # 这一层只防病理情况，余量留给超时后的 cancel 与收尾落盘。
 _SESSION_TIMEOUT_GRACE = 30.0
 
+# §18 实时流转发的事件类型白名单：活动可观测（工具/MCP/子代理/压缩/异常），
+# 排除高频大 payload 的 model.request/model.response（那些走 Trace Viewer）。
+_STREAMED_EVENT_TYPES = frozenset(
+    {
+        "tool.call",
+        "tool.result",
+        "mcp.call",
+        "mcp.result",
+        "skill.loaded",
+        "retriever.call",
+        "retriever.result",
+        "subagent.started",
+        "subagent.finished",
+        "context.compaction.started",
+        "context.compaction.finished",
+        "error",
+        "retry",
+    }
+)
+
 
 @dataclass
 class RunConfig:
@@ -242,6 +262,17 @@ class Runner:
         self._usage_scopes: list[str] = []
         self._sut_agent_model: str | None = None
         self._strict_protocol = False
+        self._event_sink: Callable[[dict], None] | None = None
+
+    def _emit(self, payload: dict) -> None:
+        """§18：向 event sink 转发一条执行期事件（无订阅者时零开销）。"""
+
+        if self._event_sink is None:
+            return
+        try:
+            self._event_sink(payload)
+        except Exception:  # noqa: BLE001 - 观测面故障绝不影响评测本身
+            self._event_sink = None
 
     # ------------------------------------------------------------------ entry
 
@@ -249,7 +280,11 @@ class Runner:
         self,
         on_run_created: Callable[[str], None] | None = None,
         on_progress: Callable[[dict[str, int]], None] | None = None,
+        on_event: Callable[[dict], None] | None = None,
     ) -> RunOutcome:
+        # §18 细粒度事件：case/turn/tool 级生命周期。sink 是实例级（run 期重置），
+        # 避免给 _guarded_iteration→_drive_session→_run_turn 三层签名加参数。
+        self._event_sink = on_event
         cfg = self.cfg
         benchmark = load_benchmark(cfg.evals_root, cfg.benchmark)
         info, cases = load_dataset(cfg.evals_root, benchmark.dataset)
@@ -587,10 +622,19 @@ class Runner:
         会挡住其他 case 的 Agent 调用，两个模型仍互相牵制。
         """
         async with agent_sem:
+            self._emit({"type": "case.started", "case_id": case.id, "iteration": iteration})
             phase = await self._execute_agent_phase(case, iteration, ctx)
         result = await self._finish_iteration(case, phase, ctx)
         results.append(result)
         self.store.save_case_run(result)
+        self._emit(
+            {
+                "type": "case.completed",
+                "case_id": case.id,
+                "iteration": iteration,
+                "status": result.status.value,
+            }
+        )
         if notify_progress is not None:
             notify_progress()
 
@@ -804,8 +848,25 @@ class Runner:
                         run_status = "timeout"
                         await self.adapter.cancel(session)
                         break
+                    self._emit(
+                        {
+                            "type": "turn.started",
+                            "case_id": case.id,
+                            "iteration": result.iteration,
+                            "turn": index,
+                        }
+                    )
                     turn, events, failed = await self._run_turn(
                         session, case, index, message, result.id, remaining
+                    )
+                    self._emit(
+                        {
+                            "type": "turn.completed",
+                            "case_id": case.id,
+                            "iteration": result.iteration,
+                            "turn": index,
+                            "status": turn.status,
+                        }
                     )
                     turn_results.append(turn)
                     session_events.extend(events)
@@ -1081,6 +1142,23 @@ class Runner:
                 async for event in self.adapter.run(session, AgentRequest(message=message)):
                     builder.feed(event)
                     events.append(event)
+                    if self._event_sink is not None and event.type in _STREAMED_EVENT_TYPES:
+                        # §18：tool/子代理/压缩等活动事件实时转发。data 只取白名单
+                        # 标量字段——原始 payload（工具参数、LLM 响应）留在落盘的
+                        # trace 里走 Trace Viewer，不进实时流。
+                        self._emit(
+                            {
+                                "type": event.type,
+                                "case_id": case.id,
+                                "turn": index,
+                                "event_id": event.event_id,
+                                **{
+                                    key: event.data[key]
+                                    for key in ("name", "tool", "status", "server")
+                                    if isinstance(event.data.get(key), (str, int, float))
+                                },
+                            }
+                        )
                     if event.type not in EVENT_TYPES:
                         # E1：PRD §8 是闭合词汇表。未知事件类型默认 warn——执行期
                         # 计数、聚合期进 aggregate.warnings（可见不阻断，判不动

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
@@ -98,25 +99,41 @@ async def cancel_eval_run(job_id: str, request: Request) -> EvalRunJob:
 
 @router.get("/eval-runs/{job_id}/events", summary="Job 实时进度 SSE（§18：run-level）")
 async def stream_eval_run_events(job_id: str, request: Request) -> StreamingResponse:
-    if _service(request).get(job_id) is None:
+    service = _service(request)
+    if service.get(job_id) is None:
         raise HTTPException(status_code=404, detail=f"unknown job: {job_id}")
 
     async def events() -> Any:
+        # §18：两条流合一——run-level 快照（轮询，事实源）+ case/turn/tool 级
+        # 细粒度事件（hub 订阅，best-effort）。事件名 = 事件 type 本身
+        # （case.started / tool.call / ...），Web 端按名字分发。
+        queue = service.hub.subscribe(job_id)
         last_snapshot: str | None = None
-        while True:
-            job = _service(request).get(job_id)
-            if job is None:
-                break
-            snapshot = job.model_dump_json()
-            if snapshot != last_snapshot:
-                event = _TERMINAL_EVENTS.get(str(job.status), "job.updated")
-                yield f"event: {event}\ndata: {snapshot}\n\n"
-                last_snapshot = snapshot
-            if job.status in TERMINAL_STATUSES:
-                break
-            if await request.is_disconnected():
-                break
-            await asyncio.sleep(_SSE_POLL_SECONDS)
+        try:
+            while True:
+                job = service.get(job_id)
+                if job is None:
+                    break
+                snapshot = job.model_dump_json()
+                if snapshot != last_snapshot:
+                    event = _TERMINAL_EVENTS.get(str(job.status), "job.updated")
+                    yield f"event: {event}\ndata: {snapshot}\n\n"
+                    last_snapshot = snapshot
+                if job.status in TERMINAL_STATUSES:
+                    break
+                try:
+                    fine_event = await asyncio.wait_for(queue.get(), timeout=_SSE_POLL_SECONDS)
+                except TimeoutError:
+                    if await request.is_disconnected():
+                        break
+                    continue
+                # EventSource 无法通配监听：细粒度事件统一挂 job.activity 名字，
+                # 具体 type（case.started / tool.call / ...）在 data 里。
+                yield "event: job.activity\n" + (
+                    f"data: {json.dumps(fine_event, ensure_ascii=False, default=str)}\n\n"
+                )
+        finally:
+            service.hub.unsubscribe(job_id, queue)
 
     return StreamingResponse(
         events(),
