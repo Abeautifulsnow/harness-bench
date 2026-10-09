@@ -52,11 +52,21 @@ class ReviewStore:
         reviewer: str | None = None,
         note: str = "",
         queue_reason: str | None = None,
+        machine_verdict: str | None = None,
     ) -> dict:
-        verdict = verdict.upper()
-        if verdict not in VERDICTS:
+        """verdict is the HUMAN verdict (five values). An entry queued without a
+        human verdict passes verdict="" together with queue_reason: the pending
+        read path has always supported it, only the write path could not create
+        it. machine_verdict rides along as the machine fact (human verdict never
+        overwrites machine results)."""
+        verdict = (verdict or "").upper()
+        if verdict and verdict not in VERDICTS:
             raise InvalidCallError(
                 f"invalid review verdict '{verdict}' (PRD §60: {', '.join(VERDICTS)})"
+            )
+        if not verdict and queue_reason is None:
+            raise InvalidCallError(
+                "empty verdict requires queue_reason (queued entries must state why)"
             )
         if verdict in NOTE_REQUIRED and not note.strip():
             raise InvalidCallError(f"verdict {verdict} requires --note (Spec §5.2: 必须留判定理由)")
@@ -74,6 +84,8 @@ class ReviewStore:
             "queue_reason": queue_reason,
             "created_at": datetime.now().astimezone().isoformat(),
         }
+        if machine_verdict:
+            record["machine_verdict"] = machine_verdict
         self.root.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")

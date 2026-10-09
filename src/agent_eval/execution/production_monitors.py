@@ -40,6 +40,8 @@ from agent_eval.evaluators.online_eval import (
 )
 from agent_eval.execution.notifier import _deliver, auth_headers
 from agent_eval.execution.triggers import NotifyDef
+from agent_eval.review.production_queue import queue_production_failures
+from agent_eval.review.store import ReviewStore
 from agent_eval.storage.production_store import ProductionStore
 
 logger = logging.getLogger("agent_eval.production_monitors")
@@ -76,6 +78,8 @@ class ProductionMonitorDef(BaseModel):
     backfill_batch: int = Field(default=20, ge=1)
     alert: AlertDef | None = None
     notify: NotifyDef | None = None
+    # P1-2: auto-enqueue failing cases into the Review Queue (pending)
+    enqueue_failures: bool = False
 
     @field_validator("id")
     @classmethod
@@ -155,8 +159,10 @@ class ProductionMonitorView(BaseModel):
     sampling_rate: float
     filter: MonitorFilter
     alert_metric: str | None = None
+    enqueue_failures: bool = False
     cursor: str | None = None
     evaluated_total: int = 0
+    queued_total: int = 0
     last_run_at: datetime | None = None
     last_error: str | None = None
 
@@ -170,11 +176,13 @@ class ProductionMonitorService:
         data_root: Path,
         evaluator: object,  # §61 注入契约：async evaluate(...) / version()
         *,
+        review_store: ReviewStore | None = None,
         tick_interval_seconds: float = 60.0,
         now_fn: type[datetime] = datetime,
     ) -> None:
         self.evals_root = evals_root
         self.evaluator = evaluator
+        self.review_store = review_store
         self.store = ProductionStore(data_root)
         self.states = MonitorStateStore(data_root)
         # breach 台账与 webhook 投递台账分开：alerts.jsonl 只有质量告警事实，
@@ -202,8 +210,10 @@ class ProductionMonitorService:
                     sampling_rate=mdef.sampling_rate,
                     filter=mdef.filter,
                     alert_metric=mdef.alert.metric if mdef.alert else None,
+                    enqueue_failures=mdef.enqueue_failures,
                     cursor=state.get("cursor"),
                     evaluated_total=int(state.get("evaluated_total") or 0),
+                    queued_total=int(state.get("queued_total") or 0),
                     last_run_at=_as_dt(state.get("last_run_at")),
                     last_error=state.get("error"),
                 )
@@ -271,6 +281,12 @@ class ProductionMonitorService:
                 evaluated += 1
                 state["evaluated_total"] = int(state.get("evaluated_total") or 0) + 1
                 self._check_alert(mdef, result, meta["trace_id"], moment)
+                if mdef.enqueue_failures and self.review_store is not None:
+                    queued = queue_production_failures(
+                        self.review_store, trace_id=meta["trace_id"], evaluation=result
+                    )
+                    if queued:
+                        state["queued_total"] = int(state.get("queued_total") or 0) + len(queued)
             state["last_run_at"] = moment.isoformat()
             state["error"] = None
         return evaluated

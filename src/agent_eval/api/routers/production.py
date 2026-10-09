@@ -333,6 +333,117 @@ async def production_eval_trends(request: Request, days: int = 30) -> list[dict]
     return online_eval_trend(_store(request), days=max(1, min(days, 365)))
 
 
+@router.post(
+    "/production/traces/{trace_id}/review-queue",
+    summary="把一次 Online Eval 的 FAIL case 入 Review Queue（pending，token 门）",
+    dependencies=[Depends(enforce_exec_token)],
+)
+async def enqueue_production_review_queue(trace_id: str, request: Request) -> dict:
+    from agent_eval.review.production_queue import queue_production_failures
+
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}  # 空 body 合法：缺省取最新一次评测
+    evaluation_id = body.get("evaluation_id") if isinstance(body, dict) else None
+
+    store = _store(request)
+    meta = _require_meta(store, trace_id)
+    evaluation = _resolve_evaluation(store, trace_id, meta, evaluation_id)
+    enqueued = queue_production_failures(
+        request.app.state.workspace.review_store(), trace_id=trace_id, evaluation=evaluation
+    )
+    return {
+        "trace_id": trace_id,
+        "evaluation_id": evaluation.get("evaluation_id"),
+        "enqueued": enqueued,
+    }
+
+
+@router.post(
+    "/production/traces/{trace_id}/promote",
+    summary="由 production 失败 case 生成回归 Case Draft（token 门；人工评审后落库）",
+    dependencies=[Depends(enforce_exec_token)],
+)
+async def promote_production_case(trace_id: str, request: Request) -> dict:
+    from agent_eval.evaluators.online_eval import extract_pair as _extract
+    from agent_eval.failures.promote import build_draft_from_production, validate_assertions
+
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from None
+    case_id = str(body.get("case_id") or "") if isinstance(body, dict) else ""
+    evaluation_id = body.get("evaluation_id") if isinstance(body, dict) else None
+    if not case_id:
+        raise HTTPException(status_code=400, detail="body.case_id is required")
+
+    store = _store(request)
+    meta = _require_meta(store, trace_id)
+    if case_id not in (meta.get("cases") or {}):
+        raise HTTPException(status_code=404, detail=f"unknown case in trace: {case_id}")
+    evaluation = _resolve_evaluation(store, trace_id, meta, evaluation_id)
+    failed = [
+        row
+        for row in evaluation.get("rows") or []
+        if row.get("verdict") == "fail" and str(row.get("case_id")) == case_id
+    ]
+    if not failed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"case {case_id} has no failing row in evaluation "
+            f"{evaluation.get('evaluation_id')}",
+        )
+    pair = _extract(case_id, meta["cases"][case_id], store.load_events(trace_id, case_id))
+    if pair is None:
+        raise HTTPException(
+            status_code=422,
+            detail="pair not extractable for this case (need input+output)",
+        )
+    draft = build_draft_from_production(
+        trace_id,
+        pair,
+        evaluation_id=str(evaluation.get("evaluation_id")),
+        failure_reason=str(failed[0].get("reason") or failed[0].get("metric") or ""),
+    )
+    invalid = validate_assertions(draft.suggested_assertions)
+    if invalid:  # 不落不可用的 draft：断言 schema 校验必须过
+        raise HTTPException(status_code=422, detail=f"invalid suggested assertions: {invalid}")
+    request.app.state.workspace.draft_store().save(draft)
+    return draft.as_dict()
+
+
+def _require_meta(store: ProductionStore, trace_id: str) -> dict:
+    try:
+        meta = store.get_meta(trace_id)
+    except InvalidCallError:
+        raise HTTPException(
+            status_code=404, detail=f"unknown production trace: {trace_id}"
+        ) from None
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"unknown production trace: {trace_id}")
+    return meta
+
+
+def _resolve_evaluation(
+    store: ProductionStore, trace_id: str, meta: dict, evaluation_id: object
+) -> dict:
+    """指定 id 或缺省取最新一次评测；缺评测 → 422（先 evaluate 再入队/晋级）。"""
+
+    if evaluation_id:
+        evaluation = store.get_evaluation(trace_id, str(evaluation_id))
+        if evaluation is None:
+            raise HTTPException(status_code=404, detail=f"unknown evaluation: {evaluation_id}")
+        return evaluation
+    evaluations = store.list_evaluations(trace_id)
+    if not evaluations:
+        raise HTTPException(
+            status_code=422,
+            detail=f"trace {trace_id} has no online evaluation yet",
+        )
+    return evaluations[0]
+
+
 @router.get(
     "/production/traces/{trace_id}/evaluations",
     summary="生产 Trace 的历次 Online Eval 结果（新→旧）",

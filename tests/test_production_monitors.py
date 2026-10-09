@@ -270,6 +270,37 @@ class TestAlert:
         assert not service.alert_log_path.exists()
 
 
+class TestAutoEnqueue:
+    """P1-2：monitor 评测 FAIL 自动入 Review Queue（pending，人工结论不覆盖）。"""
+
+    def test_enqueue_failures_creates_pending_entries_and_dedups_on_backfill(self, env) -> None:
+        from agent_eval.review.store import ReviewStore
+
+        evals_root, data_root, store = env
+        _write_policy(evals_root)
+        _write_monitor(evals_root)
+        monitor_path = evals_root / "production-monitors" / "qa-auto.yaml"
+        monitor_path.write_text(
+            monitor_path.read_text(encoding="utf-8") + "enqueue_failures: true" + chr(10),
+            encoding="utf-8",
+        )
+        trace_id = _ingest(store, "prod_0000000000000001")
+        review = ReviewStore(data_root / "state")
+        service = ProductionMonitorService(
+            evals_root, data_root, StubAdapter(score=0.1), review_store=review
+        )
+        assert service.tick() == ["qa-auto"]
+        pending = review.list(status="pending")
+        assert [(r["run_id"], r["case_id"]) for r in pending] == [
+            ("production:" + trace_id, "conv-1")
+        ]
+        assert service.states.get("qa-auto")["queued_total"] == 1
+        # 回填重评同一条 trace：已有 pending，不得重复入队
+        service.backfill("qa-auto")
+        assert len(review.list(status="pending")) == 1
+        assert service.states.get("qa-auto")["queued_total"] == 1
+
+
 class TestTrend:
     def test_trend_aggregates_by_date_and_metric(self, env) -> None:
         _, _, store = env
@@ -306,9 +337,7 @@ class TestTrend:
             second,
             {
                 "evaluation_id": "eval_00000002aaaaaaaa",
-                "rows": [
-                    {"metric": "agent.task_completion", "verdict": "pass", "score": 0.8}
-                ],
+                "rows": [{"metric": "agent.task_completion", "verdict": "pass", "score": 0.8}],
                 "summary": {},
             },
         )
@@ -335,9 +364,7 @@ class TestApi:
             fixtures_root=REPO / "fixtures",
             production_evaluator=evaluator,
         )
-        return _httpx.AsyncClient(
-            transport=_httpx.ASGITransport(app=app), base_url="http://test"
-        )
+        return _httpx.AsyncClient(transport=_httpx.ASGITransport(app=app), base_url="http://test")
 
     @pytest.mark.asyncio
     async def test_monitor_views_backfill_and_trends(self, env) -> None:

@@ -16,6 +16,8 @@ backfill_batch: 20
 alert:
   metric: agent.task_completion
   max_fail_rate_percent: 30
+# P1-2：FAIL case 自动入 Review Queue（pending，人工给结论后同键覆盖生效）
+enqueue_failures: false
 # notify:
 #   webhook: http://example.internal/hooks/agent-eval
 #   token_secret_ref: AGENT_EVAL_NOTIFY_TOKEN

@@ -16,6 +16,7 @@ from typing import Any
 import yaml
 
 from agent_eval.errors import InvalidCallError
+from agent_eval.evaluators.online_eval import EvalPair
 from agent_eval.failures.taxonomy import classify
 from agent_eval.models.case import Assertion
 from agent_eval.models.results import CaseRunResult
@@ -213,6 +214,47 @@ def build_draft(
         suggested_assertions=suggested,
         inputs=_inputs_from(messages),
         environment=environment or {},
+    )
+
+
+def build_draft_from_production(
+    trace_id: str,
+    pair: EvalPair,
+    *,
+    evaluation_id: str | None = None,
+    failure_reason: str = "",
+    draft_id: str | None = None,
+) -> CaseDraft:
+    """P1-2：production 失败 -> Case Draft（source_type="production"）。
+
+    与 run 侧 build_draft 的关键差异：online eval 是 reference-free 的——生产失败
+    没有"标准答案"，所以 output 断言**留给人工补**，draft 只固化确定性事实：
+    原始 input（可回归的前提）与观测到的工具序列（required 建议，可删）。
+    suite 固定 regression：生产失败回流的第一站就是回归集。
+    """
+    tools = _unique(list(pair.tools_called))
+    suggested: dict[str, Any] = {}
+    tool_assertions: dict[str, list[str]] = {}
+    if tools:
+        tool_assertions["required"] = tools
+        suggested["tools"] = tool_assertions
+    prompt = pair.input or ""
+    return CaseDraft(
+        id=draft_id or f"draft-prod-{trace_id}-{pair.case_id}",
+        case_id=f"promoted.{trace_id}.{pair.case_id}",
+        # production trace 没有 run/iteration 概念：留空，出处以 run_id/source_ref 记
+        case_run_id="",
+        run_id=f"production:{trace_id}",
+        suite="regression",
+        source_type="production",
+        source_ref=trace_id,
+        failure_category=None,
+        classification_evidence=failure_reason,
+        trace_reference=f"production:{trace_id}",
+        tool_expectations=tool_assertions,
+        suggested_assertions=suggested,
+        inputs={"type": "single_turn", "prompt": prompt},
+        environment={},
     )
 
 
