@@ -44,6 +44,7 @@ class ProductionStore:
         endpoint: str | None = None,
         model: str | None = None,
         trace_id: str | None = None,
+        origin: str | None = None,
     ) -> str:
         """cases: [{case_id, events: [TraceEvent 兼容 dict]}]。返回 trace_id。"""
 
@@ -79,6 +80,8 @@ class ProductionStore:
             "total_events": sum(len(case["events"]) for case in cases),
             "endpoint": endpoint,
             "model": model,
+            # P1-3 Trace Replay：source="replay" 时指回被重放的原 trace
+            "origin": origin,
         }
         (directory / "meta.json").write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"

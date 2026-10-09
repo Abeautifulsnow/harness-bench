@@ -444,6 +444,171 @@ def _resolve_evaluation(
     return evaluations[0]
 
 
+@router.post(
+    "/production/traces/{trace_id}/replay",
+    summary="Trace Replay：脱敏后用 candidate agent 重放并与历史行为比较（token 门）",
+    dependencies=[Depends(enforce_exec_token)],
+)
+async def replay_production_trace(trace_id: str, request: Request) -> dict:
+    import time as _time
+
+    from agent_eval.adapters import open_adapter as _open  # noqa: F401 - 校验端点合法性的快速路径
+    from agent_eval.evaluators.online_eval import extract_pair as _extract
+    from agent_eval.execution.connections import load_agent_connections
+    from agent_eval.ids import new_id
+    from agent_eval.runner.replay import compare_with_original, execute_replay
+    from agent_eval.storage.replay_store import ReplayStore
+    from agent_eval.trace.sanitize import sanitize_text
+
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    case_id = body.get("case_id")
+    sanitize_enabled = bool(body.get("sanitize", True))
+    timeout_seconds = float(body.get("timeout_seconds") or 60.0)
+    policy_id = body.get("policy")
+
+    meta = _require_meta(_store(request), trace_id)
+    cases = meta.get("cases") or {}
+    if case_id is None:
+        if len(cases) == 1:
+            case_id = next(iter(cases))
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="trace has multiple cases; specify body.case_id explicitly",
+            )
+    case_id = str(case_id)
+    if case_id not in cases:
+        raise HTTPException(status_code=404, detail=f"unknown case in trace: {case_id}")
+
+    pair = _extract(case_id, cases[case_id], _store(request).load_events(trace_id, case_id))
+    if pair is None:
+        raise HTTPException(
+            status_code=422, detail="pair not extractable for this case (need input+output)"
+        )
+
+    # 端点解析：显式 agent_endpoint 优先；agent_profile 走注册表，secret 只在
+    # 服务端解析成 header（§27：浏览器拿不到凭证）
+    endpoint = body.get("agent_endpoint")
+    headers: dict[str, str] | None = None
+    if not endpoint and body.get("agent_profile"):
+        profile = next(
+            (
+                p
+                for p in load_agent_connections(request.app.state.workspace.evals_root)
+                if p.id == str(body["agent_profile"])
+            ),
+            None,
+        )
+        if profile is None:
+            raise HTTPException(
+                status_code=404, detail=f"unknown agent profile: {body['agent_profile']}"
+            )
+        endpoint = profile.endpoint
+        headers = profile.auth_headers() or None
+    if not endpoint:
+        raise HTTPException(
+            status_code=400, detail="body.agent_endpoint or body.agent_profile is required"
+        )
+
+    prompt, redactions = (
+        sanitize_text(pair.input or "") if sanitize_enabled else (pair.input or "", 0)
+    )
+    policy = None
+    if policy_id:
+        policies = {p.id: p for p in load_eval_policies(request.app.state.workspace.evals_root)}
+        policy = policies.get(str(policy_id))
+        if policy is None:
+            raise HTTPException(status_code=400, detail=f"unknown eval policy: {policy_id}")
+
+    replay_id = new_id("rp")
+    started = _time.monotonic()
+    record: dict = {
+        "replay_id": replay_id,
+        "trace_id": trace_id,
+        "case_id": case_id,
+        "status": "error",
+        "error": None,
+        "sanitize": {"enabled": sanitize_enabled, "redactions": redactions},
+        "source_input": pair.input,
+        "prompt": prompt,
+        "endpoint": endpoint,
+        "replay_trace_id": None,
+        "comparison": None,
+        "created_at": _now_iso(),
+    }
+    try:
+        events = await execute_replay(
+            replay_id=replay_id,
+            prompt=prompt,
+            endpoint=str(endpoint),
+            headers=headers,
+            timeout_seconds=timeout_seconds,
+            case_id=case_id,
+        )
+        replay_trace_id = _store(request).save(
+            source="replay",
+            cases=[{"case_id": case_id, "events": events}],
+            endpoint=str(endpoint),
+            origin=trace_id,
+        )
+        comparison = await compare_with_original(
+            original_pair=pair,
+            prompt=prompt,
+            replay_events=events,
+            policy=policy,
+            adapter=(request.app.state.production_evaluator if policy is not None else None),
+        )
+        record.update(
+            status="completed",
+            replay_trace_id=replay_trace_id,
+            comparison=comparison,
+            duration_ms=int((_time.monotonic() - started) * 1000),
+            finished_at=_now_iso(),
+        )
+    except Exception as exc:  # noqa: BLE001 - 重放失败如实落账，不留半截成功假象
+        record.update(
+            error=f"{type(exc).__name__}: {exc}",
+            duration_ms=int((_time.monotonic() - started) * 1000),
+            finished_at=_now_iso(),
+        )
+    ReplayStore(request.app.state.workspace.data_root).save(record)
+    return record
+
+
+@router.get(
+    "/production/replays",
+    summary="Replay 记录列表（新→旧）",
+)
+async def list_production_replays(request: Request) -> list[dict]:
+    from agent_eval.storage.replay_store import ReplayStore
+
+    return ReplayStore(request.app.state.workspace.data_root).list()
+
+
+@router.get(
+    "/production/replays/{replay_id}",
+    summary="Replay 记录详情（含比较结论）",
+)
+async def get_production_replay(replay_id: str, request: Request) -> dict:
+    from agent_eval.storage.replay_store import ReplayStore
+
+    record = ReplayStore(request.app.state.workspace.data_root).get(replay_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"unknown replay: {replay_id}")
+    return record
+
+
+def _now_iso() -> str:
+    from datetime import datetime
+
+    return datetime.now().astimezone().isoformat()
+
+
 @router.get(
     "/production/traces/{trace_id}/evaluations",
     summary="生产 Trace 的历次 Online Eval 结果（新→旧）",
