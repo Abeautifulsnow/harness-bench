@@ -158,4 +158,8 @@ class CaseStability(BaseModel):
     token_variance: float | None = None
     # PRD §31: pass@k 仅在 repeat >= k 时输出（repeat=1 的 PR Gate 不输出）
     pass_at_k: dict[str, float] = Field(default_factory=dict)
+    # pass^k（k 次必须全部成功）：与 pass@k 的"至少一次成功"互补的保守口径，
+    # 面向安全 / 权限 / 审批 / 数据写入类 case——那类行为只允许"从不失败"，
+    # "试 3 次成 1 次"在 pass@k 下是 1.0，在这里必须是 0.0。输出约定与 pass@k 相同。
+    pass_hat_k: dict[str, float] = Field(default_factory=dict)
     regression_state: RegressionState = RegressionState.UNDETERMINED

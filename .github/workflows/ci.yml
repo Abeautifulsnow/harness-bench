@@ -1,0 +1,101 @@
+# CI（评估 2026-10-09 P0-1：Gate 引擎已有，缺的是"不过就不让合并"的 wiring）。
+#
+# 三层检查：
+#   1. 静态：ruff lint + format + 全量 pytest；
+#   2. 前端：bun install --frozen-lockfile（bun 是唯一权威包管理器，见 .gitignore）+ typecheck + build；
+#   3. 评测门禁：内置 fake agent 冒烟评测走真实 Runner → Trace → Eval → Gate 链路，
+#      先经 `benchmark run --gate` 内联评估，再用 `agent-eval gate` 重放同一条
+#      已存 run 验证结论一致（Spec §6.1 的 exit code 语义就是 CI 的失败信号）。
+#
+# baseline 语义（不是缺陷）：
+#   - PR 上没有数据目录缓存 → 回归类规则退化为 undetermined 不阻断（Spec §4.1 / PRD §65），
+#     security / golden / case.blocking 等绝对规则照常生效；
+#   - main 分支用 cache 累积 `.agent-eval` 数据目录，main-latest baseline 真实存在，
+#     第二次起 main gate 的回归规则开始真正拦回归。
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_LOCKED: "1"
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -q
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - working-directory: web
+        run: bun install --frozen-lockfile
+      - working-directory: web
+        run: bun run typecheck
+      - working-directory: web
+        run: bun run build
+
+  eval-gate:
+    needs: [checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync
+
+      # main 分支累积运行数据目录，让 main-latest baseline 跨 CI 可用。
+      # key 带 run_number（cache 不可变，只能换 key 存新版本），restore-keys 前缀
+      # 命中最近一份；PR 只还原不保存（PR 产生的 run 不得混进 main 的 baseline 池）。
+      - uses: actions/cache/restore@v4
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: .agent-eval
+          key: eval-data-main-v1-${{ github.run_number }}
+          restore-keys: eval-data-main-v1-
+
+      - name: Benchmark smoke + inline gate
+        run: |
+          GATE=pr
+          if [ "${{ github.ref }}" = "refs/heads/main" ] && [ "${{ github.event_name }}" = "push" ]; then
+            GATE=main
+          fi
+          echo "GATE=$GATE" >> "$GITHUB_ENV"
+          uv run agent-eval benchmark run database-core \
+            --tag smoke --agent fake:// --no-judge \
+            --gate "$GATE" --run-id-file run.id
+
+      - name: Replay gate verdict from stored run
+        run: uv run agent-eval gate "$(cat run.id)" --gate "$GATE"
+
+      - uses: actions/cache/save@v4
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        with:
+          path: .agent-eval
+          key: eval-data-main-v1-${{ github.run_number }}

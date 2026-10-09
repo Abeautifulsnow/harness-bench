@@ -1,0 +1,81 @@
+# Release Gate（PRD §67/§108：strict，必跑 golden/regression/security/core 四套件）。
+#
+# 为什么只有 workflow_dispatch、不自动跟 tag：release 模式的 baseline 语义是
+# "无显式 pin 即 fail-fast"（Spec §4.1）——tag 推送时 CI 里没有可 pin 的历史
+# release run，必然红，那不是回归而是契约。发布是人工决策点：发布负责人从
+# nightly 产物（或数据目录）里选定 baseline_run 显式传入，Gate 结论才可信。
+#
+# 未填 baseline_run 时本 workflow 会照常跑评测并把 Gate FAIL 如实暴露——
+# 这正是"不过就不让发布"的语义，不要给这里加 continue-on-error。
+
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_run:
+        description: "显式 pin 的 baseline run id（release 模式必需；空 = 如实 FAIL）"
+        required: false
+        type: string
+      benchmark:
+        description: "发布评测的 benchmark"
+        required: false
+        default: database-core
+        type: string
+      agent_endpoint:
+        description: "被测 agent endpoint（默认 fake://：负向 canary 按设计恒红，发布评测必须指向真实 endpoint）"
+        required: false
+        default: "fake://"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: .agent-eval
+          key: eval-data-release-v1-${{ github.run_number }}
+          restore-keys: |
+            eval-data-release-v1-
+            eval-data-main-v1-
+
+      - name: Release suite composition + release gate
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.baseline_run }}" ]; then
+            ARGS="--baseline-run ${{ github.event.inputs.baseline_run }}"
+          fi
+          uv run agent-eval benchmark run ${{ github.event.inputs.benchmark }} \
+            --suite golden --suite regression --suite security --suite core \
+            --agent "${{ github.event.inputs.agent_endpoint }}" --no-judge --gate release $ARGS \
+            --run-id-file run.id
+          uv run agent-eval gate "$(cat run.id)" --gate release
+
+      - name: Upload release evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-evidence-${{ github.run_number }}
+          path: |
+            .agent-eval/runs/*/report.json
+            .agent-eval/runs/*/report.html
+          retention-days: 90
+          if-no-files-found: warn
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: .agent-eval
+          key: eval-data-release-v1-${{ github.run_number }}

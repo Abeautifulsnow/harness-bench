@@ -75,6 +75,40 @@ def test_variance_fields() -> None:
     assert s2.latency_cv is not None and s2.latency_cv > 0
 
 
+def test_pass_hat_k_all_must_pass() -> None:
+    """pass^k 与 pass@k 对照：exploration 看至少一次成功，"从不失败"看全部成功。"""
+    stable = compute_stability("c1", _cycles([CaseStatus.PASS] * 3))
+    assert stable.pass_at_k == {"pass@1": 1.0, "pass@3": 1.0}
+    assert stable.pass_hat_k == {"pass^1": 1.0, "pass^3": 1.0}
+
+    flaky = compute_stability("c1", _cycles([CaseStatus.PASS, CaseStatus.FAIL, CaseStatus.PASS]))
+    assert flaky.pass_at_k["pass@3"] == 1.0  # 至少一次成功
+    assert flaky.pass_hat_k["pass^3"] == 0.0  # 但不是每次都成功
+
+
+def test_pass_hat_k_key_absent_below_repeat() -> None:
+    """与 pass@k 同约定：repeat < k 时该 key 不出现（repeat=1 全空）。"""
+    one = compute_stability("c1", [run(CaseStatus.PASS)])
+    assert one.pass_at_k == {"pass@1": 1.0}
+    assert one.pass_hat_k == {"pass^1": 1.0}
+    two = compute_stability("c1", _cycles([CaseStatus.FAIL, CaseStatus.FAIL]))
+    assert "pass^3" not in two.pass_hat_k
+    assert two.pass_hat_k["pass^1"] == 0.0
+
+
+def test_pass_hat_k_error_iterations_not_counted_as_failures() -> None:
+    """ERROR 轮不参与统计：基础设施抖动不得把稳定 case 的 pass^k 打成 0。"""
+    iters = [
+        run(CaseStatus.PASS),
+        run(CaseStatus.ERROR),
+        run(CaseStatus.PASS),
+        run(CaseStatus.PASS),
+    ]
+    s = compute_stability("c1", iters)
+    assert s.pass_hat_k["pass^3"] == 1.0
+    assert s.infra_error_count == 1
+
+
 def test_regression_table() -> None:
     from agent_eval.models.results import RegressionState as R
 

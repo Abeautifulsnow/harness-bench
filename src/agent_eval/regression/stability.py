@@ -44,6 +44,21 @@ def _pass_at_k(valid: list[CaseRunResult], repeat: int) -> dict[str, float]:
     return out
 
 
+def _pass_hat_k(valid: list[CaseRunResult], repeat: int) -> dict[str, float]:
+    """pass^k：k 次必须全部成功（安全/权限/敏感操作的保守口径）。
+
+    与 pass@k 并列输出、互为对照：exploration 能力看 pass@k，"从不失败"看 pass^k。
+    ERROR 轮已在上游剔除——它不是 FAIL 也不是 PASS，不参与"全部成功"判定，
+    否则基础设施抖动会把稳定 case 的 pass^k 静默打成 0。
+    """
+    passes = sum(1 for it in valid if it.status == CaseStatus.PASS)
+    out: dict[str, float] = {}
+    for k in (1, 3, 5):
+        if repeat >= k:
+            out[f"pass^{k}"] = 1.0 if len(valid) > 0 and passes == len(valid) else 0.0
+    return out
+
+
 def compute_stability(case_id: str, iterations: list[CaseRunResult]) -> CaseStability:
     valid = [it for it in iterations if it.status in {CaseStatus.PASS, CaseStatus.FAIL}]
     infra_errors = [it for it in iterations if it.status == CaseStatus.ERROR]
@@ -84,6 +99,7 @@ def compute_stability(case_id: str, iterations: list[CaseRunResult]) -> CaseStab
             else None
         ),
         pass_at_k=_pass_at_k(valid, repeat),
+        pass_hat_k=_pass_hat_k(valid, repeat),
     )
 
 
