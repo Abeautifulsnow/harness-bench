@@ -520,3 +520,37 @@ report.html 里既没有 case 级产物索引、没有能力表，也没有指�
 - **护栏**：`test_timeout_preserves_the_evidence_collected_so_far`，用
   "先把事件发完再挂着不结束"的适配器复现——与 `[slow]` 脚本的关键区别是**时序**
   （那个脚本在发任何事件之前先 sleep，超时时手里本来就没有证据）。
+
+
+---
+
+## 2026-10-09 批次（CI 门禁真接入 + 生产反馈闭环）
+
+来源：外部完成度再评估（P0-1 CI、P1-1/2/3 生产闭环）。用户裁决：第一批全做、
+第二批（Judge 校准）暂缓、第三批做 1-3。
+
+| 项 | 状态 | commit |
+| --- | --- | --- |
+| B1 CI workflows（pr/main/nightly/release）+ LICENSE/README + pass^k | ✅ | d8c7334 |
+| B3.1 Production Online Eval 自动化（monitor/采样/回填/趋势/告警） | ✅ | 045088e |
+| B3.2 生产失败 → Review Queue（pending）→ Promote draft | ✅ | 1d5a67a |
+| B3.3 Trace Replay（脱敏 → 重放 → 比较） | ✅ | fce806a |
+
+关键裁决：
+- release workflow 仅手动触发：release 模式无 baseline pin 按 Spec §4.1 fail-fast，
+  自动跟 tag 必然红，是契约不是缺陷；
+- fake:// 下 core 等宽组合的负向/红队 canary 按设计恒红（"负向用例必须真的红"），
+  常态化 CI 只跑 smoke 标签；
+- production 入队复用 PRD §61 的 regression queue_reason，不扩六类词汇；
+  pending 语义补齐（此前读路径支持、写路径造不出）；
+- pass^k（k 次全部成功）从 P1 提前落地，ERROR 轮不参与判定（基础设施抖动
+  不得把稳定 case 的 pass^k 打成 0）。
+
+## 本轮后的剩余缺口（按建议顺序）
+
+1. **P0-2 Judge Calibration**（用户暂缓，仍是最大可信度缺口）：金标集 +
+   Precision/Recall/Kappa，替换 0.70/0.80 先例阈值；
+2. Sandbox：Docker/Git/Postgres Fixture（第三批第 4 项，用户未选）；
+3. 统计置信：bootstrap CI / effect size / paired test（pass^k 已落地）；
+4. 前端测试：Vitest + Playwright，覆盖 Execution 与 Production 两条链；
+5. Full RBAC / Remote Worker / Custom GEval / OTLP 原生 Receiver（P2）。

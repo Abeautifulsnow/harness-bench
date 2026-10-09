@@ -1073,3 +1073,36 @@ change-plan §3 的 C 类（ai-chatbot 专用评测集）从勘察做到真机�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 15: B1+B3.1-3: CI gate wiring, pass^k, production loop
+
+**Date**: 2026-10-09
+**Task**: B1+B3.1-3: CI gate wiring, pass^k, production loop
+**Branch**: `main`
+
+### Summary
+
+第一批（CI workflows pr/main/nightly/release + LICENSE/README + pass^k）与第三批 1-3（Production monitor 自动评测、失败→Review→Promote 回流、Trace Replay）全部落地；4 个 commit，新增 5 模块 4 API 组 62 测试；全量回归 740+ 全绿。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `fce806a` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

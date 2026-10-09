@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 14
-- **Last Active**: 2026-09-30
+- **Total Sessions**: 15
+- **Last Active**: 2026-10-09
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1075 | Active |
+| `journal-1.md` | ~1108 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 15 | 2026-10-09 | B1+B3.1-3: CI gate wiring, pass^k, production loop | `fce806a` | `main` |
 | 14 | 2026-09-30 | C 类专用评测集落地：三轮真机全量 + 四处接线缺陷回修 | `e06033d`, `9505131`, `b7eb081` | `main` |
 | 13 | 2026-09-30 | 审批续跑闭环联调验证（change-plan 未覆盖清单第 1 项关闭） | - | `main` |
 | 12 | 2026-09-30 | Mimosa L2 复查定性：3 条 SQL 注入告警是被测 agent 的评测产物，非本轮 diff | - | `main` |
