@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 15
+- **Total Sessions**: 16
 - **Last Active**: 2026-10-09
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1108 | Active |
+| `journal-1.md` | ~1141 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 16 | 2026-10-09 | Review: b7f1427..9b30df8 修复收口（含复审抓出的 C04/C05 丢失） | `3a274fe` | `main` |
 | 15 | 2026-10-09 | B1+B3.1-3: CI gate wiring, pass^k, production loop | `fce806a` | `main` |
 | 14 | 2026-09-30 | C 类专用评测集落地：三轮真机全量 + 四处接线缺陷回修 | `e06033d`, `9505131`, `b7eb081` | `main` |
 | 13 | 2026-09-30 | 审批续跑闭环联调验证（change-plan 未覆盖清单第 1 项关闭） | - | `main` |

@@ -1106,3 +1106,36 @@ change-plan §3 的 C 类（ai-chatbot 专用评测集）从勘察做到真机�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 16: Review: b7f1427..9b30df8 修复收口（含复审抓出的 C04/C05 丢失）
+
+**Date**: 2026-10-09
+**Task**: Review: b7f1427..9b30df8 修复收口（含复审抓出的 C04/C05 丢失）
+**Branch**: `main`
+
+### Summary
+
+review-workflow 全流程：意图层无偏差；7 项规范层发现全部修复（CI format 阻塞×2、timeout 400 化、monitor state 并发锁、backfill limit 校验、replay 端点拆分、notifier 公开别名）；复审闭环抓到 C04/C05 编辑未落盘（被变量覆盖），重新应用并验证；全量 755 passed，CI-scope lint+format 清零；amend 0c77834→3a274fe；S 级 3 项记入 ROADMAP。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3a274fe` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
