@@ -298,6 +298,42 @@ async def evaluate_production_trace(trace_id: str, request: Request) -> dict:
 
 
 @router.get(
+    "/production/monitors",
+    summary="生产评测 Monitor 列表（Definition Plane + 运行台账合并视图）",
+)
+async def list_production_monitors(request: Request) -> list[dict]:
+    return [view.model_dump() for view in request.app.state.production_monitors.monitor_views()]
+
+
+@router.post(
+    "/production/monitors/{monitor_id}/backfill",
+    summary="对历史生产 Trace 显式回填 Online Eval（token 门；同步、有界）",
+    dependencies=[Depends(enforce_exec_token)],
+)
+def backfill_production_monitor(
+    monitor_id: str, request: Request, limit: int | None = None
+) -> dict:
+    """同步端点（FastAPI 线程池执行）：回填内部要为 judge 调用起事件循环，
+    不能跑在 FastAPI 的主 loop 里（asyncio.run 会拒绝嵌套）。"""
+    from agent_eval.errors import InvalidCallError
+
+    try:
+        return request.app.state.production_monitors.backfill(monitor_id, limit=limit)
+    except InvalidCallError as exc:
+        raise HTTPException(status_code=404, detail=exc.message) from exc
+
+
+@router.get(
+    "/production/trends",
+    summary="Online Eval 趋势：跨 trace 按 (日期, metric) 聚合 pass/fail/error/skipped",
+)
+async def production_eval_trends(request: Request, days: int = 30) -> list[dict]:
+    from agent_eval.execution.production_monitors import online_eval_trend
+
+    return online_eval_trend(_store(request), days=max(1, min(days, 365)))
+
+
+@router.get(
     "/production/traces/{trace_id}/evaluations",
     summary="生产 Trace 的历次 Online Eval 结果（新→旧）",
 )

@@ -38,6 +38,10 @@ from agent_eval.api.routers import regressions as regressions_router
 from agent_eval.api.routers import runs as runs_router
 from agent_eval.api.workspace import Workspace
 from agent_eval.evaluators.deepeval_adapter import DeepEvalCapabilityAdapter
+from agent_eval.execution.production_monitors import (
+    ProductionMonitorService,
+    load_production_monitors,
+)
 from agent_eval.execution.scheduler import SchedulerService, load_schedules
 from agent_eval.execution.service import EvalRunService
 
@@ -61,15 +65,25 @@ def create_app(
         max_running_jobs=max_running_jobs,
     )
     scheduler = SchedulerService(evals_root=evals_root, data_root=data_root, service=service)
+    # P1-1 Production Online Eval 自动化：judge 适配器与 §61 手动评测同一注入契约
+    #（create_app 的 production_evaluator 参数），自动与手动共用一条 judge 路径。
+    monitors = ProductionMonitorService(
+        evals_root=evals_root,
+        data_root=data_root,
+        evaluator=production_evaluator if production_evaluator is not None else None,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         # V2 Scheduled Evaluation：仓库里有调度定义才起守护线程（空定义零开销）。
         if load_schedules(evals_root):
             scheduler.start()
+        if load_production_monitors(evals_root):
+            monitors.start()
         yield
         # 优雅停机：撤掉在途 Job（Runner 收到真实 cancellation），停执行/调度线程。
         scheduler.stop()
+        monitors.stop()
         service.shutdown()
 
     app = FastAPI(
@@ -92,9 +106,12 @@ def create_app(
     # 注入契约：须实现 async evaluate(metric_id, threshold, trace, model=)
     # -> (score|None, reason) 与 version() -> str|None（返回 None = SDK 缺失，
     # 全部 metric 判 skipped）。
-    app.state.production_evaluator = (
+    default_evaluator = (
         production_evaluator if production_evaluator is not None else DeepEvalCapabilityAdapter()
     )
+    app.state.production_evaluator = default_evaluator
+    monitors.evaluator = default_evaluator
+    app.state.production_monitors = monitors
 
     app.add_middleware(
         CORSMiddleware,

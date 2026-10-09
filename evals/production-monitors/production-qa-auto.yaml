@@ -1,0 +1,21 @@
+# Production Monitor（P1-1：Production Online Eval 自动化的 Definition Plane 资产）。
+# 一份"看哪些 trace、按什么节奏评、超阈值找谁"的命名规则：
+#   ingest 后的 tick 依次过滤（filter）→ 采样（sampling_rate，按 trace_id 稳定哈希）
+#   → 跑 eval-policies/<policy> → 结论落 evaluations/（triggered_by: monitor:<id>）
+#   → alert 命中时向 notify.webhook 投递并留痕 state/alerts.jsonl。
+# enabled: false 是刻意缺省——打开前先确认 policy 存在、webhook 在部署环境可达。
+id: production-qa-auto
+display_name: Production QA Auto Eval
+description: 平台事件 trace 全量自动评测（示例：生产环境建议配 sampling_rate 与 case_id_prefix）
+enabled: false
+filter:
+  source: platform
+sampling_rate: 100
+policy: production-qa
+backfill_batch: 20
+alert:
+  metric: agent.task_completion
+  max_fail_rate_percent: 30
+# notify:
+#   webhook: http://example.internal/hooks/agent-eval
+#   token_secret_ref: AGENT_EVAL_NOTIFY_TOKEN

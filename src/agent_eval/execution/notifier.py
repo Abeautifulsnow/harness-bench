@@ -71,7 +71,8 @@ def _deliver(url: str, payload: dict, headers: dict[str, str], log_path: Path) -
     for attempt in range(1, MAX_ATTEMPTS + 1):
         record = {
             "url": url,
-            "job_id": payload["job_id"],
+            # job 通知带 job_id；生产 monitor 告警等非 job 载荷没有该键，落 None
+            "job_id": payload.get("job_id"),
             "attempted_at": datetime.now().astimezone().isoformat(),
             "attempt": attempt,
         }
