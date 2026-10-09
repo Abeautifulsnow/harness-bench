@@ -38,7 +38,7 @@ from agent_eval.evaluators.online_eval import (
     load_eval_policies,
     run_online_evaluation,
 )
-from agent_eval.execution.notifier import _deliver, auth_headers
+from agent_eval.execution.notifier import auth_headers, deliver
 from agent_eval.execution.triggers import NotifyDef
 from agent_eval.review.production_queue import queue_production_failures
 from agent_eval.review.store import ReviewStore
@@ -185,6 +185,9 @@ class ProductionMonitorService:
         self.review_store = review_store
         self.store = ProductionStore(data_root)
         self.states = MonitorStateStore(data_root)
+        # tick 线程与 backfill 端点是 state 的两个并发写者：串行化 _process +
+        # 台账落盘（原子写只防损坏，不防丢更新/cursor 回退）
+        self._state_lock = threading.Lock()
         # breach 台账与 webhook 投递台账分开：alerts.jsonl 只有质量告警事实，
         # 投递尝试（成功/失败/重试）与 job 通知共用 notifications.jsonl 一个台账
         self.alert_log_path = data_root / "state" / "alerts.jsonl"
@@ -232,15 +235,17 @@ class ProductionMonitorService:
                 continue
             state = self.states.get(mdef.id)
             try:
-                evaluated = self._process(mdef, state, moment, batch=mdef.backfill_batch)
+                with self._state_lock:
+                    evaluated = self._process(mdef, state, moment, batch=mdef.backfill_batch)
+                    self.states.save(mdef.id, state)
             except Exception as exc:  # noqa: BLE001 - tick 崩了线程不能死
                 state["error"] = f"{type(exc).__name__}: {exc}"
                 logger.warning("production monitor %s failed: %s", mdef.id, exc)
-                self.states.save(mdef.id, state)
+                with self._state_lock:
+                    self.states.save(mdef.id, state)
                 continue
             if evaluated:
                 fired.append(mdef.id)
-            self.states.save(mdef.id, state)
         return fired
 
     def backfill(self, monitor_id: str, *, limit: int | None = None) -> dict:
@@ -250,12 +255,15 @@ class ProductionMonitorService:
         mdef = monitors.get(monitor_id)
         if mdef is None:
             raise InvalidCallError(f"unknown production monitor: {monitor_id}")
+        if limit is not None and limit < 1:
+            raise InvalidCallError("backfill limit must be >= 1")
         state = self.states.get(monitor_id)
-        state["cursor"] = None  # 回填重扫全部历史
         batch = limit if limit is not None else mdef.backfill_batch * 5
-        evaluated = self._process(mdef, state, self.now_fn.now().astimezone(), batch=batch)
-        state["error"] = None
-        self.states.save(monitor_id, state)
+        with self._state_lock:
+            state["cursor"] = None  # 回填重扫全部历史
+            evaluated = self._process(mdef, state, self.now_fn.now().astimezone(), batch=batch)
+            state["error"] = None
+            self.states.save(monitor_id, state)
         return {"monitor": monitor_id, "evaluated": evaluated, "considered_cap": batch}
 
     # ------------------------------------------------------------------ core
@@ -353,7 +361,7 @@ class ProductionMonitorService:
             }
             # 尽力而为：告警投递失败留痕（notifier 重试语义），不阻塞 tick 线程
             threading.Thread(
-                target=_deliver,
+                target=deliver,
                 args=(
                     mdef.notify.webhook,
                     payload,

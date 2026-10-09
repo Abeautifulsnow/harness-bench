@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import Query as fastapi_Query
 
 from agent_eval.api.security import enforce_exec_token
 from agent_eval.errors import InvalidCallError
@@ -311,7 +312,7 @@ async def list_production_monitors(request: Request) -> list[dict]:
     dependencies=[Depends(enforce_exec_token)],
 )
 def backfill_production_monitor(
-    monitor_id: str, request: Request, limit: int | None = None
+    monitor_id: str, request: Request, limit: int | None = fastapi_Query(default=None, ge=1)
 ) -> dict:
     """同步端点（FastAPI 线程池执行）：回填内部要为 judge 调用起事件循环，
     不能跑在 FastAPI 的主 loop 里（asyncio.run 会拒绝嵌套）。"""
@@ -450,81 +451,62 @@ def _resolve_evaluation(
     dependencies=[Depends(enforce_exec_token)],
 )
 async def replay_production_trace(trace_id: str, request: Request) -> dict:
+    from agent_eval.evaluators.online_eval import extract_pair as _extract
+
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}  # 空 body 合法：全部走缺省
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+
+    meta = _require_meta(_store(request), trace_id)
+    options = _parse_replay_options(body)
+    case_id = _resolve_replay_case(body, meta)
+    pair = _extract(case_id, meta["cases"][case_id], _store(request).load_events(trace_id, case_id))
+    if pair is None:
+        raise HTTPException(
+            status_code=422, detail="pair not extractable for this case (need input+output)"
+        )
+    endpoint, headers = _resolve_replay_target(body, request)
+    policy = _resolve_replay_policy(body, request)
+
+    record = await _execute_and_record_replay(
+        request=request,
+        meta=meta,
+        pair=pair,
+        case_id=case_id,
+        endpoint=endpoint,
+        headers=headers,
+        policy=policy,
+        options=options,
+    )
+    return record
+
+
+async def _execute_and_record_replay(
+    *,
+    request: Request,
+    meta: dict,
+    pair,
+    case_id: str,
+    endpoint: str,
+    headers: dict[str, str] | None,
+    policy: dict | None,
+    options: dict,
+) -> dict:
+    """执行一次重放并落账：成败都写完整 record（失败不留半截成功假象）。"""
     import time as _time
 
-    from agent_eval.adapters import open_adapter as _open  # noqa: F401 - 校验端点合法性的快速路径
-    from agent_eval.evaluators.online_eval import extract_pair as _extract
-    from agent_eval.execution.connections import load_agent_connections
     from agent_eval.ids import new_id
     from agent_eval.runner.replay import compare_with_original, execute_replay
     from agent_eval.storage.replay_store import ReplayStore
     from agent_eval.trace.sanitize import sanitize_text
 
-    try:
-        body = await request.json()
-    except ValueError:
-        body = {}
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="body must be a JSON object")
-    case_id = body.get("case_id")
-    sanitize_enabled = bool(body.get("sanitize", True))
-    timeout_seconds = float(body.get("timeout_seconds") or 60.0)
-    policy_id = body.get("policy")
-
-    meta = _require_meta(_store(request), trace_id)
-    cases = meta.get("cases") or {}
-    if case_id is None:
-        if len(cases) == 1:
-            case_id = next(iter(cases))
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="trace has multiple cases; specify body.case_id explicitly",
-            )
-    case_id = str(case_id)
-    if case_id not in cases:
-        raise HTTPException(status_code=404, detail=f"unknown case in trace: {case_id}")
-
-    pair = _extract(case_id, cases[case_id], _store(request).load_events(trace_id, case_id))
-    if pair is None:
-        raise HTTPException(
-            status_code=422, detail="pair not extractable for this case (need input+output)"
-        )
-
-    # 端点解析：显式 agent_endpoint 优先；agent_profile 走注册表，secret 只在
-    # 服务端解析成 header（§27：浏览器拿不到凭证）
-    endpoint = body.get("agent_endpoint")
-    headers: dict[str, str] | None = None
-    if not endpoint and body.get("agent_profile"):
-        profile = next(
-            (
-                p
-                for p in load_agent_connections(request.app.state.workspace.evals_root)
-                if p.id == str(body["agent_profile"])
-            ),
-            None,
-        )
-        if profile is None:
-            raise HTTPException(
-                status_code=404, detail=f"unknown agent profile: {body['agent_profile']}"
-            )
-        endpoint = profile.endpoint
-        headers = profile.auth_headers() or None
-    if not endpoint:
-        raise HTTPException(
-            status_code=400, detail="body.agent_endpoint or body.agent_profile is required"
-        )
-
+    trace_id = str(meta["trace_id"])
     prompt, redactions = (
-        sanitize_text(pair.input or "") if sanitize_enabled else (pair.input or "", 0)
+        sanitize_text(pair.input or "") if options["sanitize"] else (pair.input or "", 0)
     )
-    policy = None
-    if policy_id:
-        policies = {p.id: p for p in load_eval_policies(request.app.state.workspace.evals_root)}
-        policy = policies.get(str(policy_id))
-        if policy is None:
-            raise HTTPException(status_code=400, detail=f"unknown eval policy: {policy_id}")
-
     replay_id = new_id("rp")
     started = _time.monotonic()
     record: dict = {
@@ -533,7 +515,7 @@ async def replay_production_trace(trace_id: str, request: Request) -> dict:
         "case_id": case_id,
         "status": "error",
         "error": None,
-        "sanitize": {"enabled": sanitize_enabled, "redactions": redactions},
+        "sanitize": {"enabled": options["sanitize"], "redactions": redactions},
         "source_input": pair.input,
         "prompt": prompt,
         "endpoint": endpoint,
@@ -545,15 +527,15 @@ async def replay_production_trace(trace_id: str, request: Request) -> dict:
         events = await execute_replay(
             replay_id=replay_id,
             prompt=prompt,
-            endpoint=str(endpoint),
+            endpoint=endpoint,
             headers=headers,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=options["timeout_seconds"],
             case_id=case_id,
         )
         replay_trace_id = _store(request).save(
             source="replay",
             cases=[{"case_id": case_id, "events": events}],
-            endpoint=str(endpoint),
+            endpoint=endpoint,
             origin=trace_id,
         )
         comparison = await compare_with_original(
@@ -570,7 +552,7 @@ async def replay_production_trace(trace_id: str, request: Request) -> dict:
             duration_ms=int((_time.monotonic() - started) * 1000),
             finished_at=_now_iso(),
         )
-    except Exception as exc:  # noqa: BLE001 - 重放失败如实落账，不留半截成功假象
+    except Exception as exc:  # noqa: BLE001 - 重放失败如实落账
         record.update(
             error=f"{type(exc).__name__}: {exc}",
             duration_ms=int((_time.monotonic() - started) * 1000),
@@ -578,6 +560,82 @@ async def replay_production_trace(trace_id: str, request: Request) -> dict:
         )
     ReplayStore(request.app.state.workspace.data_root).save(record)
     return record
+
+
+def _parse_replay_options(body: dict) -> dict:
+    """请求体标量项解析与校验：非法输入一律 400（Spec §6.1 invalid-call 语义）。"""
+    raw_timeout = body.get("timeout_seconds")
+    if raw_timeout is None:
+        timeout_seconds = 60.0
+    else:
+        try:
+            timeout_seconds = float(raw_timeout)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400, detail="timeout_seconds must be a number"
+            ) from None
+    if timeout_seconds <= 0:
+        raise HTTPException(status_code=400, detail="timeout_seconds must be positive")
+    return {"sanitize": bool(body.get("sanitize", True)), "timeout_seconds": timeout_seconds}
+
+
+def _resolve_replay_case(body: dict, meta: dict) -> str:
+    """case 解析：显式指定优先；单 case trace 缺省取唯一一个，多 case 必须显式。"""
+    case_id = body.get("case_id")
+    if case_id is None:
+        cases = meta.get("cases") or {}
+        if len(cases) == 1:
+            case_id = next(iter(cases))
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="trace has multiple cases; specify body.case_id explicitly",
+            )
+    case_id = str(case_id)
+    if case_id not in (meta.get("cases") or {}):
+        raise HTTPException(status_code=404, detail=f"unknown case in trace: {case_id}")
+    return case_id
+
+
+def _resolve_replay_target(body: dict, request: Request) -> tuple[str, dict[str, str] | None]:
+    """端点解析：显式 agent_endpoint 优先；agent_profile 走注册表，secret 只在
+    服务端解析成 header（§27：浏览器拿不到凭证）。"""
+    from agent_eval.execution.connections import load_agent_connections
+
+    endpoint = body.get("agent_endpoint")
+    headers: dict[str, str] | None = None
+    if not endpoint and body.get("agent_profile"):
+        profile = next(
+            (
+                candidate
+                for candidate in load_agent_connections(request.app.state.workspace.evals_root)
+                if candidate.id == str(body["agent_profile"])
+            ),
+            None,
+        )
+        if profile is None:
+            raise HTTPException(
+                status_code=404, detail=f"unknown agent profile: {body['agent_profile']}"
+            )
+        endpoint = profile.endpoint
+        headers = profile.auth_headers() or None
+    if not endpoint:
+        raise HTTPException(
+            status_code=400, detail="body.agent_endpoint or body.agent_profile is required"
+        )
+    return str(endpoint), headers
+
+
+def _resolve_replay_policy(body: dict, request: Request) -> dict | None:
+    """policy 引用解析：声明了不存在的 policy 是 400（配置错），不是静默不评。"""
+    policy_id = body.get("policy")
+    if not policy_id:
+        return None
+    policies = {p.id: p for p in load_eval_policies(request.app.state.workspace.evals_root)}
+    policy = policies.get(str(policy_id))
+    if policy is None:
+        raise HTTPException(status_code=400, detail=f"unknown eval policy: {policy_id}")
+    return policy
 
 
 @router.get(

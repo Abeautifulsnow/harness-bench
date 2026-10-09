@@ -84,6 +84,11 @@ def _deliver(url: str, payload: dict, headers: dict[str, str], log_path: Path) -
         time.sleep(BACKOFF_SECONDS[min(attempt - 1, len(BACKOFF_SECONDS) - 1)])
 
 
+# 公开投递入口：生产 monitor 告警与 job 通知共用同一条重试/留痕路径，
+# 避免跨模块依赖下划线私有名（测试经 notifier_mod._deliver 绑定的契约不变）
+deliver = _deliver
+
+
 def _attempt_once(url: str, payload: dict, headers: dict[str, str]) -> tuple[str, bool]:
     """单次投递。返回 (结果描述, 是否值得重试)。4xx 是永久失败，不重试。"""
 

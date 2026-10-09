@@ -390,6 +390,19 @@ class TestApi:
             assert (await client.get(f"/api/production/traces/{trace_id}/evaluations")).json()
 
     @pytest.mark.asyncio
+    async def test_backfill_rejects_non_positive_limit(self, env) -> None:
+        """C05 回归：limit<=0 是无效调用（422），不得产生无意义切片语义。"""
+        evals_root, data_root, _ = env
+        _write_policy(evals_root)
+        _write_monitor(evals_root)
+        async with self._client(env, StubAdapter()) as client:
+            for bad in (0, -3):
+                response = await client.post(
+                    f"/api/production/monitors/qa-auto/backfill?limit={bad}"
+                )
+                assert response.status_code == 422, (bad, response.text)
+
+    @pytest.mark.asyncio
     async def test_backfill_is_token_gated(self, env, monkeypatch) -> None:
         evals_root, data_root, _ = env
         _write_policy(evals_root)

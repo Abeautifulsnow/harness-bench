@@ -123,6 +123,7 @@ class TestDirectionSemantics:
             DEFAULT_PERFORMANCE_THRESHOLDS,
         )
         assert next(p for p in real if p.metric == "latency_ms").regressed is True
+
     def test_quality_direction_has_no_noise_floor(self) -> None:
         """质量类 metric 的方向不需要下限：得分是确定性的，任何变化都是信号。"""
         diffs = _metric_diffs({"task_success": 0.5}, {"task_success": 0.75})

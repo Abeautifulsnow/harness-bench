@@ -554,3 +554,23 @@ report.html 里既没有 case 级产物索引、没有能力表，也没有指�
 3. 统计置信：bootstrap CI / effect size / paired test（pass^k 已落地）；
 4. 前端测试：Vitest + Playwright，覆盖 Execution 与 Production 两条链；
 5. Full RBAC / Remote Worker / Custom GEval / OTLP 原生 Receiver（P2）。
+
+
+---
+
+## 2026-10-09 Review 修复批次与遗留建议
+
+Review（review-workflow 流程，范围 b7f1427..9b30df8）确认意图层无偏差；
+阻塞与 important 项已修复：CI 首跑 format 两处（app.py 本批引入 + test_compare.py
+预存）、replay timeout 非法输入 400 化、monitor tick/backfill state 并发锁、
+backfill limit>=1 校验、replay 端点拆分（129 -> 端点 32 行 + 4 个 <=71 行助手）、
+notifier 公开投递别名。
+
+后续跟进（本轮评估为 suggestion 级，不阻塞）：
+1. **告警防抖**：monitor 告警 webhook 每 breach 必发，批量坏 trace 时会告警
+   风暴；建议加防抖窗口（如同 monitor 5 分钟内只发一次，附带累计计数）；
+2. **replay record 数据最小化**：record 同时持久化原始 source_input（含 PII）
+   与脱敏 prompt；原 trace 本身已留档，record 侧可考虑只存脱敏文本 + 原文
+   指针，或提供开关；
+3. **replay 长任务化**：重放当前是同步端点（有界超时），真实 agent 上耗时
+   场景应并入执行面 Job 机制（SSE 进度复用）。

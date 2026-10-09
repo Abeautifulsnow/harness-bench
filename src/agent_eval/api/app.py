@@ -66,7 +66,7 @@ def create_app(
     )
     scheduler = SchedulerService(evals_root=evals_root, data_root=data_root, service=service)
     # P1-1 Production Online Eval 自动化：judge 适配器与 §61 手动评测同一注入契约
-    #（create_app 的 production_evaluator 参数），自动与手动共用一条 judge 路径。
+    # （create_app 的 production_evaluator 参数），自动与手动共用一条 judge 路径。
     monitors = ProductionMonitorService(
         evals_root=evals_root,
         data_root=data_root,

@@ -264,6 +264,18 @@ class TestReplayApi:
             ).status_code == 400
 
     @pytest.mark.asyncio
+    async def test_replay_rejects_invalid_timeout(self, tmp_path: Path) -> None:
+        """C03 回归：timeout_seconds 非法输入必须 400，绝不 500。"""
+        async with self._client(tmp_path) as client:
+            trace_id = await self._ingest(client)
+            for bad in ("abc", -1, 0):
+                response = await client.post(
+                    f"/api/production/traces/{trace_id}/replay",
+                    json={"agent_endpoint": "fake://", "timeout_seconds": bad},
+                )
+                assert response.status_code == 400, (bad, response.text)
+
+    @pytest.mark.asyncio
     async def test_agent_profile_resolution(self, tmp_path: Path) -> None:
         """agent_profile 走注册表：fake endpoint 的本地 profile 可直接解析。"""
         evals_root = tmp_path / "evals"
