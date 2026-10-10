@@ -1172,3 +1172,36 @@ review-workflow 全流程：意图层无偏差；7 项规范层发现全部修�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 18: chatbot-core 1.1.0 评测集扩容（8 条新 case）
+
+**Date**: 2026-10-10
+**Task**: chatbot-core 1.1.0 评测集扩容（8 条新 case）
+**Branch**: `main`
+
+### Summary
+
+按性价比四批次补工具面广度：ask_user_question 闭环与约束 ×2、cron 生命周期、task 计划执行、glob/grep 检索、edit_file 精确替换、多轮需求变更、长程查询聚合（首条 hard）。默认 run 15→23 条，dataset 1.0.0→1.1.0。裁决与运行前提记于 ROADMAP 2026-10-10 批次；结构层 756 passed，真机三轮待 SUT 环境补跑。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `dfca56b` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

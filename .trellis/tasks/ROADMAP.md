@@ -574,3 +574,35 @@ notifier 公开投递别名。
    指针，或提供开关；
 3. **replay 长任务化**：重放当前是同步端点（有界超时），真实 agent 上耗时
    场景应并入执行面 Job 机制（SSE 进度复用）。
+
+---
+
+## 2026-10-10 批次（chatbot-core 1.1.0：按性价比补工具面广度）
+
+需求：针对 ai-chatbot 的评测集"核心面扎实但广度偏薄"（16 条 case 只点名 6/28 个
+静态工具）。按既定性价比顺序扩容，**不含** judge 校准（P0-2，仍暂缓）与外部
+凭据依赖的 web_search / 图像类工具。
+
+| 批次 | 新增 case | 运行前提 |
+| --- | --- | --- |
+| 1 | `chatbot.tool.ask_user.roundtrip` / `.unneeded` | roundtrip 需 shim `--answers-file` 含 `{"#1": "staging"}`（shim 级配置，未配置必红且红因可读）；unneeded 无前提 |
+| 2 | `chatbot.cron.lifecycle` / `chatbot.task.plan_execute` | 无（cron 靠 shim 默认 auto-approve；case 内自清理防全局残留；task ledger 会话级零残留） |
+| 3 | `chatbot.tool.search_locate` / `chatbot.tool.edit_roundtrip` | 无（检索只断言 pattern 不断言 path——路径锚点是 SUT 进程 cwd，工作区绝对路径逐迭代变化） |
+| 4 | `chatbot.context.multiturn_correction` / `chatbot.task.long_horizon` | 无（后者为数据集首条 difficulty: hard） |
+
+关键裁决：
+- **dataset 版本 1.0.0 → 1.1.0**（composition 变更是比较轴，suites_covered 全等
+  守卫之外再加显式信号；benchmark 引用与护栏同步改）；
+- 参数断言一律**点路径 + 下标**（`tasks[0].subject` / `edits[0].oldText`），
+  值由提示词钉死；all-occurrence 口径下**不得**断言"会多次调用且值会变的参数"
+  （task_update 的 status 至少两次调用值必然不同——声明即误红，理由进 case 注释）；
+- 刻意**不补** resume_subagent / check_subagent（仅宿主注入 persistence 时注册，
+  与 MCP 同类：点名 = 绑定实例配置）；
+- 新增护栏 `test_ask_user_expected_answer_is_pinned_as_a_prompt_option`
+  （答案由 shim 注入 → 期望值必须能在提示词选项里找到出处；已验证可红）；
+- 数字类结果（字符数）只断言格式前缀不断言值——口径（字节/字符/换行）因读取
+  方式而异，数值正确性属 judge 档（校准前不作数）。
+
+测试：护栏 36 → 37（`test_chatbot_dataset.py`），全量 756 passed（实测）；8 条
+新 case 的**行为层绿/红尚未经真机全量**——按本仓纪律，真机三轮（默认 run +
+`--suite security`）在合并前补跑，roundtrip 需带答案文件启动 shim。
