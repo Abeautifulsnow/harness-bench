@@ -33,6 +33,9 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
+    # API 测试（test_api / eval-runs / production 等）默认进全量测试，
+    # 不靠"本机恰好装了 api extra"——裸 `uv sync` 必须能跑全套（CI 契约）
+    "fastapi>=0.115",
     # 测试要覆盖 AST 层；"没装 sqlglot"的降级路径由 monkeypatch 覆盖，
     # 不靠"本机恰好没装"来测（那种测法在装了的机器上会静默消失）
     "sqlglot>=25.0",
