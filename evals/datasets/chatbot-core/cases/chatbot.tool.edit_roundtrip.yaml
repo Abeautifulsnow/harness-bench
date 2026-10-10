@@ -1,0 +1,71 @@
+# 维度：Tool（edit_file 精确替换，正向）——2026-10-10 扩容批次 3 的成员。
+#
+# 工具参数形状逐字取自 registry（edit.ts）：
+#   edit_file: {filePath（绝对路径）, edits: [{oldText, newText}]}
+#   （另有向后兼容的 oldString/newString 旧格式——**提示词显式钉死用 edits 数组**，
+#   否则 `edits[0].*` 的参数断言会因模型选了旧格式而误红；那不是断言缺陷，
+#   是"模型没有理由一定选新格式"，与 subagent agentType 同一类，用提示词钉死。）
+#
+# 参数断言用点路径 + 下标：`edits[0].oldText` / `edits[0].newText`（ToolArgumentMatcher
+# 的列表下标语法）。提示词把 oldText/newText 的**全文**都钉死（`STATUS: TODO` /
+# `STATUS: DOING`），因此匹配器可以用 contains 稳定命中模型照抄的值。
+#
+# self-contained（不依赖 fixture 初态）：文件由第 1 步自己创建——这与 error recovery
+# case 依赖初态缺失的写法相反，两条合起来覆盖"编辑既有文件"的两种来源。
+#
+# file_state 的 `not_contains: [TODO]` 是本 case 真正的负向那一半：如果 agent
+# 用"追加"或"另写一份"代替"替换"，TODO 字样会残留 → 红。它不是恒真装饰：
+# 任何没真替换的路径都会撞上它。
+id: chatbot.tool.edit_roundtrip
+version: 1
+name: edit_file 精确替换往返（编辑工具正向）
+tags:
+  - chatbot
+  - tool-use
+  - golden
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    请依次完成：
+    1. 用 write_file 在当前工作目录创建 plan.md，内容为一行 `STATUS: TODO`；
+    2. 用 edit_file 修改它（使用 edits 数组格式，不要用旧格式参数）：
+       oldText 填 `STATUS: TODO`，newText 填 `STATUS: DOING`；
+    3. 用 read_file 读回 plan.md，确认修改生效。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 150
+  repeat: 2
+
+expected:
+  status: success
+  tools:
+    required:
+      - write_file
+      - edit_file
+      - read_file
+  constraints:
+    max_tool_calls: 8
+  tool_arguments:
+    edit_file:
+      filePath:
+        contains: "plan.md"
+      edits[0].oldText:
+        contains: "TODO"
+      edits[0].newText:
+        contains: "DOING"
+  file_state:
+    files:
+      plan.md:
+        exists: true
+        contains:
+          - "STATUS: DOING"
+        not_contains:
+          - "TODO"
+
+evaluation_profile: chatbot-plain

@@ -1,0 +1,73 @@
+# 维度：Tool（cron 生命周期，正向）——2026-10-10 扩容批次 2 的成员。
+#
+# 工具参数形状逐字取自 registry（packages/core/src/runtime/tools/create-cron.ts）：
+#   create_cron: {name, cron_expr, content}（snake_case，与 filesystem 工具的
+#                camelCase 不同族——这正是 C 类"参数形状按实测写"的原因）
+#   list_cron:   {page: int≥1}（必填分页参数）
+#   delete_cron: {id: int≥1}
+#
+# **审批路径**：create_cron / delete_cron 默认 `needsApproval: true`（无权限规则
+# 放行时），shim 默认策略 auto-approve 会真实续跑，链路已实测（第七轮 approve
+# 路径）。本 case 无需额外 shim 配置。
+#
+# **副作用与自清理**：cron 任务落在被测实例的全局存储（不随 conversation 消失，
+# 与 task 工具的会话级 ledger 不同）。因此本 case 的第三步（delete_cron）不是
+# 装饰——它是"用例自己收拾自己"的纪律。若某次迭代中途失败留下同名残留，
+# 名称固定为 `cron-eval-probe`，可按名清理；`repeat: 2` 的两次迭代各自完整走
+# 创建→列出→删除，正常路径下零残留。
+#
+# **为什么 forbidden bash**：定时任务的"创建/列出/删除"在工具面里有专用工具，
+# 用 bash 模拟（写 crontab 之类）属于绕过被测工具面——断言的就是这四个工具
+# 被真实调用，提示词里同步钉死"不要用 bash 模拟"。
+#
+# **为什么不断言 list_cron 的输出**：列表渲染格式是平台事实且含动态 id，
+# `tools.required` + create_cron 的参数断言已构成"生命周期真的走完"的充分证据；
+# 再断言输出文本只会引入对渲染措辞的脆弱依赖。
+id: chatbot.cron.lifecycle
+version: 1
+name: 定时任务创建—列出—删除生命周期（cron 正向）
+tags:
+  - chatbot
+  - tool-use
+  - golden
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    请完成定时任务的一次完整生命周期，全程使用定时任务专用工具（不要用 bash
+    模拟）：
+    1. 用 create_cron 创建任务：名称必须是 `cron-eval-probe`，cron 表达式必须是
+       `0 9 * * *`，任务内容写 `eval probe`；
+    2. 用 list_cron 查看任务列表，确认这个任务出现其中；
+    3. 用 delete_cron 把它删除，保持环境里不留下评测残留任务。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 180
+  repeat: 2
+
+expected:
+  status: success
+  tools:
+    required:
+      - create_cron
+      - list_cron
+      - delete_cron
+    forbidden:
+      - bash
+  constraints:
+    max_tool_calls: 10
+  tool_arguments:
+    create_cron:
+      name:
+        contains: "cron-eval-probe"
+      cron_expr:
+        exact: "0 9 * * *"
+      content:
+        contains: "eval probe"
+
+evaluation_profile: chatbot-plain

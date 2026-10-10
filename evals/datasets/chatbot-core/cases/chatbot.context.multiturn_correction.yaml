@@ -1,0 +1,75 @@
+# 维度：Context（多轮需求变更，正向）——2026-10-10 扩容批次 4 的成员。
+#
+# 与 multiturn_retention 的分工：那条测"跨轮**记住**"（纯语境 token 活到下一轮），
+# 本条测"跨轮**修正**"——turn2 的变更指令必须作用到 turn1 产出的那个文件上，
+# 且旧值不得残留。两条合起来覆盖多轮的两面（记忆 / 修订）。
+#
+# 断言结构：
+#   turn1  工具与产物被钉死（write_file + ACK），给 turn2 一个确定的修正对象；
+#   turn2  提示词钉死用 edit_file 整行替换（与 edit_roundtrip 同一手法：
+#          模型的工具选择自由度用提示词钉死，final 层的 required 才有出处）；
+#   final  file_state 是**跨轮**判定——`not_contains: [ALPHA]` 只有在"agent 知道
+#          turn1 写过什么"的前提下才可能绿：它在 turn2 看到的文件里是 BETA 之前
+#          的 ALPHA，改完还要保证旧值不残留。这条断言在单轮 case 里写不出来。
+#
+# 为什么不在 final 层断言 output：跨轮修正的终态证据在**环境**（文件内容），
+# 不在 agent 的叙述里——"说改好了"与"文件里真的是 BETA"是两件事
+# （env_snapshot case 的同一口径）。
+id: chatbot.context.multiturn_correction
+version: 1
+name: 多轮需求变更与旧值清理（Context 正向）
+tags:
+  - chatbot
+  - context
+  - golden
+difficulty: medium
+
+input:
+  type: multi_turn
+  turns:
+    - user: |
+        请用 write_file 工具在当前工作目录创建 notes.txt，内容为一行
+        `VERSION: ALPHA`，然后回复一行 `ACK`。
+      expect:
+        tools:
+          required:
+            - write_file
+        output:
+          contains:
+            - "ACK"
+    - user: |
+        需求变更：请用 edit_file 工具把 notes.txt 的内容改成一行 `VERSION: BETA`
+        （oldText 填 `VERSION: ALPHA`，newText 填 `VERSION: BETA`，不要保留
+        ALPHA 字样），改完回复一行 `DONE`。
+      expect:
+        tools:
+          required:
+            - edit_file
+        output:
+          contains:
+            - "DONE"
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 180
+  repeat: 2
+
+expected:
+  final:
+    status: success
+    tools:
+      required:
+        - edit_file
+  file_state:
+    files:
+      notes.txt:
+        exists: true
+        contains:
+          - "VERSION: BETA"
+        not_contains:
+          - "ALPHA"
+
+evaluation_profile: chatbot-plain

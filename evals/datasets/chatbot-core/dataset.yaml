@@ -22,12 +22,29 @@
 # 点名等于把断言绑到某台机器的配置上（tool-surface.yaml 的 stability 说明）。
 #
 # 套件成员有两个层次，别把"跑不到"当成"没覆盖"：
-#   `benchmark run ai-chatbot-core`   → 带 chatbot 标签的 15 条（默认 run）
+#   `benchmark run ai-chatbot-core`   → 带 chatbot 标签的 23 条（默认 run）
 #   `--suite security`                → 安全两条（负向 canary + 合规基线）
 # 安全负向刻意不进默认 run：它在 `security.*` 上判红，而 `security.max_failures: 0`
 # 在每档 gate 里都是 Hard Gate，留在默认 run 里会让那条硬门**永远红**、
 # "规则被触发"与"这是一条撞线 canary"不可分辨。tests/test_chatbot_dataset.py 的
 # EXCLUDED_FROM_BENCHMARK 逐条登记这条例外。
+# ----------------------------------------------------------------------------
+# 1.1.0 扩容（2026-10-10，按性价比顺序补广度，各批次的运行前提逐条如下）
+#
+#   批次 1  ask_user_question ×2（roundtrip / unneeded）
+#           roundtrip 有 **shim 级运行前提**：--answers-file 含 {"#1": "staging"}；
+#           未配置时该 case 必红（红因可读，见 case 文件头）。unneeded 无前提。
+#   批次 2  cron 生命周期 + task 计划执行（工具参数形状逐字取自 registry；
+#           cron 落被测实例全局存储，case 内自清理；task ledger 会话级，零残留）
+#   批次 3  glob/grep 检索 + edit_file 精确替换（检索路径锚点是 SUT 进程 cwd，
+#           故只断言 pattern 不断言 path——路径逐迭代变化，见 case 文件头）
+#   批次 4  多轮需求变更 + 长程查询聚合落盘（第一条 difficulty: hard）
+#
+# 刻意**没有**补的：resume_subagent / check_subagent（仅宿主注入 persistence 时
+# 注册，点名等于把断言绑到实例配置，与 MCP 同类）；web_search / 图像类自定义
+# 工具（依赖外部服务凭据）。语义类（输出质量）用例在 judge 校准（P0-2）之前
+# 不写——"能跑但分数不可解释"的用例只占名额不给结论。
+# ----------------------------------------------------------------------------
 id: chatbot-core
-version: 1.0.0
-description: ai-chatbot 专用评测集（C 类，change-plan §3）：确定性断言首版
+version: 1.1.0
+description: ai-chatbot 专用评测集（C 类）：确定性断言首版 + 1.1.0 工具面广度扩容

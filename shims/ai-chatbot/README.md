@@ -269,6 +269,11 @@ async 分支在 `submitted` 时早退）。实测到达序：
 跑的所有 case 共用一份答案。要按 case 给不同答案得换实例（或用 `partial` 档 + 用例
 自带兜底断言）。
 
+这条通道自 2026-10-10 起有回归用例承接：`evals/datasets/chatbot-core/cases/
+chatbot.tool.ask_user.roundtrip.yaml`（文件头写明运行前提与三种失配形态的红因）；
+护栏是 `tests/test_chatbot_dataset.py` 的
+`test_ask_user_expected_answer_is_pinned_as_a_prompt_option`。
+
 ### 第十一轮：续跑消息必须回传推理片段（真机实测，已修）
 
 第十轮把所有丢掉的方言都当"不进 §8 流 = 可以不要"，**漏了一类：留档用途**。

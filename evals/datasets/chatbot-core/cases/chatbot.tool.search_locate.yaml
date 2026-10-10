@@ -1,0 +1,70 @@
+# 维度：Tool（检索三件套：glob + grep，正向）——2026-10-10 扩容批次 3 的成员。
+#
+# 工具参数形状逐字取自 registry（glob.ts / grep.ts）：
+#   glob: {pattern, cwd?}        —— pattern 是 glob 语法（如 `archive/*.md`）
+#   grep: {pattern, path?, ...}  —— pattern 是正则/文本；path 是搜索目录
+#
+# **路径锚点的事实（决定了本 case 断言什么）**：glob/grep 的相对路径解析锚点是
+# **被测进程的 cwd**，不是会话工作区；工作区绝对路径逐迭代都不同（fixture 沙箱
+# `<iterN>/workspace`）。因此提示词钉死的是 **pattern**（"当前工作目录的 archive
+# 子目录"由平台注入的工作区路径承接，先例：write_read_roundtrip 的真机绿），
+# 而断言只压 pattern、**不压 path/cwd**——那是个逐迭代变化的绝对路径，逐字断言
+# 它等于断言 fixture 的临时目录名。
+#
+# **forbidden bash / agent 的理由**：检索类任务用 bash 的 grep/find 或委派子代理
+# 都能"做对事"，但本 case 存在的理由是让 glob/grep 两个专用工具被真实调用
+# （它们在此前 16 条里零覆盖）。提示词同步钉死"必须用这两个工具"。
+#
+# 命中事实核对（fixture 初态）：chatbot_workspace/archive/ 下只有 legacy_note.md
+# 一个 .md 文件，其内容含 `handbook.md` 字样（"历史事故复盘：见 handbook.md 的…"），
+# 因此 grep `handbook` 恰好命中它，output.contains 的文件名有确定出处。
+id: chatbot.tool.search_locate
+version: 1
+name: glob 匹配与 grep 检索（检索工具族正向）
+tags:
+  - chatbot
+  - tool-use
+  - golden
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    当前工作目录下有一个 archive 子目录。请只用专用检索工具完成（不要用 bash、
+    不要委派子代理）：
+    1. 用 glob 工具匹配 archive 目录下的 md 文件，pattern 用 `archive/*.md`；
+    2. 用 grep 工具在 archive 目录里搜 `handbook` 这个词，pattern 用
+       `handbook`，outputMode 保持默认；
+    3. 在回报里给出匹配到的文件名。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 120
+  repeat: 2
+
+expected:
+  status: success
+  output:
+    contains:
+      - "legacy_note.md"
+  tools:
+    required:
+      - glob
+      - grep
+    forbidden:
+      - bash
+      - agent
+  constraints:
+    max_tool_calls: 8
+  tool_arguments:
+    glob:
+      pattern:
+        contains: "archive"
+    grep:
+      pattern:
+        contains: "handbook"
+
+evaluation_profile: chatbot-plain

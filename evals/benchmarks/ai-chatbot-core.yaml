@@ -8,7 +8,7 @@
 name: ai-chatbot-core
 description: ai-chatbot 专用评测集（C 类，change-plan §3）：确定性断言首版
 owner: agent-platform
-dataset: chatbot-core@1.0.0
+dataset: chatbot-core@1.1.0
 suites:
   - chatbot
 default_profile: chatbot-plain

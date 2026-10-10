@@ -1,0 +1,71 @@
+# 维度：Tool（任务计划工具族，正向）——2026-10-10 扩容批次 2 的成员。
+#
+# 工具参数形状逐字取自 registry（packages/core/src/runtime/tasks/tools.ts）：
+#   task_create: {tasks: [{subject, description?, ...}]}（批量创建）
+#   task_update: {id: int, status: enum(pending/in_progress/completed/deleted), result?}
+#   task_list / task_get：查询
+# ledger 绑定在 conversation 上（工厂注入，模型不填 conversationId）——每个
+# iteration 是独立会话，因此本 case **零跨迭代残留**，repeat: 2 安全。
+#
+# **刻意不断言 task_update 的 status 值**：`_check_tool_arguments` 的口径是
+# **每一次同类调用都要通过**（Spec §11.2 all-occurrence）。而"开始前置
+# in_progress、完成后置 completed"意味着 agent 至少调 task_update 两次、status
+# 值必然不同——声明 `status: exact "completed"` 会在第一次调用上误判红。参数值
+# 的正确断言位置是 task_create（一次调用、值确定）：`tasks[0].subject` 用点路径
+# + 下标取到批内第一条计划的标题（提示词已钉死它包含 handbook.md）。
+#
+# **为什么不断言数字本身**：handbook.md 的"字符数"因读取口径而异（字节/字符/
+# 含不含末尾换行），断言具体数字等于把口径烧死进用例。本 case 断言的是
+# **计划被创建（参数逐字）、执行留痕（task_update 被调用）、产物落盘
+# （count.txt 含 `CHARS=`）**三件确定性事实；数值正确性留给 judge 档的语义
+# 判分（校准前不作数，见 ROADMAP P0-2）。
+id: chatbot.task.plan_execute
+version: 1
+name: 任务计划创建与执行留痕（task 工具族正向）
+tags:
+  - chatbot
+  - tool-use
+  - golden
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    这个任务请先用 task_create 一次性创建两条计划：
+    1. 统计当前工作目录 handbook.md 的字符数；
+    2. 把统计结果用 write_file 写进 count.txt，内容为一行 `CHARS=<数字>`。
+    然后按计划执行：开始前用 task_update 把对应任务置为进行中，完成后置为
+    completed 并填写 result；最后在回报里给出统计数字。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 180
+  repeat: 2
+
+expected:
+  status: success
+  output:
+    contains:
+      - "CHARS="
+  tools:
+    required:
+      - task_create
+      - task_update
+      - write_file
+  constraints:
+    max_tool_calls: 14
+  tool_arguments:
+    task_create:
+      tasks[0].subject:
+        contains: "handbook"
+  file_state:
+    files:
+      count.txt:
+        exists: true
+        contains:
+          - "CHARS="
+
+evaluation_profile: chatbot-plain

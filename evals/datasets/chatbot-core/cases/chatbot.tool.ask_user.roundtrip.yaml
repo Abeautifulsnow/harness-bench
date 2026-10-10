@@ -1,0 +1,72 @@
+# 维度：Tool（ask_user_question 闭环，正向）——提问、注入答案、按答案执行。
+#
+# 这是 2026-10-10 扩容批次 1 的成员（性价比最高的一批：shim 的 `--answers-file`
+# 通道已在第十轮真机验证过，本 case 只是把这条已验证的链路变成回归资产）。
+#
+# **运行前提（不满足则本 case 必红，且红因可读）**：
+#   shim 必须以 `--answers-file` 启动，且文件含 `{"#1": "staging"}`。
+#   答案是 **shim 级配置**（进程启动时给定，所有 case 共用，见 shim README 第十轮），
+#   不是 per-case 声明——这是平台已裁决的边界，不是缺口。
+#
+#   三种失配形态都各有着落：
+#   - 未配置 answers（None）      → 平台回显空 map，agent 拿不到答案 →
+#                                   deploy-target.txt 不含 staging → 判红；
+#   - 配了 answers 但缺 `#1` 且   → strict（默认）下本轮流**带自述原因失败**
+#     strict 档                     （"shim answers config incomplete"），判红；
+#   - partial 档缺答案            → 省略 + stderr 告警，agent 如实说没收到 → 判红。
+#
+# **为什么断言值是确定的**：答案由 shim 注入（"staging"），不取决于模型选哪个
+# 选项——模型只决定"问不问、怎么问"，不决定答案。因此 file_state 的期望值
+# 与 shim 答案配置是**同一事实的两份拷贝**；改答案配置时必须同步改本文件
+# （护栏 test_ask_user_expected_answer_is_pinned_as_a_prompt_option 钉住
+# "期望值必须能在提示词的选项里找到出处"这一半）。
+#
+# **残余抖动（如实登记）**：strict 档下若模型不守"只问这一个问题"的指令而多问，
+# 第二问没有配置答案 → 流失败 → 本 case 红。这不是断言缺陷，是被测行为不合格 +
+# 运行配置不完整的复合信号；实测模型对"只问一个"的遵循度待真机数据回填本注释。
+id: chatbot.tool.ask_user.roundtrip
+version: 1
+name: 提问—注入答案—按答案执行（ask_user_question 正向）
+tags:
+  - chatbot
+  - tool-use
+  - golden
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    请用 ask_user_question 工具向我提问：部署目标选什么。要求只问这一个问题，
+    选项恰好两个：`staging` 与 `production`。拿到我的选择后，用 write_file 在
+    当前工作目录创建 deploy-target.txt，内容为一行所选的那个词，并在回报里写明
+    最终选定的目标。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 150
+  repeat: 2
+
+expected:
+  status: success
+  output:
+    contains:
+      - "staging"
+  tools:
+    required:
+      - ask_user_question
+      - write_file
+  constraints:
+    max_tool_calls: 8
+  file_state:
+    files:
+      deploy-target.txt:
+        exists: true
+        contains:
+          - "staging"
+        not_contains:
+          - "production"
+
+evaluation_profile: chatbot-plain

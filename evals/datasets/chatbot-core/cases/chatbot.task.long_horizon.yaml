@@ -1,0 +1,76 @@
+# 维度：Tool（长程多步组合，正向）——2026-10-10 扩容批次 4 的成员，也是本
+# 数据集第一条 difficulty: hard 的 case。
+#
+# 与既有成员的分工：sqlite_query 只做"查一个数"，本条把**查询 → 聚合 → 格式化
+# → 落盘 → 回报**串成一条 ≥4 步的链，是数据集里最接近真实工作形态的成员。
+# 组合本身引入的判定面（agent 自己决定中间步骤怎么拆）交给 max_tool_calls 与
+# step_efficiency 的余量口径，逐字事实仍只压两端：
+#
+#   输入端  bash 被真实调用（SQL 只能走 bash 子进程，观测面事实同 sqlite_query）；
+#   输出端  report.md 的三行聚合结果**逐行逐值**钉死——数字出自 fixture 初态
+#           （seed.sql：high 2 条 / medium 1 条 / low 1 条），格式由提示词钉死
+#           （大写、等号、逗号、无空格、顺序固定），因此 contains 是确定断言
+#           而非"报文里大概有"。
+#
+# step_efficiency 口径：理想步数 2（一次查询 + 一次写入），余量 2.0（上限 6 次）
+# ——真实 LLM 会先探 schema 再查（多 1~2 次 bash），余量给的是这个，不是给
+# "查错重来"的。超上限说明在打转，那是 native.performance 该红的事。
+#
+# 与 long_horizon 相关的既有缺口如实登记：本条仍属"单轮长程"。真正的多轮长程
+# （跨轮接续未完成任务）依赖 task 工具的跨轮 ledger 语义，留待下一批按真机
+# 探针结果设计——不写没有实测依据的用例。
+id: chatbot.task.long_horizon
+version: 1
+name: 查询—聚合—落盘报告（长程多步正向）
+tags:
+  - chatbot
+  - tool-use
+  - database
+  - golden
+difficulty: hard
+
+input:
+  type: single_turn
+  prompt: |
+    当前工作目录下有 SQLite 数据库文件 fixture.db，里面有一张 tickets 表
+    （含 severity 列）。请完成一份小报告：
+    1. 用 bash 工具（sqlite3 或 python 均可）查出每个 severity 的工单数量；
+    2. 用 write_file 把结果写进当前工作目录的 report.md，恰好三行、顺序固定、
+       格式严格（大写、等号、逗号、无空格）：
+       SEVERITY=HIGH,COUNT=<high 的数量>
+       SEVERITY=MEDIUM,COUNT=<medium 的数量>
+       SEVERITY=LOW,COUNT=<low 的数量>
+    3. 在回报里给出 high 的数量，格式 `HIGH=<数量>`。
+
+environment:
+  fixture: chatbot_ops
+  database: sqlite
+
+execution:
+  timeout: 240
+  repeat: 2
+
+expected:
+  status: success
+  output:
+    contains:
+      - "HIGH=2"
+  tools:
+    required:
+      - bash
+      - write_file
+  constraints:
+    max_tool_calls: 20
+  step_efficiency:
+    baseline_steps: 2
+    max_ratio_delta: 2.0
+  file_state:
+    files:
+      report.md:
+        exists: true
+        contains:
+          - "SEVERITY=HIGH,COUNT=2"
+          - "SEVERITY=MEDIUM,COUNT=1"
+          - "SEVERITY=LOW,COUNT=1"
+
+evaluation_profile: chatbot-plain

@@ -106,7 +106,7 @@ class TestDatasetShape:
     def test_benchmark_points_at_this_dataset_and_a_real_suite(self) -> None:
         """change-plan §3.5：gate 声明的套件必须真有套件文件（YAML 装饰品拦不住）。"""
         benchmark = load_benchmark(EVALS, BENCHMARK)
-        assert benchmark.dataset == "chatbot-core@1.0.0"
+        assert benchmark.dataset == "chatbot-core@1.1.0"
         suites = load_suites(EVALS)
         assert set(benchmark.suites) <= set(suites), (
             f"benchmark 声明了不存在的套件：{set(benchmark.suites) - set(suites)}"
@@ -665,6 +665,46 @@ class TestExpectationsArePinnedByThePrompt:
                         f"{case.id}: expected 含 {name!r}，但提示词里没出现它"
                         "（模型没有理由一定选它）"
                     )
+        assert not problems, problems
+
+    def test_ask_user_expected_answer_is_pinned_as_a_prompt_option(self) -> None:
+        """ask_user 闭环的期望终态值必须能在提示词里找到出处（选项里真的给过）。
+
+        `ask_user_question` 的答案是 **shim 注入**的（`--answers-file`，shim 级
+        配置），不经过模型——因此"agent 按答案执行"的期望值与答案配置是同一事实
+        的两份拷贝，提示词里的**选项**是这两份拷贝之间的契约面：
+
+        - 期望值不在选项里 → 模型没有理由把那个词写进产物，case 变成"碰巧绿"；
+        - 改提示词选项时漏改期望值 → 得到一条随配置漂移的假红。
+
+        两边都由本护栏拦：凡是 required 里点名 ask_user_question 的 case，
+        其 file_state 的每个 contains 期望值都必须逐字出现在提示词里
+        （与 subagent_routing 的"断言值必须被提示词钉死"是同一纪律的答案版）。
+        """
+        problems: list[str] = []
+        for case in _cases():
+            required: set[str] = set()
+            for _mount, assertion in case.session_assertions():
+                required.update(assertion.tools.required)
+            for turn in case.input.turns or []:
+                if turn.expect is not None:
+                    required.update(turn.expect.tools.required)
+            if "ask_user_question" not in required:
+                continue
+            prompt = "\n".join(case.input.messages())
+            mounts = list(case.session_assertions())
+            if case.expected_final is not None:
+                mounts.append(("final", case.expected_final))
+            for _mount, assertion in mounts:
+                file_state = assertion.extensions.get("file_state") or {}
+                for path, expectation in (file_state.get("files") or {}).items():
+                    for marker in expectation.get("contains") or []:
+                        if str(marker) not in prompt:
+                            problems.append(
+                                f"{case.id}: file_state 期望 {path} 含 {marker!r}，"
+                                "但提示词里没有这个值（ask_user 的答案必须作为选项"
+                                "钉在提示词里，且与 --answers-file 的值一致）"
+                            )
         assert not problems, problems
 
 

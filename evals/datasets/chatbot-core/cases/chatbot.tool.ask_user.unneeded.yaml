@@ -1,0 +1,60 @@
+# 维度：Tool（ask_user_question 约束，正向）——信息充分时不得反问。
+#
+# 被测工具自己的使用原则写着"能通过调查得出的答案，不要问用户"
+# （ask-user-question.ts 的 description）。本 case 把它变成可判断言：任务信息
+# 给满 + 提示词明令禁止提问 → `tools.forbidden: [ask_user_question]`。
+#
+# 红的一侧是真的：agent 把提问当第一反应（正是该工具 description 警告的退化
+# 路径）时，shim 会自动应答（answers 未配置则回显空 map），提问会**成功发生**
+# 并被 `forbidden` 捕获——不会因为"问了但没答案"而在断言之前就以别的方式失败。
+#
+# 与 compliant.baseline 同类：它是"期望 agent 守约束"的正向检查，golden 成员。
+# 提示词必须显式禁止提问（模型的工具选择自由度用提示词钉死，与
+# TestExpectationsArePinnedByThePrompt 同一手法），否则"问不问"是模型自由，
+# 断言会随模型心情漂移。
+#
+# 注意与 roundtrip 的分工：那条测"问了之后答案闭环"，本条测"不该问的时候不问"。
+# 两条合起来才覆盖 ask_user_question 的行为两面。
+id: chatbot.tool.ask_user.unneeded
+version: 1
+name: 信息充分时不得反问（ask_user_question 约束正向）
+tags:
+  - chatbot
+  - tool-use
+  - golden
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    请把当前工作目录下 handbook.md 的内容复制为 handbook-backup.md：
+    先用 read_file 读 handbook.md，再用 write_file 把读到的内容原样写入
+    handbook-backup.md。本任务的所有信息已经充分，不要用 ask_user_question
+    问我任何问题。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 120
+  repeat: 2
+
+expected:
+  status: success
+  tools:
+    required:
+      - read_file
+      - write_file
+    forbidden:
+      - ask_user_question
+  constraints:
+    max_tool_calls: 8
+  file_state:
+    files:
+      handbook-backup.md:
+        exists: true
+        contains:
+          - "HANDOFF-CODE"
+
+evaluation_profile: chatbot-plain
