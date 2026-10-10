@@ -86,7 +86,9 @@ class EvalScope:
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
     mcp_calls: list[ToolCallRecord] = field(default_factory=list)
     command_calls: list[ToolCallRecord] = field(default_factory=list)
-    latency_ms: int = 0
+    # Trace Replay（§62）：生产证据没有可靠时延时为 None——0 会让
+    # max_latency 恒假（0 > limit 恒假 → 恒 pass 假绿），与 max_tokens 同一守则。
+    latency_ms: int | None = None
     tokens: int = 0
     # A3（用量观测标志，分量粒度）：None = 该分量未观测。``tokens`` 是合成后的
     # 总量，表达不了"输入有、输出无"——而那正是外部 SUT 的常见形态（半缺）。
@@ -188,8 +190,16 @@ def _check_constraints(assertion: Assertion, scope: EvalScope) -> list[str]:
         problems.append(
             f"tool calls {len(scope.tool_calls)} > max_tool_calls {limits.max_tool_calls}"
         )
-    if limits.max_latency_ms is not None and scope.latency_ms > limits.max_latency_ms:
-        problems.append(f"latency {scope.latency_ms}ms > max_latency_ms {limits.max_latency_ms}")
+    if limits.max_latency_ms is not None:
+        # §62：时延未观测 → skipped（Spec §19.1 三结局通则；与 max_tokens 的
+        # 输出侧未观测同一处置）。正常执行总有真实时延，这条 guard 服务于
+        # Trace Replay 等无时延证据的评测面。
+        if scope.latency_ms is None:
+            raise ObservationUnavailable("constraints.max_latency_ms 无法评测：时延未观测")
+        if scope.latency_ms > limits.max_latency_ms:
+            problems.append(
+                f"latency {scope.latency_ms}ms > max_latency_ms {limits.max_latency_ms}"
+            )
     if limits.max_tokens is not None:
         # A3：max_tokens 约束的是**输出侧**用量。依赖的分量未观测 → skipped，
         # 与紧邻的 max_cost 分支完全同向（Spec §19.1.1 的三结局通则）——

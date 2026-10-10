@@ -203,7 +203,9 @@ class DeepEvalCapabilityAdapter:
             "retrieval_context": [s.output for s in tree.find("retriever") if s.output is not None],
             "tools_called": _tool_calls_from_tree(tree),
             "expected_tools": [{"name": name} for name in case.expected.tools.required],
-            "completion_time": latency_ms / 1000.0,
+            # latency_ms=None（未观测，Trace Replay 场景）→ None：SDK 的
+            # completion_time 本就可选；不能拿 0.0 顶替（假数据进 judge）。
+            "completion_time": (latency_ms / 1000.0) if latency_ms is not None else None,
             # PRD §37 token_cost ← calculated cost。无定价时保持 None（PRD §59：
             # 未知成本绝不写 0.0，否则趋势图会出现"成本降到零"的假象）。
             "token_cost": cost,

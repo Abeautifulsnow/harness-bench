@@ -2325,3 +2325,37 @@ service:
 V1 不内置 Collector：摄取端点吃标准 OTel traces JSON，任何能把 OTLP 导出为
 JSON 的采集链（Collector + translate_exporter / 自定义脚本 / SDK exporter）
 都能对接；token 走 `AGENT_EVAL_EXEC_TOKEN`。
+
+---
+
+# 62. V2 增量四（2026-10-10）：§53 Trace Replay（落地方案，来自并行批次）
+
+> 合并说明：本节原为"生产证据对照 benchmark case 显式评测"的方案稿；远程并行
+> 批次（fce806a）已落地另一种互补语义并带完整测试，本节改记落地设计。原方案
+> 的可比性守卫思想（显式配对、逐字一致才可比）在引入 benchmark 对照类特性时
+> 仍然适用。
+
+## 62.1 语义分工（§61/§62）
+
+- **Online Eval（§61）**：判定"历史输出好不好"——judge 打分已发生的生产输出。
+- **Trace Replay（本节）**：回答"换 candidate agent 重来会怎样"——把生产输入
+  脱敏后重新驱动被测 agent（fake:// 与 http(s) 同一协议面），与原始行为比较。
+
+## 62.2 落地要点（fce806a）
+
+- `trace/sanitize.py`：保守高置信脱敏（sk-/ghp_/xox 密钥、email、手机、身份证、
+  长 hex token）→ 类型化占位符，保留题面语义形状；替换次数进 replay 记录。
+- `runner/replay.py`：`execute_replay` 复用 open_adapter 工厂；传输失败/超时归
+  InfraError；`compare_with_original` 给出工具序列 Jaccard + 输出是否变化；
+  eval policy 可选且对两侧同尺打分——没有就不编造分数。
+- 重放事件落 ProductionStore（source=replay，meta.origin 指回原 trace），
+  Viewer/Online Eval 能力直接复用；ReplayStore 落 `<data_root>/replays/`。
+- API：`POST /production/traces/{id}/replay`（agent_endpoint 直连或注册表解析，
+  secret 只在服务端成 header）+ GET replays 只读端点。
+
+## 62.3 合并本批带来的通用修复
+
+- `EvalScope.latency_ms: int | None` + native `max_latency` 未观测守卫
+  （ObservationUnavailable）——无时延证据的评测面不再 0 值恒 pass 假绿；
+- `deepeval_adapter.convert` 对 None latency 不再 TypeError（completion_time=None）；
+- ProductionStore evaluations 台账 glob 修正（replay_*/eval_* 两种 id 前缀都可见）。

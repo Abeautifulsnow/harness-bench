@@ -158,7 +158,7 @@ class ProductionStore:
         if not directory.is_dir():
             return []
         out: list[dict] = []
-        for path in sorted(directory.glob("eval_*.json"), reverse=True):
+        for path in sorted(directory.glob("*.json"), reverse=True):
             try:
                 out.append(json.loads(path.read_text(encoding="utf-8")))
             except ValueError:

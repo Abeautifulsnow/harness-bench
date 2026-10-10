@@ -191,11 +191,7 @@ async def run_online_evaluation(
 ) -> dict:
     """执行一次 Online Eval，返回可落盘的完整结果（含 rows 与 summary）。"""
 
-    rows: list[dict] = []
-    for pair in pairs:
-        trace = pair.to_trace()
-        for metric in policy.metrics:
-            rows.append(await _evaluate_one(pair, metric, trace, policy, adapter))
+    rows = await evaluate_rows(pairs, policy, adapter)
 
     by_metric: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -230,6 +226,21 @@ async def run_online_evaluation(
         "rows": rows,
         "summary": summary,
     }
+
+
+async def evaluate_rows(
+    pairs: list[EvalPair],
+    policy: EvalPolicy,
+    adapter: Any,
+) -> list[dict]:
+    """逐 (case, metric) 执行 judge；Trace Replay（§62）复用同一实现。"""
+
+    rows: list[dict] = []
+    for pair in pairs:
+        trace = pair.to_trace()
+        for metric in policy.metrics:
+            rows.append(await _evaluate_one(pair, metric, trace, policy, adapter))
+    return rows
 
 
 async def _evaluate_one(
