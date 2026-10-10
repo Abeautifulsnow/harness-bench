@@ -1139,3 +1139,36 @@ review-workflow 全流程：意图层无偏差；7 项规范层发现全部修�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 17: Push + CI 首跑修复：fastapi 进 dev 组
+
+**Date**: 2026-10-10
+**Task**: Push + CI 首跑修复：fastapi 进 dev 组
+**Branch**: `main`
+
+### Summary
+
+推送 7 提交到双远端；GitHub Actions 首跑 checks 岗位 pytest exit 2（Linux 收集期 8 个 API 测试文件缺 fastapi——api extra 可选依赖，本地 venv 恰好装过掩盖）。经 WSL 原生 fs 干净归档复现（注意：本机 WSL 对 /mnt/e 的读取有 NUL 乱码怪癖，/mnt/e 上的复现不可信），按 sqlglot 先例把 fastapi 加进 dev 组并刷新 lock；Linux 全量 741 passed/2 skipped + eval-gate 命令链 exit 0；推送后 CI run#2 success。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b7ca8da` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
