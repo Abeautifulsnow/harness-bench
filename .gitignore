@@ -47,3 +47,7 @@ outputs/
 
 # tmp
 tmp/
+
+# review-workflow 的临时产物（Step 1 生成、Step 6 清理）
+review_diff.json
+review_classified.json

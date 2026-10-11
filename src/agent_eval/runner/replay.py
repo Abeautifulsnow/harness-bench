@@ -16,7 +16,12 @@ import asyncio
 import contextlib
 import time
 
-from agent_eval.adapters import AgentRequest, SessionContext, open_adapter
+from agent_eval.adapters import (
+    AgentAdapter,
+    AgentRequest,
+    SessionContext,
+    open_adapter,
+)
 from agent_eval.errors import InfraError
 from agent_eval.evaluators.online_eval import (
     EvalPair,
@@ -40,24 +45,45 @@ async def execute_replay(
 
     传输层失败 / agent 上报失败 / 超时都归 InfraError 语义族——重放执行不产出
     "评测 FAIL"，它要么拿到一次完整执行，要么如实报平台侧失败。
+
+    生命周期（§63 review 修复）：adapter 持有惰性创建的 httpx.AsyncClient，
+    靠 ``aclose()`` 释放——本函数在 finally 里关闭，覆盖成功 / 超时 / 取消三条
+    路径；超时与被取消时还会 best-effort 通知 SUT 那一轮收场（cancel session），
+    不让被测方空跑一个没人等结果的 turn。
     """
     adapter = open_adapter(endpoint, headers=headers)
-    health = await adapter.health_check()
-    if not health.ok:
-        raise InfraError(f"replay agent endpoint unhealthy: {health.detail}")
-    session = await adapter.create_session(
-        SessionContext(eval_run_id=f"replay:{replay_id}", case_id=case_id)
-    )
-    events: list[dict] = []
+    session: SessionContext | None = None
     try:
-        async with asyncio.timeout(timeout_seconds):
-            async for event in adapter.run(session, AgentRequest(message=prompt, stream=True)):
-                events.append({**event.model_dump(mode="json"), "case_id": case_id})
-    except TimeoutError:
-        with contextlib.suppress(Exception):  # best-effort 清理（adapter 层约定）
-            await adapter.cancel(session)
-        raise InfraError(f"replay timed out after {timeout_seconds}s") from None
-    return events
+        health = await adapter.health_check()
+        if not health.ok:
+            raise InfraError(f"replay agent endpoint unhealthy: {health.detail}")
+        session = await adapter.create_session(
+            SessionContext(eval_run_id=f"replay:{replay_id}", case_id=case_id)
+        )
+        events: list[dict] = []
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                async for event in adapter.run(
+                    session, AgentRequest(message=prompt, stream=True)
+                ):
+                    events.append({**event.model_dump(mode="json"), "case_id": case_id})
+        except TimeoutError:
+            await _best_effort_cancel(adapter, session)
+            raise InfraError(f"replay timed out after {timeout_seconds}s") from None
+        except asyncio.CancelledError:
+            await _best_effort_cancel(adapter, session)
+            raise
+        return events
+    finally:
+        # 取消路径下这个 await 可能立刻再吃 CancelledError——best-effort，
+        # 与 eval 路径 _execute_job finally 的 suppress(Exception) 同一约定。
+        with contextlib.suppress(Exception):
+            await adapter.aclose()
+
+
+async def _best_effort_cancel(adapter: AgentAdapter, session: SessionContext) -> None:
+    with contextlib.suppress(Exception, asyncio.CancelledError):
+        await adapter.cancel(session)
 
 
 async def compare_with_original(

@@ -38,20 +38,20 @@ export function EvaluationDetail() {
   const [activity, setActivity] = React.useState<JobActivityEvent[]>([]);
   React.useEffect(() => {
     if (!jobId) return;
-    return subscribeJobEvents(
+    return subscribeJobEvents({
       jobId,
-      (job) => {
+      onEvent: (job) => {
         queryClient.setQueryData(["eval-runs", jobId], job);
         if (JOB_TERMINAL.has(job.status)) {
           void queryClient.invalidateQueries({ queryKey: ["eval-runs"] });
         }
       },
-      () => {
+      onError: () => {
         /* 断线由轮询兜底；无需特殊处理 */
       },
-      (event) =>
+      onActivity: (event) =>
         setActivity((prev) => [event, ...prev].slice(0, ACTIVITY_BUFFER)),
-    );
+    });
   }, [jobId, queryClient]);
   React.useEffect(() => {
     // Job 终态后清空活动流（完成后的页面不再显示执行期瞬态）

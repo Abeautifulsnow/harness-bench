@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
+from agent_eval.execution.models import JobKind
 from agent_eval.execution.notifications import NotificationStore, in_app_feed
 
 router = APIRouter(tags=["notifications"])
@@ -16,7 +17,10 @@ router = APIRouter(tags=["notifications"])
 @router.get("/notifications", summary="站内通知 feed（终态 Job 投影，新→旧，含已读标记）")
 async def list_notifications(request: Request) -> list[dict]:
     workspace = request.app.state.workspace
-    jobs = request.app.state.eval_run_service.list()
+    # 通知面是"评测结束"的投影（§59 的语义）：重放 Job 没有 benchmark/gate，
+    # 混进来只会得到一行 benchmark=null 的空通知——与评测列表按 kind 过滤同一裁决。
+    # 未来要通知重放，应给 item 带 kind 并用重放专属文案，而不是复用评测的字段。
+    jobs = request.app.state.eval_run_service.list(kind=JobKind.EVAL)
     return in_app_feed(jobs, NotificationStore(workspace.data_root))
 
 

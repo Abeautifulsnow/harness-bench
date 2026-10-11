@@ -4,6 +4,7 @@ import { Link, useParams } from "react-router";
 import { ArrowLeft, Play, Radio } from "lucide-react";
 
 import { Mono, PageHeader, Section } from "@/components/common/primitives";
+import { ReplaySection } from "@/components/production/ReplaySection";
 import { QueryState } from "@/components/common/states";
 import { TraceTree } from "@/components/common/TraceTree";
 import { Badge } from "@/components/ui/badge";
@@ -166,6 +167,7 @@ export function ProductionTraceDetail() {
         </QueryState>
       </Section>
       <EvaluationSection traceId={traceId} />
+      <ReplaySection traceId={traceId} cases={caseIds} />
     </div>
   );
 }

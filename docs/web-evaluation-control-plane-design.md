@@ -2359,3 +2359,126 @@ JSON 的采集链（Collector + translate_exporter / 自定义脚本 / SDK expor
   （ObservationUnavailable）——无时延证据的评测面不再 0 值恒 pass 假绿；
 - `deepeval_adapter.convert` 对 None latency 不再 TypeError（completion_time=None）；
 - ProductionStore evaluations 台账 glob 修正（replay_*/eval_* 两种 id 前缀都可见）。
+
+---
+
+# 63. V2 增量五（2026-10-10）：§53 Trace Replay 的 Job 化 + Web 重放面板
+
+承接 §62（重放能力的落地）与 §53 的长期口径（"Production Trace Replay 会落到与
+Web Evaluation 同一个 Run/Trace/Evaluation 平面"）。§62 只给了**同步入口**：
+`POST /production/traces/{id}/replay` 是一个挂着等结果的有界超时请求——真实 agent
+上一次重放动辄几十秒到数分钟，§14 对评测成立的那条禁令（"Agent Evaluation 天然
+属于长任务"）对重放同样成立。本节把重放并入执行面 Job，并补上生产详情页的操作面。
+
+## 63.1 为什么是"给 Job 加 kind"而不是"另起一套重放队列"
+
+§22 的账本、§25 的队列、§17 的取消、§18 的 SSE、§36 的幂等、§37 的审计全部按
+`job_id` 寻址。另起一套队列意味着这些横切能力各写两遍，而且两边的取消/超时/审计
+语义会开始漂移。因此：
+
+- `EvalRunRequest.kind: eval | replay`（§46 的同一请求模型，两组字段各管一段）；
+- `EvalRunJob.kind` 与 `EvalRunJob.replay_id`：重放**不产生 Run**（它是生产面的一条
+  trace），因此 replay_id 与 run_id 并列存在，绝不复用 run_id 字段（复用会让
+  "这次 Job 评测了哪个 Run"这个语义说谎）；
+- 必填项按 kind 在 `EvalRunService._validate` 分流：eval 要 benchmark，replay 要
+  trace_id；echo 侧字段出现在 replay 请求里（benchmark/suite/profile）直接 400。
+
+## 63.2 单一实现（本节的硬约束）
+
+同步端点与 Job 路径调用的是**同一个** `execution/replay_job.run_replay`：脱敏 →
+重放 → 比较 → 落账四处逻辑只有一份。差异只在两处入参：
+
+| 关注点 | 同步端点（CI/脚本） | Job 路径（Web/调度） |
+| --- | --- | --- |
+| 失败呈现 | 返回 200 + `status="error"` 的 record（既有契约不变） | 异常穿透 → Job `FAILED` + `failure_kind`（`raise_on_failure=True`） |
+| 进度 | 无 | `hub.publish` → SSE（`replay.prepared` / `.executed` / `.compared`） |
+
+结构护栏：`tests/test_replay.py::test_replay_logic_lives_only_in_the_shared_executor`
+断言 `api/routers/production.py` 里不再出现 `sanitize_text` / `execute_replay(` /
+`compare_with_original` / `new_id(`——把实现内联回去即红。
+
+## 63.3 REST 契约
+
+```http
+POST /api/replay-runs        # 202 受理（幂等重放 200）；token 门（§58.5）
+GET  /api/replay-runs        # 列表（只含 kind=replay）
+GET  /api/replay-runs/{job_id}
+GET  /api/replay-runs/{job_id}/events    # SSE（§18 同一套帧）
+POST /api/replay-runs/{job_id}/cancel    # §17：传到执行器，真实取消
+```
+
+请求体（`ReplayRunRequest`，`extra="forbid"`）：
+
+```json
+{
+  "agent_profile": "ai-chatbot-shim",
+  "trace_id": "prod_...",
+  "case_id": null,
+  "sanitize": true,
+  "replay_timeout_seconds": 60.0,
+  "policy": "production-qa"
+}
+```
+
+`extra="forbid"` 与 `EvalRunRequest`（宽松面）**有意分歧**：重放请求里出现
+`benchmark` 属于客户端参数错配，静默忽略会让"拿重放端点发评测请求"通过。
+
+读路径守卫：`/api/replay-runs/*` 只认 `kind=replay` 的 Job，否则 404——拿 eval Job
+的 id 打重放详情会返回一个"没有 replay_id 的 succeeded Job"，读者会以为重放成功。
+`GET /api/eval-runs` 对称地只回 `kind=eval`（混排会让评测列表的含义变模糊）。
+
+## 63.4 错误语义（两条入口共用的分类）
+
+| 情形 | 判定点 | 结论 |
+| --- | --- | --- |
+| 缺 trace_id / timeout ≤ 0 / 未知 policy / trace_id 形状非法 | 提交期 `_validate` | 400，不创建 Job |
+| 请求体含未知字段（如 benchmark） | pydantic 校验层 | 422 |
+| 未知 agent_profile / profile 被禁用 / secret 未配置 | 提交期 `_resolve_connection` | 400（既有语义） |
+| trace 不存在 / case 不存在 | 执行期 `run_replay` 前置检查 | Job FAILED + `INVALID_REQUEST`（exit 3）；同步端点 404 |
+| pair 不可提取（缺 input 或 output） | 执行期 | Job `INVALID_REQUEST`；同步端点 422 |
+| agent 不可达 / 超时 | 执行期 | Job FAILED + `INFRA_FAILURE`（exit 2）；同步端点 200 + `status="error"` |
+
+"未知 trace"归 INVALID_REQUEST 而不是 INFRA_FAILURE：它表达"请求里指了一个不存在
+的对象"，与"环境坏了"必须分得开（§32 同一口径）。失败时 record 仍完整落盘——
+同步端点的现场不因 Job 化而缩水。
+
+## 63.5 Web：Production 详情页的 Replay 面板
+
+`ProductionTraceDetail` 在既有 `EvaluationSection`（§61）之下新增 `ReplaySection`：
+
+```text
+选择 agent（Agent Connection 列表，secret 服务端解析）
+ → 选择 case（多 case trace 必选；单 case 自动取唯一）
+ → 可选 policy（给了就对两侧同尺打分）
+ → 发起（POST /api/replay-runs）→ SSE 实时进度 → 终态取 record
+ → 展示比较结论（工具序列 Jaccard / 输出是否变化 / 可选双侧 judge 分）
+ → 可跳转重放产出的那条 trace（source=replay，Viewer 复用）
+```
+
+同步端点保留给 CI/脚本：数据库里已有依赖它的调用方，删掉是破坏性变更；而它"挂在
+等"的形态正是 Web 不该有的（§14）。
+
+## 63.6 未做与后续
+
+- 重放的**批量**形态（一条 trace 全 case 重放）未做：现在的粒度是单 case，多 case
+  必须显式选一条——真正的"全量重放"要先回答"部分 case 不可提取时算不算完成"。
+- 异步子代理等长尾终态（§62.3 记录的 subagent-status 端点）不在重放观测面内。
+- Replay 记录列表没有独立页面（详情页内嵌最近若干条）；记录多了再谈分页。
+
+## 63.7 Review 修复记录（2026-10-10，同日）
+
+首轮 review 出 4 项应修，全部落地并有用例钉住：
+
+| # | 发现 | 修复 | 用例 |
+| --- | --- | --- | --- |
+| 1 | `ReplaySection` 没有取消按钮——"可取消"只写在文案里（`cancelReplayRun` 是死代码） | 镜像 EvaluationDetail：destructive 按钮 + cancel mutation，仅运行中显示 | `test_cancel_a_running_replay`（`[slow]` 脚本给 3s 确定性窗口） |
+| 2 | `execute_replay` 从不关闭 adapter——每次重放泄漏一个 httpx.AsyncClient（§62 遗留，Job 路径放大）；取消时连 `adapter.cancel(session)` 都不会跑 | `try/finally` 收口：成功/超时/被取消三路都 `aclose()`；超时与被取消时 best-effort `cancel(session)`，不让 SUT 空跑 | 现有全流程用例走新生命周期；取消用例覆盖中断路径 |
+| 3 | 通知 feed 未按 kind 过滤：重放完成会以 `benchmark: null` 混进站内通知（前端 `NotificationItem.benchmark: string` 是类型谎言） | feed 按 `kind=EVAL` 投影（与评测列表同一裁决）；未来要通知重放，应带 kind 并用专属文案 | `test_notifications_feed_excludes_replay_jobs` |
+| 4 | 幂等键跨 kind 共用：同 key 的 eval 请求会"重放"既有的重放 Job（响应冒充） | `_find_idempotent` 按 kind 命名空间；异 kind 同 key → 400 | `test_idempotency_key_is_kind_scoped` |
+
+同批收紧的两处（review 建议采纳）：
+
+- `_validate_replay` 从"只拦 benchmark/suite/profile"改为**全量拦 eval 侧字段**
+  （`model_construct` 缺省值比对，列出全部违规名）——API 的 `extra="forbid"` 只挡
+  HTTP，服务层直连绕得过去；`test_service_rejects_eval_side_fields_for_replay`。
+- `GET /api/production/replays` 增加可选 `trace_id` 过滤，前端不再拉全量再筛。

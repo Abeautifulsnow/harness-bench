@@ -17,6 +17,7 @@ from agent_eval.errors import InvalidCallError
 from agent_eval.evaluators.online_eval import (
     load_eval_policies,
 )
+from agent_eval.execution.replay_job import ReplayRequestError, run_replay
 from agent_eval.models.events import TraceEvent
 from agent_eval.storage.production_store import ProductionStore
 from agent_eval.trace.otel import convert_otel, is_otel_payload
@@ -451,7 +452,13 @@ def _resolve_evaluation(
     dependencies=[Depends(enforce_exec_token)],
 )
 async def replay_production_trace(trace_id: str, request: Request) -> dict:
-    from agent_eval.evaluators.online_eval import extract_pair as _extract
+    """同步入口（有界超时）：保留给 CI / 脚本；Web 走 /api/replay-runs 的 Job 路径。
+
+    §63：两条入口调用的都是 ``execution/replay_job.run_replay``——本函数只负责
+    请求体解析、agent 目标解析与错误码映射，"脱敏 / 重放 / 比较 / 落账"四处逻辑
+    不再各有一份。契约不变：执行失败也返回 200 + record（status="error"）；前置
+    条件不成立（未知 trace/case/policy、pair 不可提取）仍按 400/404/422 拒绝。
+    """
 
     try:
         body = await request.json()
@@ -460,106 +467,29 @@ async def replay_production_trace(trace_id: str, request: Request) -> dict:
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be a JSON object")
 
-    meta = _require_meta(_store(request), trace_id)
+    # 错误优先级是契约的一部分（既有测试钉着）：未知 trace 先于"缺 endpoint"报错，
+    # 因此这里先做一次存在性检查——run_replay 内部还会再读一次 meta（幂等、廉价），
+    # 但把 404 的判定放在解析请求体之前，语义才与同步端点既有行为一致。
+    _require_meta(_store(request), trace_id)
     options = _parse_replay_options(body)
-    case_id = _resolve_replay_case(body, meta)
-    pair = _extract(case_id, meta["cases"][case_id], _store(request).load_events(trace_id, case_id))
-    if pair is None:
-        raise HTTPException(
-            status_code=422, detail="pair not extractable for this case (need input+output)"
-        )
     endpoint, headers = _resolve_replay_target(body, request)
-    policy = _resolve_replay_policy(body, request)
-
-    record = await _execute_and_record_replay(
-        request=request,
-        meta=meta,
-        pair=pair,
-        case_id=case_id,
-        endpoint=endpoint,
-        headers=headers,
-        policy=policy,
-        options=options,
-    )
-    return record
-
-
-async def _execute_and_record_replay(
-    *,
-    request: Request,
-    meta: dict,
-    pair,
-    case_id: str,
-    endpoint: str,
-    headers: dict[str, str] | None,
-    policy: dict | None,
-    options: dict,
-) -> dict:
-    """执行一次重放并落账：成败都写完整 record（失败不留半截成功假象）。"""
-    import time as _time
-
-    from agent_eval.ids import new_id
-    from agent_eval.runner.replay import compare_with_original, execute_replay
-    from agent_eval.storage.replay_store import ReplayStore
-    from agent_eval.trace.sanitize import sanitize_text
-
-    trace_id = str(meta["trace_id"])
-    prompt, redactions = (
-        sanitize_text(pair.input or "") if options["sanitize"] else (pair.input or "", 0)
-    )
-    replay_id = new_id("rp")
-    started = _time.monotonic()
-    record: dict = {
-        "replay_id": replay_id,
-        "trace_id": trace_id,
-        "case_id": case_id,
-        "status": "error",
-        "error": None,
-        "sanitize": {"enabled": options["sanitize"], "redactions": redactions},
-        "source_input": pair.input,
-        "prompt": prompt,
-        "endpoint": endpoint,
-        "replay_trace_id": None,
-        "comparison": None,
-        "created_at": _now_iso(),
-    }
+    raw_case = body.get("case_id")
+    raw_policy = body.get("policy")
     try:
-        events = await execute_replay(
-            replay_id=replay_id,
-            prompt=prompt,
+        return await run_replay(
+            data_root=request.app.state.workspace.data_root,
+            evals_root=request.app.state.workspace.evals_root,
+            trace_id=trace_id,
+            case_id=str(raw_case) if raw_case else None,
             endpoint=endpoint,
             headers=headers,
+            sanitize=options["sanitize"],
             timeout_seconds=options["timeout_seconds"],
-            case_id=case_id,
+            policy_id=str(raw_policy) if raw_policy else None,
+            judge_adapter=request.app.state.production_evaluator,
         )
-        replay_trace_id = _store(request).save(
-            source="replay",
-            cases=[{"case_id": case_id, "events": events}],
-            endpoint=endpoint,
-            origin=trace_id,
-        )
-        comparison = await compare_with_original(
-            original_pair=pair,
-            prompt=prompt,
-            replay_events=events,
-            policy=policy,
-            adapter=(request.app.state.production_evaluator if policy is not None else None),
-        )
-        record.update(
-            status="completed",
-            replay_trace_id=replay_trace_id,
-            comparison=comparison,
-            duration_ms=int((_time.monotonic() - started) * 1000),
-            finished_at=_now_iso(),
-        )
-    except Exception as exc:  # noqa: BLE001 - 重放失败如实落账
-        record.update(
-            error=f"{type(exc).__name__}: {exc}",
-            duration_ms=int((_time.monotonic() - started) * 1000),
-            finished_at=_now_iso(),
-        )
-    ReplayStore(request.app.state.workspace.data_root).save(record)
-    return record
+    except ReplayRequestError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
 
 def _parse_replay_options(body: dict) -> dict:
@@ -577,24 +507,6 @@ def _parse_replay_options(body: dict) -> dict:
     if timeout_seconds <= 0:
         raise HTTPException(status_code=400, detail="timeout_seconds must be positive")
     return {"sanitize": bool(body.get("sanitize", True)), "timeout_seconds": timeout_seconds}
-
-
-def _resolve_replay_case(body: dict, meta: dict) -> str:
-    """case 解析：显式指定优先；单 case trace 缺省取唯一一个，多 case 必须显式。"""
-    case_id = body.get("case_id")
-    if case_id is None:
-        cases = meta.get("cases") or {}
-        if len(cases) == 1:
-            case_id = next(iter(cases))
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="trace has multiple cases; specify body.case_id explicitly",
-            )
-    case_id = str(case_id)
-    if case_id not in (meta.get("cases") or {}):
-        raise HTTPException(status_code=404, detail=f"unknown case in trace: {case_id}")
-    return case_id
 
 
 def _resolve_replay_target(body: dict, request: Request) -> tuple[str, dict[str, str] | None]:
@@ -626,26 +538,20 @@ def _resolve_replay_target(body: dict, request: Request) -> tuple[str, dict[str,
     return str(endpoint), headers
 
 
-def _resolve_replay_policy(body: dict, request: Request) -> dict | None:
-    """policy 引用解析：声明了不存在的 policy 是 400（配置错），不是静默不评。"""
-    policy_id = body.get("policy")
-    if not policy_id:
-        return None
-    policies = {p.id: p for p in load_eval_policies(request.app.state.workspace.evals_root)}
-    policy = policies.get(str(policy_id))
-    if policy is None:
-        raise HTTPException(status_code=400, detail=f"unknown eval policy: {policy_id}")
-    return policy
-
-
 @router.get(
     "/production/replays",
-    summary="Replay 记录列表（新→旧）",
+    summary="Replay 记录列表（新→旧；可选 trace_id 过滤）",
 )
-async def list_production_replays(request: Request) -> list[dict]:
+async def list_production_replays(
+    request: Request,
+    trace_id: str | None = fastapi_Query(default=None),
+) -> list[dict]:
     from agent_eval.storage.replay_store import ReplayStore
 
-    return ReplayStore(request.app.state.workspace.data_root).list()
+    records = ReplayStore(request.app.state.workspace.data_root).list()
+    if trace_id is None:
+        return records
+    return [record for record in records if record.get("trace_id") == trace_id]
 
 
 @router.get(
@@ -659,12 +565,6 @@ async def get_production_replay(replay_id: str, request: Request) -> dict:
     if record is None:
         raise HTTPException(status_code=404, detail=f"unknown replay: {replay_id}")
     return record
-
-
-def _now_iso() -> str:
-    from datetime import datetime
-
-    return datetime.now().astimezone().isoformat()
 
 
 @router.get(

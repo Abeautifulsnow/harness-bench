@@ -9,10 +9,11 @@ Web Execution 控制面（Evaluation，docs/web-evaluation-control-plane-design.
 
 Definition 数据（Benchmark / Dataset / Case / Suite / Gate）依然只读：前端不存在
 "绕过 Gate / Baseline / Review 流程改数据"的路径——这不是约定，而是结构性的：
-OpenAPI 里 PUT/DELETE/PATCH 不存在，POST 只出现在 `/api/eval-runs`
-（发起/取消评测两个执行动词，`tests/test_api.py::TestReadOnlyContract` 断言这一点）。
+OpenAPI 里 PUT/DELETE/PATCH 不存在，POST 只出现在执行动词上
+（发起/取消评测 `/api/eval-runs`、发起/取消重放 `/api/replay-runs`（§63）、
+触发器、通知已读、生产摄取；`tests/test_api.py::TestReadOnlyContract` 断言这一点）。
 
-执行面的 POST 只有两个，全部经受控入口进入 Runner：
+评测执行面的 POST 有两个，全部经受控入口进入 Runner：
 
 | 动作 | 端点 |
 | --- | --- |

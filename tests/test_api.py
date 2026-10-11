@@ -56,7 +56,8 @@ class TestReadOnlyContract:
         """Execution 边界（docs/web-evaluation-control-plane-design.md §42 + §58/§59）：
 
         ``Definition mutation verbs = forbidden``；
-        ``Execution mutation verbs = allowed``（eval-runs 发起/取消、triggers 触发），
+        ``Execution mutation verbs = allowed``（eval-runs / replay-runs 的发起与取消
+        ——后者是 §63 的 Trace Replay Job 化、triggers 触发），
         另有两类辅助动词：**UI 状态**（notifications/read 已读标记）与
         **生产摄取**（production/traces，token 门，§60.2）——都不是 Definition。
         PUT/DELETE/PATCH 任何资源都不存在。
@@ -68,6 +69,7 @@ class TestReadOnlyContract:
                 if verb == "post":
                     allowed = (
                         "/api/eval-runs",
+                        "/api/replay-runs",
                         "/api/triggers",
                         "/api/notifications/read",
                         "/api/production",

@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 from agent_eval.errors import AgentEvalError, EvaluationInfraError, InfraError, InvalidCallError
+from agent_eval.evaluators.online_eval import load_eval_policies
 from agent_eval.execution import notifier
 from agent_eval.execution.connections import (
     AgentConnectionProfile,
@@ -34,8 +35,10 @@ from agent_eval.execution.models import (
     EvalRunJob,
     EvalRunRequest,
     FailureKind,
+    JobKind,
     JobStatus,
 )
+from agent_eval.execution.replay_job import ReplayFailureMode, run_replay
 from agent_eval.execution.repository import JobRepository
 from agent_eval.loading.loader import load_benchmark, load_profile, load_suites
 from agent_eval.models.regression import BaselineMode
@@ -76,6 +79,9 @@ class EvalRunService:
         agent_concurrency_cap: int | None = 16,
         executor: JobExecutor | None = None,
         reap_orphans: bool = True,
+        # kind=replay 的 judge 侧能力（Online Eval policy 打分）：由 create_app 注入，
+        # 与 §61 的手动评测路径共用同一个 adapter——两条链路一把尺（§63）。
+        production_evaluator: object | None = None,
     ) -> None:
         self.evals_root = evals_root
         self.data_root = data_root
@@ -85,6 +91,7 @@ class EvalRunService:
         self.hub = JobEventHub()
         self.repeat_cap = repeat_cap
         self.agent_concurrency_cap = agent_concurrency_cap
+        self.production_evaluator = production_evaluator
         # §23：执行机制可替换（LocalJobExecutor 之外，未来可换 RemoteWorker 等）；
         # 缺省自建本地执行器。
         self.executor: JobExecutor = executor or LocalJobExecutor(
@@ -129,10 +136,19 @@ class EvalRunService:
         ahead = in_flight.index(job_id)
         return max(1, ahead - running + 1)
 
-    def list(self) -> list[EvalRunJob]:
+    def list(self, kind: JobKind | None = None) -> list[EvalRunJob]:
+        """Job 列表（新→旧）。``kind`` 非空即只回该种类。
+
+        §63：两种 Job 共用一个账本，但列表页各看各的——评测列表里混进重放 Job 会
+        让"这次评测跑了什么"这个语义变模糊（它没有 Run、没有 gate）。
+        """
+
         merged = {job.job_id: job for job in self.repo.list()}
         merged.update(self._jobs)
-        return sorted(merged.values(), key=lambda j: j.created_at, reverse=True)
+        jobs = sorted(merged.values(), key=lambda j: j.created_at, reverse=True)
+        if kind is None:
+            return jobs
+        return [job for job in jobs if job.kind is kind]
 
     # --------------------------------------------------------------- commands
 
@@ -147,7 +163,7 @@ class EvalRunService:
     ) -> EvalRunJob:
         with self._lock:
             if idempotency_key:
-                replay = self._find_idempotent(idempotency_key)
+                replay = self._find_idempotent(idempotency_key, request.kind)
                 if replay is not None:
                     raise DuplicateSubmission(replay)
 
@@ -162,6 +178,7 @@ class EvalRunService:
             job = EvalRunJob(
                 job_id=_new_job_id(),
                 request=request,
+                kind=request.kind,
                 requested_by=requested_by,
                 idempotency_key=idempotency_key,
                 notify_webhook=notify_webhook,
@@ -243,14 +260,29 @@ class EvalRunService:
 
     # -------------------------------------------------------------- internals
 
-    def _find_idempotent(self, key: str) -> EvalRunJob | None:
-        for job in self._jobs.values():
-            if job.idempotency_key == key:
-                return job
-        return self.repo.find_by_idempotency_key(key)
+    def _find_idempotent(self, key: str, kind: JobKind) -> EvalRunJob | None:
+        """§36 + §63：幂等键按 kind 命名空间。
+
+        键已被**另一种** Job 占用时显式拒绝（400），而不是把那份 Job 冒充成本次的
+        响应——拿 eval Job 冒充 replay 响应，读者会以为重放成功（同一类假事实）。
+        """
+        in_memory = [job for job in self._jobs.values() if job.idempotency_key == key]
+        existing = in_memory[0] if in_memory else self.repo.find_by_idempotency_key(key)
+        if existing is None:
+            return None
+        if existing.kind is not kind:
+            raise InvalidSubmission(
+                f"idempotency key already used by a {existing.kind.value} job: "
+                f"{existing.job_id}"
+            )
+        return existing
 
     def _validate(self, request: EvalRunRequest, *, validate_connection: bool = True) -> None:
-        """全部服务端限制（§13/§44）。命中即 400，不创建 Job。"""
+        """全部服务端限制（§13/§44/§63）。命中即 400，不创建 Job。"""
+
+        if request.kind is JobKind.REPLAY:
+            self._validate_replay(request, validate_connection=validate_connection)
+            return
 
         if (
             self.repeat_cap is not None
@@ -278,6 +310,8 @@ class EvalRunService:
         # 定义名会拼进文件路径（loader 的 f"{name}.yaml"）：绝对路径会整体替换
         # Path 拼接、相对路径可穿越出 evals/。提交入口是 V1 唯一的执行面门，
         # 白名单在这里设防，而不是信任 loader。
+        if request.benchmark is None:
+            raise InvalidSubmission("benchmark is required for kind=eval")
         _require_identifier("benchmark", request.benchmark)
         if request.profile is not None:
             _require_identifier("profile", request.profile)
@@ -310,6 +344,45 @@ class EvalRunService:
         if validate_connection:
             self._resolve_connection(request.agent_profile)
 
+    def _validate_replay(
+        self, request: EvalRunRequest, *, validate_connection: bool = True
+    ) -> None:
+        """kind=replay 的服务端限制（§63）：与 eval 侧共享"不信任浏览器"的同一条纪律。
+
+        重放的必填项不是 benchmark 而是 trace_id。policy 也在提交期解析：声明了
+        不存在的 policy 是配置错，不是运行结果——留给执行期只会得到一个更贵的 400。
+
+        eval 侧字段**一个都不许带**（不只是 benchmark 一族）：API 侧有
+        ReplayRunRequest 的 extra="forbid" 挡着，但服务层直连（CLI / 未来的调用方）
+        绕得过去——repeat/no_judge 对重放没有任何语义，收下它们就是"声明了却不生效"。
+        """
+
+        defaults = EvalRunRequest.model_construct(benchmark=None)
+        echo = sorted(
+            key
+            for key in (
+                "benchmark", "suite", "profile", "repeat", "agent_concurrency",
+                "no_judge", "strict_protocol", "save_trace", "save_artifacts",
+                "tags", "baseline_policy", "baseline_run", "gate",
+                "judge_skip_policy", "timeout", "agent_model", "agent_version",
+                "judge_model", "experiment_id", "variant_id",
+            )
+            if getattr(request, key) != getattr(defaults, key)
+        )
+        if echo:
+            raise InvalidSubmission(f"kind=replay does not accept eval-side fields: {echo}")
+        if not request.trace_id:
+            raise InvalidSubmission("trace_id is required for kind=replay")
+        _require_identifier("trace_id", request.trace_id)
+        if request.replay_timeout_seconds <= 0:
+            raise InvalidSubmission("replay_timeout_seconds must be positive")
+        if request.policy is not None:
+            known = {policy.id for policy in load_eval_policies(self.evals_root)}
+            if request.policy not in known:
+                raise InvalidSubmission(f"unknown eval policy '{request.policy}'")
+        if validate_connection:
+            self._resolve_connection(request.agent_profile)
+
     def _resolve_connection(self, profile_id: str) -> AgentConnectionProfile:
         profiles = {p.id: p for p in load_agent_connections(self.evals_root)}
         profile = profiles.get(profile_id)
@@ -334,6 +407,10 @@ class EvalRunService:
             return
         if job.cancel_requested:
             return  # 排队取消已经落账，别再启动评测
+
+        if job.request.kind is JobKind.REPLAY:
+            await self._execute_replay_job(job_id, connection)
+            return
 
         request = job.request
         cfg = self._build_run_config(request, connection)
@@ -405,10 +482,85 @@ class EvalRunService:
             finished_at=datetime.now().astimezone(),
         )
 
+    async def _execute_replay_job(
+        self, job_id: str, connection: AgentConnectionProfile
+    ) -> None:
+        """kind=replay 的 Job body（§63）：编排在 ``replay_job.run_replay``。
+
+        单一实现纪律：同步端点（``POST /production/traces/{id}/replay``）调用的是
+        同一个函数，因此"同一份重放在两个入口给出不同结论"在结构上不可能发生。
+        本层只做状态机与 failure_kind 翻译。
+        """
+
+        job = self._jobs.get(job_id)
+        if job is None:
+            return
+        request = job.request
+        agent_headers = connection.auth_headers() if connection.auth is not None else None
+
+        def on_progress(event: dict) -> None:
+            # 帧契约与 job.*/case.* 一致：必须带 job_id（订阅端对全帧统一断言/路由）。
+            self.hub.publish(job_id, {"job_id": job_id, "run_id": None, **event})
+
+        self._apply(job_id, status=JobStatus.RUNNING, started_at=datetime.now().astimezone())
+        try:
+            record = await run_replay(
+                data_root=self.data_root,
+                evals_root=self.evals_root,
+                trace_id=str(request.trace_id),
+                case_id=request.case_id,
+                endpoint=connection.endpoint,
+                headers=agent_headers,
+                sanitize=request.sanitize,
+                timeout_seconds=request.replay_timeout_seconds,
+                policy_id=request.policy,
+                judge_adapter=self.production_evaluator,
+                on_progress=on_progress,
+                # Job 路径要的是"失败翻译成 failure_kind"：留默认的 RETURN_RECORD
+                # 会把执行失败变成 status=error 的 record + Job SUCCEEDED——报告上
+                # "这活干完了"。
+                failure_mode=ReplayFailureMode.RAISE,
+            )
+        except asyncio.CancelledError:
+            # 与 eval 侧同款：取消由 _on_executor_cancelled 统一收口，这里原样上抛。
+            raise
+        except AgentEvalError as exc:
+            # ReplayRequestError 是 InvalidCallError 的子类 → INVALID_REQUEST（exit 3）。
+            self._apply(
+                job_id,
+                status=JobStatus.FAILED,
+                error=exc.message,
+                failure_kind=_failure_kind(exc),
+                exit_code=exc.exit_code,
+                finished_at=datetime.now().astimezone(),
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 - 未预期崩溃必须收口成 FAILED
+            self._apply(
+                job_id,
+                status=JobStatus.FAILED,
+                error=f"{type(exc).__name__}: {exc}",
+                failure_kind=FailureKind.INTERNAL,
+                exit_code=1,
+                finished_at=datetime.now().astimezone(),
+            )
+            return
+
+        self._apply(
+            job_id,
+            status=JobStatus.SUCCEEDED,
+            replay_id=record.get("replay_id"),
+            exit_code=0,
+            finished_at=datetime.now().astimezone(),
+        )
+
     def _build_run_config(
         self, request: EvalRunRequest, connection: AgentConnectionProfile
     ) -> RunConfig:
         """EvalRunRequest → RunConfig（§46：CLI 与 Web 共享同一套语义）。"""
+
+        if request.benchmark is None:  # _validate 已拦；防御未知构造路径
+            raise InvalidSubmission("benchmark is required for kind=eval")
 
         agent_headers = connection.auth_headers() if connection.auth is not None else None
         return RunConfig(

@@ -15,7 +15,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from agent_eval.api.security import enforce_exec_token
-from agent_eval.execution.models import TERMINAL_STATUSES, EvalRunJob, EvalRunRequest
+from agent_eval.execution.models import (
+    TERMINAL_STATUSES,
+    EvalRunJob,
+    EvalRunRequest,
+    JobKind,
+)
 from agent_eval.execution.service import (
     DuplicateSubmission,
     EvalRunService,
@@ -69,9 +74,11 @@ async def create_eval_run(
     return job
 
 
-@router.get("/eval-runs", summary="评测 Job 列表（§38）")
+@router.get("/eval-runs", summary="评测 Job 列表（§38：只含 kind=eval）")
 async def list_eval_runs(request: Request) -> list[EvalRunJob]:
-    return _service(request).list()
+    # §63：账本是共用的，但"评测列表"是本页面的语义——混进重放 Job 会让读者以为
+    # 它们也是评测（它们没有 Run、没有 gate）。replay 侧有 /api/replay-runs。
+    return _service(request).list(kind=JobKind.EVAL)
 
 
 @router.get("/eval-runs/{job_id}", summary="评测 Job 详情（§16.2，含 progress）")
@@ -97,11 +104,15 @@ async def cancel_eval_run(job_id: str, request: Request) -> EvalRunJob:
         raise HTTPException(status_code=409, detail=f"job already finished: {job_id}") from exc
 
 
-@router.get("/eval-runs/{job_id}/events", summary="Job 实时进度 SSE（§18：run-level）")
-async def stream_eval_run_events(job_id: str, request: Request) -> StreamingResponse:
+async def stream_job_events(job_id: str, request: Request) -> StreamingResponse:
+    """Job 实时进度 SSE 的共享实现（§18）——eval / replay 两个路由共用一份。
+
+    两条流的帧契约完全一致（job_id 必带、终态事件名按 status 映射），复用是唯一
+    不会漂移的写法。job_id 的存在性由**调用方**先行校验：各路由对"什么 id 该 404"
+    有自己的守卫（replay 路由还要拒绝 kind 不符的 Job），共享函数不越权决定。
+    """
+
     service = _service(request)
-    if service.get(job_id) is None:
-        raise HTTPException(status_code=404, detail=f"unknown job: {job_id}")
 
     async def events() -> Any:
         # §18：两条流合一——run-level 快照（轮询，事实源）+ case/turn/tool 级
@@ -140,3 +151,10 @@ async def stream_eval_run_events(job_id: str, request: Request) -> StreamingResp
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/eval-runs/{job_id}/events", summary="Job 实时进度 SSE（§18：run-level）")
+async def stream_eval_run_events(job_id: str, request: Request) -> StreamingResponse:
+    if _service(request).get(job_id) is None:
+        raise HTTPException(status_code=404, detail=f"unknown job: {job_id}")
+    return await stream_job_events(job_id, request)

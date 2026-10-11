@@ -33,6 +33,7 @@ from agent_eval.api.routers import (
     notifications,
     production,
     quality,
+    replay_runs,
 )
 from agent_eval.api.routers import regressions as regressions_router
 from agent_eval.api.routers import runs as runs_router
@@ -58,11 +59,18 @@ def create_app(
     max_running_jobs: int = 2,
     production_evaluator: object | None = None,
 ) -> FastAPI:
+    # §61/§63：judge 适配器在 service 构造前解析——kind=replay 的 Job、§61 手动
+    # 评测与生产监控共用同一个实例（一把尺；三处各建一个 adapter 会让"同一份输出的
+    # 分数"取决于它是从哪条入口进来的）。
+    default_evaluator = (
+        production_evaluator if production_evaluator is not None else DeepEvalCapabilityAdapter()
+    )
     service = EvalRunService(
         evals_root=evals_root,
         data_root=data_root,
         fixtures_root=fixtures_root,
         max_running_jobs=max_running_jobs,
+        production_evaluator=default_evaluator,
     )
     scheduler = SchedulerService(evals_root=evals_root, data_root=data_root, service=service)
     # P1-1 Production Online Eval 自动化：judge 适配器与 §61 手动评测同一注入契约
@@ -106,9 +114,6 @@ def create_app(
     # 注入契约：须实现 async evaluate(metric_id, threshold, trace, model=)
     # -> (score|None, reason) 与 version() -> str|None（返回 None = SDK 缺失，
     # 全部 metric 判 skipped）。
-    default_evaluator = (
-        production_evaluator if production_evaluator is not None else DeepEvalCapabilityAdapter()
-    )
     app.state.production_evaluator = default_evaluator
     monitors.evaluator = default_evaluator
     app.state.production_monitors = monitors
@@ -129,7 +134,9 @@ def create_app(
         app.include_router(module.router, prefix=API_PREFIX)
     for module in (experiments, failures, quality, analytics):
         app.include_router(module.router, prefix=API_PREFIX)
-    for module in (eval_runs, agent_connections, automation, notifications, production):
+    for module in (
+        eval_runs, replay_runs, agent_connections, automation, notifications, production
+    ):
         app.include_router(module.router, prefix=API_PREFIX)
 
     _register_error_handlers(app)

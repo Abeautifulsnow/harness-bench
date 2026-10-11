@@ -606,3 +606,53 @@ notifier 公开投递别名。
 测试：护栏 36 → 37（`test_chatbot_dataset.py`），全量 756 passed（实测）；8 条
 新 case 的**行为层绿/红尚未经真机全量**——按本仓纪律，真机三轮（默认 run +
 `--suite security`）在合并前补跑，roundtrip 需带答案文件启动 shim。
+
+---
+
+## 2026-10-10 批次（§63：Trace Replay 的 Job 化 + Web 重放面板）
+
+来源：评估结论"Replay 只有 API 没有 Web UI"，用户裁决按推荐的顺序做——先把重放
+并入执行面 Job/SSE（消掉同步超时与 UI 挂起），再补生产详情页的重放面板。
+
+| 切片 | 内容 | 状态 |
+| --- | --- | --- |
+| 执行域 | `JobKind(eval / replay)` + `EvalRunRequest` 的 replay 组字段 + `EvalRunJob.replay_id` | ✅ |
+| 单一实现 | `execution/replay_job.run_replay`（同步端点与 Job 路径共用；结构护栏防内联回退） | ✅ |
+| 服务层 | `_validate_replay`（提交期 400）+ `_execute_replay_job`（失败翻译）+ `list(kind=)` | ✅ |
+| API | `POST/GET /api/replay-runs`、详情/SSE/取消；`GET /api/eval-runs` 按 kind 过滤 | ✅ |
+| Web | `Production` 详情页 `ReplaySection`（选 agent/case/policy → 发起 → SSE → 比较结论） | ✅ |
+| 契约 | 设计文档 §63；只读契约白名单加 `/api/replay-runs` | ✅ |
+
+关键裁决：
+- **给 Job 加 kind 而不是另起队列**：§22 账本/§25 队列/§17 取消/§18 SSE 全按 job_id
+  寻址，分两套等于把这些能力写两遍并让语义漂移；
+- **重放不产生 Run**：`replay_id` 与 `run_id` 并列，绝不复用（复用会让"这次 Job
+  评测了哪个 Run"说谎）；
+- **失败语义按入口分流但分类同源**：Job 路径 `raise_on_failure=True` → FAILED +
+  failure_kind；同步端点仍 200 + `status="error"` record（既有调用方不破坏）。
+  未知 trace → INVALID_REQUEST（exit 3），不是 INFRA_FAILURE；
+- **`ReplayRunRequest` 用 `extra="forbid"`**：与 `EvalRunRequest` 有意分歧——
+  重放请求里出现 benchmark 是客户端错配，静默忽略等于放行；
+- **读路径按 kind 守卫**：`/api/replay-runs/*` 只认 replay Job（否则会返回"没有
+  replay_id 的 succeeded Job"，读者会以为重放成功）；评测列表对称地只回 eval。
+
+测试：`test_replay.py` 14 → 21（新增 Job 路径 6 条 + 单一实现结构护栏 1 条）、
+`test_api` 契约白名单更新。**新增用例当场抓出三处实现 bug**（评测列表未过滤 kind、
+service 漏传 raise_on_failure 导致失败记成成功、未知字段被静默忽略），全部修复并
+钉住。全量 pytest 见本轮日志。
+
+### §63 批次的 review 修复（同日）
+
+review（发现 4 项应修 + 建议若干）全部落地：前端取消按钮（`cancelReplayRun` 从
+死代码变成面板能力）、`execute_replay` 的 adapter 生命周期（finally aclose +
+超时/被取消时 best-effort cancel session，堵住 §62 遗留的连接泄漏）、通知 feed 按
+kind=EVAL 过滤（否则重放以 benchmark=null 混进通知，前端类型是 string）、幂等键按
+kind 命名空间（异 kind 同 key → 400，不冒充响应）。建议项一并采纳：`_validate_replay`
+全量拦 eval 侧字段（服务层直连的"声明了却不生效"）、`/production/replays` 加
+trace_id 过滤、`subscribeJobEvents` 改 options 对象、`evaluation-api` 头注释与
+web/README 的执行动词清单更新。新增用例 5 条（取消 / SSE 帧契约 / 通知隔离 /
+幂等键 / 服务层守卫），`test_replay.py` 21 → 26。
+
+**环境备忘**：本机装了亿赛通 DLP 透明加密——ZCode 的 Read/Write 与 grep/diff 等
+非白名单进程看到的是密文（判成 binary），python/git/PowerShell 看到明文。本批全部
+改动经"Write 到 tmp → python 生成 diff → git apply"管线完成；CI（Linux）不受影响。
