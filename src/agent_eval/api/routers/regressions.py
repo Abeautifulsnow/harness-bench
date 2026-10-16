@@ -57,6 +57,11 @@ def _payload(comparison: RegressionComparison) -> RegressionAnalysis:
         trace_diffs=[diff.model_dump(mode="json") for diff in comparison.trace_diffs],
         baseline_totals=comparison.baseline_totals,
         candidate_totals=comparison.candidate_totals,
+        statistics=(
+            comparison.statistics.model_dump(mode="json")
+            if comparison.statistics is not None
+            else None
+        ),
     )
 
 

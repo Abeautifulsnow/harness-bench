@@ -38,6 +38,7 @@
   · profile <code>{{ report.profile }}</code>
   · status <code>{{ report.status }}</code>
   · baseline <code>{{ report.baseline_mode }}</code>
+  {% if report.pass_rate_ci95 %}· pass rate 95% CI [{{ (report.pass_rate_ci95[0] * 100) | round(1) }}–{{ (report.pass_rate_ci95[1] * 100) | round(1) }}%]{% endif %}
   · {{ report.started_at }} → {{ report.finished_at }}
 </p>
 
@@ -196,7 +197,7 @@
       <td>{{ case.case_version }}</td>
       <td class="muted">{{ case.tags | join(', ') }}</td>
       <td><span class="badge" style="background:{{ state_colors.get(case.stability, '#475467') }}">{{ case.stability }}</span></td>
-      <td>{{ case.pass_rate | pct }}</td>
+      <td>{{ case.pass_rate | pct }}{% if case.pass_rate_ci95 %} <span class="muted">[{{ (case.pass_rate_ci95[0] * 100) | round(1) }}–{{ (case.pass_rate_ci95[1] * 100) | round(1) }}%]</span>{% endif %}</td>
       <td><span class="badge" style="background:{{ state_colors.get(case.regression_state, '#475467') }}">{{ case.regression_state }}</span></td>
       <td>{{ case.tool_calls_mean }}</td>
       <td>{{ case.tokens_mean }}</td>

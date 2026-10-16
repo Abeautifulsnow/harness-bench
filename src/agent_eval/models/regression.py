@@ -150,6 +150,29 @@ class FailureCategoryDiff(BaseModel):
     delta: int = 0
 
 
+class ComparisonStatistics(BaseModel):
+    """配对 case 翻转表的统计置信（Spec §26.4）。
+
+    **只进呈现层**：不改 ``valid``、不改 RegressionState、不进 Gate、不动 exit code
+    ——阈值仍是人的决定，统计是让阈值"知情"的证据。b / c 是两个方向的翻转计数
+    （b = baseline 稳定通过 → candidate 稳定失败）；McNemar 精确检验回答"这组翻转
+    有多少可能只是噪声"。FLAKY / UNKNOWN / INVALID 的 case 不是二值证据，剔除并
+    分列计数（undetermined 不得伪装成数据点——与 Spec §19.1.1 三结局同一纪律）。
+    """
+
+    paired_cases: int = 0
+    excluded_flaky: int = 0
+    excluded_unknown: int = 0
+    excluded_invalid: int = 0
+    regressions: int = 0  # b
+    improvements: int = 0  # c
+    mcnemar_p: float | None = None
+    # 与 regression.confidence.DEFAULT_ALPHA 同值（0.05）；模型层不反向依赖实现层，
+    # 改动显著性水平时两处必须同步。
+    alpha: float = 0.05
+    verdict: Literal["significant", "within_noise"] = "within_noise"
+
+
 class RegressionComparison(BaseModel):
     """PRD §105 acceptance payload."""
 
@@ -171,6 +194,7 @@ class RegressionComparison(BaseModel):
     failure_categories: list[FailureCategoryDiff] = Field(default_factory=list)
     baseline_totals: dict[str, float] = Field(default_factory=dict)
     candidate_totals: dict[str, float] = Field(default_factory=dict)
+    statistics: ComparisonStatistics | None = None
     generated_at: datetime = Field(default_factory=lambda: datetime.now().astimezone())
 
 

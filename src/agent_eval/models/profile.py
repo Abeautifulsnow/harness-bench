@@ -29,3 +29,7 @@ class MetricProfile(BaseModel):
     # 收尾档（nightly/strict）开，PR 档保持 warn——PR 上不红是为了不打断，
     # 夜间档红是为了别让"CI 里不红的东西烂掉"。
     strict_protocol: bool = False
+    # judge 判准的版本号（Spec §26.5）：语义指标的"判法"（rubric / prompt 形状）变更
+    # 时必须递增。基线比较时两侧都声明且不等 → INVALID——判准不同的分数不可比，
+    # 与 dataset_version 同一原则。缺省 None（旧 YAML / 未声明）不参与守卫。
+    criteria_version: str | None = None

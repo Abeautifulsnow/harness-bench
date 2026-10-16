@@ -2558,3 +2558,95 @@ case；**不改 gate 规则、不改 exit code、不改 verdict**。判据是分
 立即失败（实测 `assert 0 == 1`）。
 
 ---
+
+# 26. Judge Calibration 与统计置信（2026-10-15，Spec V2.3.1 → V2.4）
+
+> 需求源：ROADMAP 剩余缺口 #1（P0-2 Judge Calibration）与 #3（统计置信）。外部证据
+> （Anthropic arXiv:2411.00640、LLM judge 偏差研究、淘宝在线评测实践）与本仓缺口
+> 收敛于同一处，证据沉淀在任务 `10-15-judge-calibration-and-stats/research/`。
+> 本轮交付的是**机制**（先例：C 类第二版"机制先行、判得准不准待真数据"）——
+> 阈值拟合等真标注数据到位后另立增量。
+
+## 26.1 定位与边界
+
+- 校准台账独立于 Human Review：review 是 case 级五值人工结论、queue_reason 六值
+  词汇封闭（PRD §61 不得增删）；校准是 **per-metric 二值标注**，粒度与词汇都不同。
+  存储 `state/calibrations/<cal_id>.json`，一 set 一文件（items + 标注 + 快照历史），
+  tmp+replace 原子写。cal_id 白名单校验（拼进路径的是输入不是可信数据）。
+- 校准对象是"judge 已做出的判定"：只有 `agent.*` 命名空间、verdict ∈ {pass, fail}、
+  score/threshold 齐备的判定可入样；skipped / error / warning / 缺分量的判定剔除并
+  计入 `excluded` 随集合落盘——"哪些没资格进样本"与样本本身一样是事实。
+- item_id 是出处键的确定性哈希：同一判定重复抽取得到同一 id，标注导入幂等。
+- CLI `agent-eval calibrate`：`create`（--source run:<id>|production:<id>，按 metric
+  分层、seed 确定性抽样）/ `label` / `import-labels`（全有或全无：任何未知 item 或
+  非法 verdict 都不落盘）/ `evaluate`（追加快照）/ `show` / `list` / `plan`。
+- 生产侧评测记录不含 judge model（policy 只存名字）→ 快照里 `judge_model=None`，
+  不猜。Web/REST 面板与阈值自动拟合是后续独立增量（Trace Replay 先 API 后 Web 的
+  同款节奏）。
+
+## 26.2 一致性口径
+
+- **正类 = judge FAIL**，写死在快照的 `positive_class` 字段。precision =
+  P(human FAIL | judge FAIL)（判死的冤枉率），recall = P(judge FAIL | human FAIL)
+  （漏判率）。
+- accuracy 报 Wilson 95% CI；κ（Cohen's）在边际退化（pe ≥ 1）时为 `None`——
+  全体同一判定的 κ 无定义，如实缺席，不造 0。
+- near-threshold 切分复用 `review.store.NEAR_THRESHOLD_MARGIN`（|score − threshold|
+  ≤ 0.05）：离阈值近的项单列 accuracy——那是 judge 最容易翻车的地方。
+- 未标注项不进分母（labeled / total 并排呈现）；部分标注即可评估，但结论只覆盖
+  已标注子集，快照与输出都必须带上这一事实。
+
+## 26.3 报告的 pass_rate 置信区间
+
+- `CaseAggregate.pass_rate_ci95` / `RunAggregate.pass_rate_ci95`：valid iterations
+  上通过比例的 Wilson 95% 区间。run 级分母是 PASS+FAIL（产出结论的 iteration），
+  **ERROR 轮不进分母**，与 case 级 pass_rate 同口径；`metrics['task_success']` 的
+  分母含 ERROR 轮是既有语义，不在此改。
+- report.json / summary.md / report.html 三处渲染同一份计算值（同源断言）。
+  `total == 0` → `None`，三处都整项缺席——无观测没有区间，禁止坍缩成 [0,1]。
+- 呈现层字段，不参与判定（先例：§22.12 的 UNJUDGED warning——可见性先行，
+  判定口径变更独立拍板）。
+
+## 26.4 compare 统计块：只进呈现层
+
+- `RegressionComparison.statistics: ComparisonStatistics | None`：配对 case 翻转表
+  的 McNemar 精确检验。b = baseline 稳定通过 → candidate 稳定失败，c 为反向；
+  `verdict = significant | within_noise`（α=0.05）。
+- **FLAKY / UNKNOWN / INVALID 的 case 不是二值证据**：剔除并分列计数，undetermined
+  不得伪装成数据点（§19.1.1 三结局的同一纪律）。配对要求两侧同 case 集合——这由
+  既有守卫链（suites_covered 全等）保证。
+- **统计不改判定**：`valid`、RegressionState、Gate 规则、exit code 全部不动。
+  机械护栏：`within_noise` 与 `REGRESSION` 并存的场景断言（b=1,c=1 时 p=1.0，
+  但该 case 仍是 REGRESSION）。
+- 为什么是 McNemar 而不是双比例 z：回归比较是**同一 case 集合的配对结局**
+  （守卫链保证），配对二值的标准检验是 McNemar 精确检验；双比例 z 留给在线评测的
+  非配对窗口比较（`two_proportion_ztest`，confident 不在此接线）。
+- CLI `compare` 输出统计行；`--json` 与 REST `GET /api/regressions/*` 经
+  `RegressionAnalysis.statistics` 透传。INVALID 比较统计块照常计算（呈现事实），
+  但 valid=False 优先呈现。
+
+## 26.5 criteria_version 进可比性守卫链
+
+- `MetricProfile.criteria_version`（可选）：judge 判准（rubric / prompt 形状）变更
+  时必须递增。单一 profile 且声明一致时落进 `RunMetadata.criteria_version`；
+  混跑 / 多版本 / 未声明 → `None`（不猜）。
+- compare 守卫追加：**两侧都声明且不等 → INVALID + 指名原因**。单侧缺失不判死——
+  旧 run 没有该字段，判死等于把全部既有基线打断（与 endpoint_kind / agent_model
+  守卫"双侧均空放行"同一取舍）。
+- 意义：版本不变而 agreement 掉了 = 分布漂移；版本变了 = 判准变更。这是校准
+  趋势可解读的前提。
+
+## 26.6 校准规划器
+
+`calibrate plan --precision e --confidence c [--p p]`：n = ⌈z²·p(1−p)/e²⌉
+（p=0.5 最坏情形：±5pp → 385 条，±1pp → 9604 条）。标注是人力成本，先规划再开标。
+
+## 26.7 验收与测试锚点
+
+- 统计函数以闭式解对照（wilson(8,10) = [0.490162, 0.943318]；McNemar b=1,c=9 →
+  0.021484；±5pp → 385）；`tests/test_confidence.py`。
+- 校准全链路 CLI（create → import-labels → evaluate → show/list/label）、抽样确定性、
+  混淆矩阵闭式解、κ 退化 → None、导入原子性；`tests/test_calibration.py`。
+- 三产物 CI 同源、within_noise 与 REGRESSION 并存、criteria_version 三态守卫；
+  `tests/test_statistics_integration.py`。
+- 全量 828 passed（2026-10-15 实测）。

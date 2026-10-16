@@ -267,6 +267,8 @@ class RegressionAnalysis(BaseModel):
     trace_diffs: list[dict[str, Any]] = Field(default_factory=list)
     baseline_totals: dict[str, float] = Field(default_factory=dict)
     candidate_totals: dict[str, float] = Field(default_factory=dict)
+    # Spec §26.4 配对翻转统计（呈现层）； INVALID 比较为 None
+    statistics: dict[str, Any] | None = None
 
 
 class FailureRow(BaseModel):

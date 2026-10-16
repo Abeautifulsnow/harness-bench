@@ -16,6 +16,7 @@ from agent_eval import __version__
 from agent_eval.cli.commands import (
     baseline_cmd,
     benchmark_cmd,
+    calibrate_cmd,
     case_cmd,
     compare_cmd,
     dataset_cmd,
@@ -43,6 +44,7 @@ DEFAULT_FIXTURES_ROOT = Path("fixtures")
 DEFAULT_DATA_ROOT = Path(".agent-eval")
 
 app.add_typer(benchmark_cmd.app, name="benchmark")
+app.add_typer(calibrate_cmd.app, name="calibrate")
 app.add_typer(case_cmd.app, name="case")
 app.add_typer(run_cmd.app, name="run")
 app.add_typer(baseline_cmd.app, name="baseline")

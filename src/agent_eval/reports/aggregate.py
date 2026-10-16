@@ -21,6 +21,7 @@ from agent_eval.models.results import (
     Stability,
 )
 from agent_eval.models.run import FailureSemantics, RunMetadata, RunStatus
+from agent_eval.regression.confidence import wilson_ci
 from agent_eval.regression.stability import compute_stability
 from agent_eval.reports.cost import CostReport, compute_cost_report
 
@@ -34,6 +35,9 @@ class CaseAggregate:
     tags: list[str] = field(default_factory=list)
     iterations: int = 0
     pass_rate: float = 0.0
+    # pass_rate 的 95% Wilson 置信区间（Spec §26.3）：valid iterations 上的通过比例。
+    # 呈现层字段——回答"这个 100% 是 3 条里 3 条还是 30 条里 30 条"，不参与判定。
+    pass_rate_ci95: tuple[float, float] | None = None
     stability: Stability = Stability.UNKNOWN
     regression_state: RegressionState = RegressionState.UNDETERMINED
     valid_iterations: int = 0
@@ -82,6 +86,9 @@ class CaseAggregate:
             "iterations": self.iterations,
             "valid_iterations": self.valid_iterations,
             "pass_rate": self.pass_rate,
+            "pass_rate_ci95": (
+                list(self.pass_rate_ci95) if self.pass_rate_ci95 else None
+            ),
             "stability": self.stability.value,
             "regression_state": self.regression_state.value,
             "infra_error_count": self.infra_error_count,
@@ -111,6 +118,10 @@ class RunAggregate:
     counts: dict[str, int]
     metrics: dict[str, float]
     verdict: str  # pass | fail | infra_failure
+    # run 级通过率的 95% Wilson CI（Spec §26.3）。分母是产出结论的 iteration
+    # （PASS+FAIL），ERROR 轮不进分母——与 case 级 pass_rate 同口径；
+    # metrics['task_success'] 的分母含 ERROR 轮是既有语义，不在此改。
+    pass_rate_ci95: tuple[float, float] | None = None
     comparison: RegressionComparison | None = None
     gate: GateReport | None = None
     cost: CostReport = field(default_factory=CostReport)
@@ -160,6 +171,7 @@ def _case_aggregate(
     regression_state: RegressionState,
 ) -> CaseAggregate:
     valid = [r for r in iterations if r.status in {CaseStatus.PASS, CaseStatus.FAIL}]
+    passes = sum(1 for r in valid if r.status == CaseStatus.PASS)
     all_metrics = [m for r in iterations for m in r.all_metric_results]
     blocking_failures = [
         {
@@ -186,6 +198,7 @@ def _case_aggregate(
         tags=list(iterations[0].case_tags),
         iterations=len(iterations),
         pass_rate=stability.pass_rate,
+        pass_rate_ci95=wilson_ci(passes, len(valid)),
         stability=stability.stability,
         regression_state=regression_state,
         valid_iterations=len(valid),
@@ -305,6 +318,10 @@ def build_aggregate(
         counts=counts,
         metrics=run_metrics(results),
         verdict=compute_verdict(meta, results),
+        pass_rate_ci95=wilson_ci(
+            counts["passed_iterations"],
+            counts["passed_iterations"] + counts["failed_iterations"],
+        ),
         comparison=comparison,
         cost=compute_cost_report(results),
         warnings=warnings,

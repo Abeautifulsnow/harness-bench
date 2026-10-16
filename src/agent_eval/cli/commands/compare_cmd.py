@@ -111,6 +111,21 @@ def _print(comparison) -> None:
             f"[yellow]PERFORMANCE_REGRESSION[/yellow] "
             f"{', '.join(comparison.performance_regressions)}"
         )
+    stats = comparison.statistics
+    if stats is not None and stats.paired_cases:
+        # Spec §26.4：统计只描述噪声，不改判定——REGRESSION 照旧照常给出
+        color = "green" if stats.verdict == "significant" else "yellow"
+        excluded = (
+            f"（剔除 flaky={stats.excluded_flaky} unknown={stats.excluded_unknown}"
+            f" invalid={stats.excluded_invalid}）"
+            if (stats.excluded_flaky or stats.excluded_unknown or stats.excluded_invalid)
+            else ""
+        )
+        console.print(
+            f"statistics: paired={stats.paired_cases} b→regress={stats.regressions} "
+            f"c→improve={stats.improvements} McNemar p={stats.mcnemar_p:.4f} "
+            f"α={stats.alpha} → [{color}]{stats.verdict}[/{color}]{excluded}"
+        )
 
     table = Table(title="Run-level Diff（PRD §105）")
     for col in ("Metric", "Baseline", "Candidate", "Δ", "Δ%", "Verdict"):

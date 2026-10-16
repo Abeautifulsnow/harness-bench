@@ -345,7 +345,18 @@ class Runner:
             )
         baseline = self._resolve_baseline(benchmark, info, rules, suites_covered)
 
-        meta = self._build_meta(benchmark, info, baseline, suites_covered)
+        # Spec §26.5：判准版本是 run 级可比性事实——只在无歧义时落账
+        #（单一 profile 且各 profile 声明一致；混跑或声明不一致 → None，不猜）
+        distinct_criteria = {p.criteria_version for p in profiles.values()} - {None}
+        meta = self._build_meta(
+            benchmark,
+            info,
+            baseline,
+            suites_covered,
+            criteria_version=(
+                next(iter(distinct_criteria)) if len(distinct_criteria) == 1 else None
+            ),
+        )
         run_dir = self.store.create_run(meta)
         results: list[CaseRunResult] = []
         agent_sem = asyncio.Semaphore(cfg.concurrency)
@@ -1372,6 +1383,7 @@ class Runner:
         info: DatasetInfo,
         baseline: Baseline | None,
         suites_covered: dict[str, int] | None = None,
+        criteria_version: str | None = None,
     ) -> RunMetadata:
         commit, branch, dirty = _git_info()
         return RunMetadata(
@@ -1392,6 +1404,7 @@ class Runner:
             agent_model=self._sut_agent_model or self.cfg.agent_model,
             agent_version=self.cfg.agent_version,
             judge_model=self.cfg.judge_model,
+            criteria_version=criteria_version,
             deepeval_version=DeepEvalCapabilityAdapter().version(),
             eval_platform_version=__version__,
             status=RunStatus.queued,

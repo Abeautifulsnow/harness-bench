@@ -13,6 +13,7 @@ from collections.abc import Callable
 from agent_eval.models.regression import (
     BaselineMode,
     CaseDiff,
+    ComparisonStatistics,
     FailureCategoryDiff,
     MetricDiff,
     PerformanceDiff,
@@ -26,6 +27,7 @@ from agent_eval.models.results import (
     Stability,
 )
 from agent_eval.models.run import RunMetadata, endpoint_kind
+from agent_eval.regression.confidence import DEFAULT_ALPHA, mcnemar_exact_pvalue
 from agent_eval.regression.stability import compute_stability, regression_state
 
 # PRD §55 的默认性能阈值（%），可被 Gate 规则覆盖
@@ -367,6 +369,18 @@ def compare_runs(
             f"candidate={candidate_meta.token_usage_scope or '-'}"
             "（用量口径不同的 run 不可比：单侧观测的总量是被低估的，Spec §4.3）"
         )
+    if (
+        baseline_meta.criteria_version
+        and candidate_meta.criteria_version
+        and baseline_meta.criteria_version != candidate_meta.criteria_version
+    ):
+        # Spec §26.5：judge 判准版本不同 = 语义指标的"判法"不同，分数不可比。
+        # 双侧都声明才拦：单侧缺失（旧 run 未记录）不判死，避免既有基线全部失效。
+        reasons.append(
+            f"criteria_version mismatch: baseline={baseline_meta.criteria_version} "
+            f"candidate={candidate_meta.criteria_version}"
+            "（judge 判准版本不同，语义指标不可比，Spec §26.5）"
+        )
     if reasons:
         comparison.valid = False
         comparison.invalid_reason = "；".join(reasons)
@@ -405,6 +419,8 @@ def compare_runs(
         comparison.cases.append(case)
 
     _fill_counts(comparison)
+    # Spec §26.4：统计块只进呈现层——不给 valid / RegressionState / Gate 供数
+    comparison.statistics = compute_comparison_statistics(comparison.cases)
     comparison.metrics = _metric_diffs(
         _run_metric_means(baseline_results), _run_metric_means(candidate_results), thresholds
     )
@@ -499,6 +515,47 @@ def _run_metric_means(results: list[CaseRunResult]) -> dict[str, float]:
         if mean is not None:
             out[metric_id] = mean
     return out
+
+
+def compute_comparison_statistics(
+    cases: list[CaseDiff], alpha: float = DEFAULT_ALPHA
+) -> ComparisonStatistics:
+    """配对二值结局的 McNemar 精确检验（Spec §26.4，呈现层）。
+
+    参与配对的是两侧都给出**稳定**结论的 case（STABLE_PASS / STABLE_FAIL）；
+    FLAKY / UNKNOWN / INVALID 各自剔除并计数——undetermined 数据不进检验。
+    """
+    stats = ComparisonStatistics(alpha=alpha)
+    for case in cases:
+        if case.state == RegressionState.INVALID:
+            stats.excluded_invalid += 1
+            continue
+        flaky_either_side = case.baseline_stability == Stability.FLAKY or (
+            case.candidate_stability == Stability.FLAKY
+        )
+        if flaky_either_side:
+            stats.excluded_flaky += 1
+            continue
+        if (
+            case.baseline_stability == Stability.UNKNOWN
+            or case.candidate_stability == Stability.UNKNOWN
+        ):
+            stats.excluded_unknown += 1
+            continue
+        stats.paired_cases += 1
+        if (
+            case.baseline_stability == Stability.STABLE_PASS
+            and case.candidate_stability == Stability.STABLE_FAIL
+        ):
+            stats.regressions += 1
+        elif (
+            case.baseline_stability == Stability.STABLE_FAIL
+            and case.candidate_stability == Stability.STABLE_PASS
+        ):
+            stats.improvements += 1
+    stats.mcnemar_p = mcnemar_exact_pvalue(stats.regressions, stats.improvements)
+    stats.verdict = "significant" if stats.mcnemar_p < alpha else "within_noise"
+    return stats
 
 
 def _fill_counts(comparison: RegressionComparison) -> None:

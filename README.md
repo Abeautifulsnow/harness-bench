@@ -7,7 +7,8 @@ Agent 工程质量平台：Benchmark / Experiment / Evaluation / Regression / Fa
   [docs/web-evaluation-control-plane-design.md](docs/web-evaluation-control-plane-design.md)（Web 执行控制面）
 - CLI 名称：`agent-eval`；当前能力面：
   **Offline**（Benchmark / Experiment / Regression / Stability / Quality Gate / Security /
-  Failure Intelligence / Human Review / Promote）+
+  Failure Intelligence / Human Review / Promote / Judge Calibration（Spec §26）/
+  统计置信（pass_rate CI 与 compare 统计块，呈现层））+
   **Execution Control Plane**（Web/CLI/Schedule/Trigger 统一经 EvalRunService 发起，
   Job 队列 / 取消 / SSE 实时进度 / Agent Connection Profile）+
   **Production**（Trace 摄取（平台事件与 OTel JSON）/ Trace Viewer / 参考无关 Online Eval /

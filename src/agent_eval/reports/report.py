@@ -63,6 +63,9 @@ def build_report(aggregate: RunAggregate) -> dict[str, Any]:
         },
         "cost": aggregate.cost.as_dict(),
         "metrics": aggregate.metrics,
+        "pass_rate_ci95": (
+            list(aggregate.pass_rate_ci95) if aggregate.pass_rate_ci95 else None
+        ),
         "started_at": run.started_at.isoformat(),
         "finished_at": (run.finished_at or datetime.now().astimezone()).isoformat(),
         "cases": [_case_payload(case) for case in aggregate.cases],
@@ -213,6 +216,21 @@ def _write_text(path: Path, content: str) -> None:
     tmp.replace(path)
 
 
+def _ci_suffix(ci: list[float] | tuple[float, float] | None) -> str:
+    """case 表 Pass Rate 单元格的 CI 后缀（None = 无观测，不渲染）。"""
+    if not ci:
+        return ""
+    return f" （95% CI {ci[0]:.0%}–{ci[1]:.0%}）"
+
+
+def _pass_rate_line(report: dict[str, Any]) -> str:
+    """run 级通过率行；无观测（0 个产出结论的 iteration）时整行缺席。"""
+    ci = report.get("pass_rate_ci95")
+    if not ci:
+        return ""
+    return f"- Pass rate: 95% CI [{ci[0]:.1%}, {ci[1]:.1%}]（Spec §26.3，ERROR 轮不进分母）"
+
+
 def render_summary(report: dict[str, Any], gate: GateReport | None = None) -> str:
     """summary.md：PR 评论摘要（PRD §6.2）。"""
     lines: list[str] = []
@@ -236,6 +254,7 @@ def render_summary(report: dict[str, Any], gate: GateReport | None = None) -> st
         f"/ ERROR {totals['error_iterations']})",
         f"- Flaky: {totals['flaky_cases']} | Regression: {totals['regression_cases']} "
         f"| Improved: {totals['improved_cases']}",
+        _pass_rate_line(report),
         f"- Avg tool calls: {totals['avg_tool_calls']} | Avg latency: "
         f"{totals['avg_latency_ms']}ms | Tokens: {totals['total_tokens']} | Cost: "
         f"{totals['total_cost'] if totals['total_cost'] is not None else 'N/A（无定价表）'}",
@@ -307,7 +326,8 @@ def render_summary(report: dict[str, Any], gate: GateReport | None = None) -> st
     ]
     for case in report["cases"]:
         lines.append(
-            f"| `{case['case_id']}` | {case['stability']} | {case['pass_rate']:.0%} "
+            f"| `{case['case_id']}` | {case['stability']} | {case['pass_rate']:.0%}"
+            f"{_ci_suffix(case.get('pass_rate_ci95'))} "
             f"| {case['regression_state']} | {len(case['blocking_failures'])} |"
         )
     failures = [

@@ -72,6 +72,9 @@ class RunMetadata(BaseModel):
     agent_model: str | None = None
     judge_model: str | None = None
     deepeval_version: str | None = None
+    # judge 判准版本（Spec §26.5）：单一 profile 且声明了 criteria_version 时落账；
+    # 多 profile 混跑或未声明 → None（缺省不参与基线守卫，避免历史 run 断基线）。
+    criteria_version: str | None = None
     eval_platform_version: str = ""
     started_at: datetime = Field(default_factory=lambda: datetime.now().astimezone())
     finished_at: datetime | None = None
