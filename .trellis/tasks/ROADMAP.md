@@ -656,3 +656,32 @@ web/README 的执行动词清单更新。新增用例 5 条（取消 / SSE 帧�
 **环境备忘**：本机装了亿赛通 DLP 透明加密——ZCode 的 Read/Write 与 grep/diff 等
 非白名单进程看到的是密文（判成 binary），python/git/PowerShell 看到明文。本批全部
 改动经"Write 到 tmp → python 生成 diff → git apply"管线完成；CI（Linux）不受影响。
+
+---
+
+## 2026-10-15 批次（Judge Calibration 机制 + 统计置信）
+
+来源：外部对比评估（学术文献 + 淘宝在线评测实践）与本清单"剩余缺口" #1（P0-2，
+当时暂缓）/#3 收敛于同一处，用户裁决恢复 P0-2 实施。契约口径写在 **Spec §26**。
+
+| 切片 | 内容 | 状态 |
+| --- | --- | --- |
+| D1 统计模块 | `regression/confidence.py`（Wilson CI / bootstrap CI / McNemar 精确 / 双比例 z / MDE / 样本量反推），纯 stdlib 零新依赖，闭式解对照测试 | ✅ |
+| D2 报告 CI | `CaseAggregate/RunAggregate.pass_rate_ci95`；report.json / summary.md / report.html 三处同源（ERROR 轮不进分母，与 case 级 pass_rate 同口径） | ✅ |
+| D3 compare 统计块 | `ComparisonStatistics`（配对翻转表 + McNemar，FLAKY/UNKNOWN/INVALID 剔除分列）；CLI/`--json`/REST 透传；**只进呈现层**，护栏钉住 `within_noise` 与 `REGRESSION` 并存 | ✅ |
+| D4 校准机制 | `models/calibration.py` + `calibration/`（分层确定性抽样 / 一致性含 κ 与 near-threshold 切分 / `state/calibrations/` 台账）+ CLI `calibrate`（create/label/import-labels/evaluate/show/list/plan） | ✅ |
+| D5 判准版本链 | `MetricProfile.criteria_version` → `RunMetadata.criteria_version`（单一 profile 且唯一时落账）→ compare 守卫（双侧声明且不等 → INVALID） | ✅ |
+
+关键裁决（详见 Spec §26）：
+- **标注不走 Review Queue**（词汇封闭 + 粒度不同）；正类 = judge FAIL；未标注不进分母；
+- **统计不改判定**（对齐 UNJUDGED warning 先例：可见性先行，判定口径变更独立拍板）；
+- criteria_version **单侧缺失不判死**（旧 run 不断基线）；
+- 快照允许部分标注评估，labeled/total 并排呈现；Web/REST 面板与阈值拟合留独立增量。
+
+测试：新增 `test_confidence.py`(21) / `test_calibration.py`(26) /
+`test_statistics_integration.py`(13)，**全量 828 passed（实测）**。
+
+**本轮后的剩余缺口（更新）**：原 #1（机制面）与 #3 已落地；剩余——
+金标数据采集与**阈值拟合**（用 26.1 的机制，等真标注）、生产评测的 judge 输入
+清洗/上下文裁剪/异动归因（淘宝实践第三批）、Web 校准面板、Sandbox（原 #2）、
+前端测试（原 #4）、Custom GEval / RBAC / Remote Worker（原 #5）。
