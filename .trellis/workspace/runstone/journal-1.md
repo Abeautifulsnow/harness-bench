@@ -1205,3 +1205,37 @@ review-workflow 全流程：意图层无偏差；7 项规范层发现全部修�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 19: 评测版本指纹绑定校准链 + 校准标注升级（Spec §26.8）
+
+**Date**: 2026-10-29
+**Task**: 评测版本指纹绑定校准链 + 校准标注升级（Spec §26.8）
+**Branch**: `main`
+
+### Summary
+
+小红书评测文章对齐批次：judge_config_digest 自动指纹（生效 judge 配置→run 落账→compare 守卫三态，关闭 criteria_version 手工声明盲区）；校准链绑定判准版本+指纹；双人标注天花板 human_kappa（round 2 双盲标注）；不一致归因三分法（input_missing/rubric_ambiguous/model_misunderstanding，只能写在分歧项上）。review-workflow 评审修复 3 项：归因生命周期（改判致一致清除旧 cause）、注释节号对齐 §26.8、judge_model=None 盲区声明；评审新增 3 用例。契约回写 Spec V2.7 §26.8 + ROADMAP 2026-10-29 批次 + quality-guidelines 词汇封闭护栏。全量 856 passed。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `473bf1a` | (see git log) |
+| `6b63f55` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 18
-- **Last Active**: 2026-10-10
+- **Total Sessions**: 19
+- **Last Active**: 2026-10-29
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1207 | Active |
+| `journal-1.md` | ~1241 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 19 | 2026-10-29 | 评测版本指纹绑定校准链 + 校准标注升级（Spec §26.8） | `473bf1a`, `6b63f55` | `main` |
 | 18 | 2026-10-10 | chatbot-core 1.1.0 评测集扩容（8 条新 case） | `dfca56b` | `main` |
 | 17 | 2026-10-10 | Push + CI 首跑修复：fastapi 进 dev 组 | `b7ca8da` | `main` |
 | 16 | 2026-10-09 | Review: b7f1427..9b30df8 修复收口（含复审抓出的 C04/C05 丢失） | `3a274fe` | `main` |
