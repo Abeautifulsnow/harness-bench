@@ -1,0 +1,5 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/index.md", "reason": "后端分层与 Pre-Development 检查入口"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "失败语义三分/exit 0-3/--cause 校验走 exit 3"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门槛/LF 行尾硬约束/恒 pass 装饰品禁令"}
+{"file": ".trellis/tasks/10-28-judge-fingerprint-and-labeling/research/xhs-article-alignment.md", "reason": "文章对齐分析与本任务设计裁决"}
