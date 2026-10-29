@@ -685,3 +685,42 @@ web/README 的执行动词清单更新。新增用例 5 条（取消 / SSE 帧�
 金标数据采集与**阈值拟合**（用 26.1 的机制，等真标注）、生产评测的 judge 输入
 清洗/上下文裁剪/异动归因（淘宝实践第三批）、Web 校准面板、Sandbox（原 #2）、
 前端测试（原 #4）、Custom GEval / RBAC / Remote Worker（原 #5）。
+
+---
+
+## 2026-10-29 批次（评测版本指纹绑定校准链 + 校准标注升级）
+
+来源：小红书推荐评测实践（上下文驱动的 LLM-as-Judge，评测结果必须绑定生效配置
+版本）与本清单缺口 #1（机制准备度）/#4（异动归因）收敛于同一处，用户裁决实施。
+契约口径写在 **Spec §26.8**（文档版本 V2.7）。任务目录
+`10-28-judge-fingerprint-and-labeling/`（prd + research/ 文章对齐分析）。
+
+| 切片 | 内容 | 状态 |
+| --- | --- | --- |
+| F1 judge_config_digest | `evaluators/fingerprint.py`（生效集规范化 JSON → sha256 前 16 hex；空生效集 → None 不造空指纹）→ `RunMetadata` 落账（解析后回填）→ compare 守卫三态（双侧不等 → INVALID；单侧 None 放行） | ✅ |
+| F2 校准链版本绑定 | `CalibrationSet`/`CalibrationSnapshot` + criteria_version + digest；`calibrate create` run 源读 meta，production 源不猜（None）；快照透传 + show/list 展示 | ✅ |
+| F3 双人标注天花板 | `CalibrationItem` + `human_verdict_2` / `human_rater` / `human_rater_2`；`label --round 1\|2` 互不覆盖；`MetricAgreement` + `human_kappa`（双标齐备项）/ `human_dual_n`；evaluate 输出天花板解读行 | ✅ |
+| F4 不一致归因三分法 | `disagreement_cause` 封闭三值（input_missing / rubric_ambiguous / model_misunderstanding）；只能写在分歧项上（exit 3 指名原因）；evaluate 输出归因分布 + 未归因数 | ✅ |
+
+关键裁决（详见 Spec §26.8 与任务 research/xhs-article-alignment.md）：
+- **加权 Kappa 不适用**：二值判定的 2×2 上加权 κ ≡ 未加权 κ，实现即装饰品；
+  触发条件 = judge 引入有序档位（0/1/2）时随之实现；
+- **"0 分样本召回率"已有等价物**：正类 = fail 的 `recall`，不新增代码；
+- digest 是 criteria_version（§26.5 手工声明）的**自动兜底**：digest 含判准版本
+  （digest 相等 ⇒ 版本相等；反向不成立——threshold / judge_model / SDK 版本
+  漂移只有 digest 能抓），两守卫并存、单侧缺失都放行（旧 run 不断基线）；
+- **人人 κ 是 judge κ 的天花板参照**：judge κ 偏低先对照天花板再下结论，
+  天花板本身低 = rubric 边界模糊（归因分布会印证）；
+- 归因校验对象是"操作生效后"的 `human_verdict`（否则 import-labels 单条目
+  verdict+cause 不可用）——首轮按落盘前状态校验被自家 CLI 测试当场证伪。
+
+测试：`test_calibration.py` 26 → 48、`test_statistics_integration.py` 13 → 16，
+**全量 853 passed（实测）**。词汇封闭新增机械护栏：常量 ↔ 模型 `Literal` 用
+`typing.get_args` 对齐（两处落点分叉会让 CLI 写进模型拒收的 set 文件），
+顺带钉住 `HUMAN_VERDICTS` 的既有同类缺口。
+
+**本轮后的剩余缺口（更新）**：金标数据采集与**阈值拟合**（等真标注——本轮的
+天花板/归因机制就是为它准备的）；生产侧 policy 指纹 + judge 版本回归对比
+（文章④的 improved/same/regressed，可复用 compare + calibration 基建）；
+Web 校准面板；Sandbox（原 #2）；前端测试（原 #4）；Custom GEval / RBAC /
+Remote Worker（原 #5）。

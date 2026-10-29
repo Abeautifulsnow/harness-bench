@@ -34,6 +34,14 @@ judge 行为的用例标 `@pytest.mark.real_judge` 退出该夹具。装了 deep
 8. **派生层只读消费**：DuckDB 投影可随时 `rebuild()`，所以任何"查询前先建库"的
    便利写法都是错的（REST API 会因此把"未物化"伪装成"没有数据"）。只读消费方用
    `Analytics(read_only=True)`。
+9. **封闭词汇常量与模型 `Literal` 是同一词汇的两处落点，必须有机械对齐护栏**
+   （2026-10-29，calibrate 批次实测）。CLI/import 的校验面读常量
+   （`DISAGREEMENT_CAUSES` / `HUMAN_VERDICTS`），磁盘加载校验面读 pydantic
+   `Literal`——两处手工维护，分叉形态是"CLI 写得进去、模型加载即坏"（set 文件
+   整份不可读，`CalibrationStore.list_sets` 还会静默跳过它，缺口被伪装成
+   "没有数据"）。护栏：`typing.get_args()` 逐字面量对齐断言
+   （`tests/test_calibration.py::TestVocabularyClosure`）；新增封闭词汇时
+   同批补上这条护栏，不留例外。
 
 ## 门禁约束（PRD §108，Spec §15）
 
