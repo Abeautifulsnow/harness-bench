@@ -36,6 +36,7 @@ from agent_eval.errors import (
     MetricUnavailableError,
 )
 from agent_eval.evaluators.deepeval_adapter import DeepEvalCapabilityAdapter
+from agent_eval.evaluators.fingerprint import compute_judge_config_digest
 from agent_eval.evaluators.native import (
     EvalScope,
     evaluate_assertions,
@@ -346,7 +347,7 @@ class Runner:
         baseline = self._resolve_baseline(benchmark, info, rules, suites_covered)
 
         # Spec §26.5：判准版本是 run 级可比性事实——只在无歧义时落账
-        #（单一 profile 且各 profile 声明一致；混跑或声明不一致 → None，不猜）
+        # （单一 profile 且各 profile 声明一致；混跑或声明不一致 → None，不猜）
         distinct_criteria = {p.criteria_version for p in profiles.values()} - {None}
         meta = self._build_meta(
             benchmark,
@@ -368,6 +369,18 @@ class Runner:
                 **{f"event:{name}": flag for name, flag in health.observation_surface.items()},
             }
             meta.metric_degradations = ctx.degradations
+            # Spec §26.8 自动指纹：judge_specs 解析（含 degradation）完成后回填
+            # （先例：capability snapshot 同为 create_run 后回填）。生效集为空
+            # （--no-judge / probe 全 False）→ None——"没有生效的 judge 口径"
+            # 如实缺席，不造空串指纹。
+            meta.judge_config_digest = compute_judge_config_digest(
+                criteria_version=meta.criteria_version,
+                judge_model=meta.judge_model,
+                deepeval_version=ctx.judge.version(),
+                judge_specs=[
+                    spec for resolved in ctx.resolved.values() for spec in resolved.judge_specs
+                ],
+            )
             meta.status = RunStatus.running
             self.store.save_meta(meta)
             if on_run_created is not None:

@@ -4,6 +4,9 @@
 1. report 三产物（report.json / summary.md / report.html）的 CI 值同源一致；
 2. compare 统计块只进呈现层——``within_noise`` 与 ``REGRESSION`` 并存（互不覆盖）；
 3. criteria_version 双侧声明且不等 → INVALID；单侧缺失不拦（历史 run 不断基线）。
+
+第四契约（Spec §26.5 自动指纹）：judge_config_digest 双侧都有且不等 → INVALID
+（理由指名两侧值与排查方向）；任一侧 None（旧 run / no_judge run）→ 放行。
 """
 
 from __future__ import annotations
@@ -208,6 +211,51 @@ class TestCriteriaVersionGuard:
         profiles.mkdir()
         (profiles / "plain.yaml").write_text("name: plain\nmetrics: []\n", encoding="utf-8")
         assert load_profile(tmp_path, "plain").criteria_version is None
+
+
+class TestJudgeConfigDigestGuard:
+    """Spec §26.5 自动指纹守卫：criteria_version 未声明时兜住 threshold / 模型 / SDK 漂移。"""
+
+    def test_mismatch_is_invalid_and_names_both_sides(self) -> None:
+        base = [*_result("b", "c1", [CaseStatus.PASS] * 3)]
+        cand = [*_result("c", "c1", [CaseStatus.PASS] * 3)]
+        comparison = compare_runs(
+            _meta("b", judge_config_digest="aaaa1111bbbb2222"),
+            base,
+            _meta("c", judge_config_digest="cccc3333dddd4444"),
+            cand,
+        )
+        assert comparison.valid is False
+        reason = comparison.invalid_reason or ""
+        assert "judge_config_digest" in reason
+        assert "aaaa1111bbbb2222" in reason
+        assert "cccc3333dddd4444" in reason
+        # 理由指名排查方向（PRD A3）：对照哪些字段排查哪一项变了
+        for hint in ("judge_model", "criteria_version", "deepeval_version"):
+            assert hint in reason
+
+    def test_digest_none_on_one_side_is_valid(self) -> None:
+        """旧 run（无指纹）/ no_judge run 单侧 None 放行——与 criteria_version 守卫同取舍。"""
+        base = [*_result("b", "c1", [CaseStatus.PASS] * 3)]
+        cand = [*_result("c", "c1", [CaseStatus.PASS] * 3)]
+        comparison = compare_runs(
+            _meta("b"),
+            base,
+            _meta("c", judge_config_digest="aaaa1111bbbb2222"),
+            cand,
+        )
+        assert comparison.valid is True
+
+    def test_equal_digests_are_comparable(self) -> None:
+        base = [*_result("b", "c1", [CaseStatus.PASS] * 3)]
+        cand = [*_result("c", "c1", [CaseStatus.PASS] * 3)]
+        comparison = compare_runs(
+            _meta("b", judge_config_digest="aaaa1111bbbb2222"),
+            base,
+            _meta("c", judge_config_digest="aaaa1111bbbb2222"),
+            cand,
+        )
+        assert comparison.valid is True
 
 
 class TestMetricResultShape:

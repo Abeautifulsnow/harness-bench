@@ -381,6 +381,22 @@ def compare_runs(
             f"candidate={candidate_meta.criteria_version}"
             "（judge 判准版本不同，语义指标不可比，Spec §26.5）"
         )
+    if (
+        baseline_meta.judge_config_digest
+        and candidate_meta.judge_config_digest
+        and baseline_meta.judge_config_digest != candidate_meta.judge_config_digest
+    ):
+        # Spec §26.8 自动指纹：digest 从生效配置（judge_model / deepeval 版本 /
+        # 判准版本 / 各 metric 阈值）自动算，criteria_version 未声明时兜住
+        # threshold / 模型 / SDK 版本漂移的盲区。双侧都有且不等才拦——任一侧
+        # None（旧 run / no_judge run）放行，与 criteria_version / agent_model
+        # 守卫"单侧缺失不拦"同一取舍。
+        reasons.append(
+            f"judge_config_digest mismatch: baseline={baseline_meta.judge_config_digest} "
+            f"candidate={candidate_meta.judge_config_digest}"
+            "（judge 生效配置漂移：对照 judge_model / criteria_version / deepeval_version"
+            " / profile 阈值排查哪一项变了，Spec §26.5）"
+        )
     if reasons:
         comparison.valid = False
         comparison.invalid_reason = "；".join(reasons)

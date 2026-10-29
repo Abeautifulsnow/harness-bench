@@ -75,6 +75,12 @@ class RunMetadata(BaseModel):
     # judge 判准版本（Spec §26.5）：单一 profile 且声明了 criteria_version 时落账；
     # 多 profile 混跑或未声明 → None（缺省不参与基线守卫，避免历史 run 断基线）。
     criteria_version: str | None = None
+    # judge 配置自动指纹（Spec §26.8，补充 §26.5 的手工声明面）：由生效 judge 配置（判准版本 /
+    # judge_model / deepeval 版本 / 各 metric 阈值）确定性算出，兜住未声明
+    # criteria_version 时 threshold / 模型 / SDK 版本漂移的盲区。
+    # None = 旧 run 或无生效 judge 口径（--no-judge / probe 全 False），
+    # 缺省不参与基线守卫（compare.py 对单侧 None 放行）。
+    judge_config_digest: str | None = None
     eval_platform_version: str = ""
     started_at: datetime = Field(default_factory=lambda: datetime.now().astimezone())
     finished_at: datetime | None = None

@@ -1,6 +1,6 @@
 # Agent Eval Platform Engineering Specification V2.1
 
-> 文档版本：V2.6（Engineering Specification，增补型；P0 缺口回填与扩展面落地，
+> 文档版本：V2.7（Engineering Specification，增补型；P0 缺口回填与扩展面落地，
 > V2.2 增补 §11 评测词汇表增补 / §12 Security 挂载点 / §13 Web Platform 只读契约，
 > Changelog 见 §14；V2.3 增补 §15 必跑套件校验 / §16 安全用例集口径 /
 > §17 Evaluator Plugin SDK / §18 用例集覆盖与 case 级 metric 参数 /
@@ -8,6 +8,8 @@
 > V2.3.1 为 §22 审计修复回填；V2.4 增补 §23 Challenge Set 与 Nightly Profile；
 > V2.5 增补 §24 run 级 diff 噪声下限 / 报告产物指针 / judge 跳过策略；
 > V2.6 增补 §25 定义层解析开销与 skipped 的 run 级可见性；
+> V2.7 增补 §26.8 judge 配置指纹与校准标注升级（§26 Judge Calibration 主体为
+> 2026-10-15 批次增补，版本链顺延至此统一编号）；
 > V2.1 的复核修订见 §10.1）
 > 上游文档：`agent-evaluation-regression-platform-engineering-prd-v2.md`（下称 PRD V2.0，保持有效，不因本文档作废）
 > 状态：Engineering Ready
@@ -2650,3 +2652,94 @@ case；**不改 gate 规则、不改 exit code、不改 verdict**。判据是分
 - 三产物 CI 同源、within_noise 与 REGRESSION 并存、criteria_version 三态守卫；
   `tests/test_statistics_integration.py`。
 - 全量 828 passed（2026-10-15 实测）。
+
+## 26.8 judge 配置指纹与校准标注升级（2026-10-29，V2.7）
+
+> 需求源：小红书推荐评测实践（上下文驱动的 LLM-as-Judge，评测结果必须绑定
+> "生效配置版本"）与 §26.5 手工声明的盲区收敛于同一处；文章对齐分析与设计裁决
+> 沉淀在任务 `10-28-judge-fingerprint-and-labeling/research/`。本节只扩展不推翻
+> §26.1-§26.7 既有契约。
+
+### 26.8.1 judge_config_digest：生效 judge 配置的自动指纹
+
+- 签名：`compute_judge_config_digest(criteria_version, judge_model,
+  deepeval_version, judge_specs) -> str | None`
+  （`evaluators/fingerprint.py`，纯 stdlib）。输入是**解析与 degradation 之后的
+  生效集**（`resolved.judge_specs`），不是 profile 声明面。
+- 计算：规范化 JSON（`sort_keys=True`；`metrics` 为 `[{metric, threshold}, …]`
+  按 (metric, threshold) 全序排序，声明顺序无关）→ sha256 → 前 16 位 hex。
+  浮点 threshold 经 pydantic 归一（`1` 与 `1.0` 同 digest）。
+- 边界：生效集为空（`--no-judge` / probe 全 False）→ `None`——"没有生效的
+  judge 口径"如实缺席，不造空串指纹（PRD §59 同一纪律）。
+- 落账：`RunMetadata.judge_config_digest`，在 profile 解析完成后回填
+  （先例：`metric_capability_snapshot` 同为 create_run 后回填）。run 级粒度
+  足够：一个 run 内 judge 配置恒定，逐 metric 阈值已进 digest 输入。
+- 与 criteria_version 的关系（§26.5）：digest **含** criteria_version——digest
+  相等 ⇒ 判准版本相等；反向不成立（threshold / judge_model / SDK 版本漂移只有
+  digest 能抓）。两者并存：前者是作者声明，后者是自动兜底。
+
+### 26.8.2 compare 守卫
+
+双侧都有 digest 且不等 → INVALID + 指名两侧值 + 提示对照
+（judge_model / criteria_version / deepeval_version / profile 阈值）排查；
+双侧相等或任一侧 `None`（旧 run / 无 judge 口径）→ 放行——与 criteria_version /
+agent_model 守卫"单侧缺失放行"同一取舍。§26.5 的守卫盲区（未声明判准版本时
+threshold / 模型 / SDK 版本漂移被放行）由此关闭。
+
+### 26.8.3 版本字段贯穿校准链
+
+`CalibrationSet` / `CalibrationSnapshot` 增 `criteria_version` +
+`judge_config_digest`（均缺省 None，旧 set 文件照常加载）。`calibrate create`
+run 源从 `RunMetadata` 读入；production 源两字段 `None`（生产评测记录不含判准
+版本，与 judge_model=None 同一先例：不猜）。`build_snapshot` 透传；快照从此
+能回答"这份一致性结论描述的是哪个判准版本"——§26.5"版本不变而 agreement 掉了
+= 分布漂移；版本变了 = 判准变更"的前提在快照侧落地。
+
+### 26.8.4 双人标注天花板
+
+- `CalibrationItem` 增 `human_verdict_2`（第二标注人独立标注）与
+  `human_rater` / `human_rater_2`（provenance）。CLI `label --round 1|2`
+  区分两轮，round 2 写 `human_verdict_2`，互不覆盖（双盲靠流程保证，平台不
+  校验两轮是否同一人——如实记录 rater 名即可）。
+- `MetricAgreement.human_kappa`：rater1 vs rater2 的 Cohen's κ，只在双标齐备的
+  item 上算（`human_dual_n` 计数）；pe ≥ 1 退化 → None，与 judge κ 同规则。
+- 解读：**judge κ 显著低于人人 κ 才是 judge 的问题**；人人 κ 本身低说明 rubric
+  边界模糊（分歧子集的归因分布会印证）。有双标数据时 `evaluate` 输出解读行，
+  无数据整行缺席（不渲染空表）。
+
+### 26.8.5 不一致归因三分法
+
+- `CalibrationItem.disagreement_cause`，词汇封闭三值
+  （`DISAGREEMENT_CAUSES`）：`input_missing`（judge 该看到的分量不在输入里）/
+  `rubric_ambiguous`（标准对该 case 给不出唯一判定）/ `model_misunderstanding`
+  （标准清晰但模型读偏）。
+- 归因只能写在分歧上：目标 item 未标注、或标注与 judge 判定一致 → 拒绝
+  （exit 3 指名原因，不静默忽略）。校验对象是**本次操作生效后**的
+  `human_verdict`——`import-labels` 单条目 `{item, verdict, cause}` 因此可用。
+- `MetricAgreement.disagreement_total`（labeled 且与 judge 不一致条数）+
+  `disagreement_causes`（归因分布）；未归因数 = total − sum(causes)，
+  不单独造字段。这直接服务 ROADMAP 缺口 #4 的"异动归因"。
+
+### 26.8.6 裁决：加权 Kappa 不适用；"0 分样本召回"已有等价物
+
+- **加权 Kappa 不做**：§26.2 的校准是二值判定（pass/fail 封闭词汇），2×2
+  混淆矩阵上加权 κ 与未加权 Cohen's κ 数值相等——实现即装饰品（§17.6"恒 PASS
+  占位"同类禁令）。文章的加权 Kappa 针对 0/1/2 有序档位；触发条件：judge 引入
+  有序档位时随之实现并回写本节。
+- **"0 分样本召回率"不新增代码**：正类 = fail 的 `recall`
+  （P(judge FAIL | human FAIL)）即其在本仓口径下的等价物，字段已存在——
+  在此写明映射，避免后人重新推导。
+
+### 26.8.7 验收与测试锚点
+
+- digest 确定性 / 敏感性（threshold、judge_model、criteria_version、
+  deepeval_version 任一变化 → 变）/ 顺序无关 / 空生效集 → None / runner 落账
+  端到端两向；compare 守卫三态（`tests/test_statistics_integration.py`，跟随
+  criteria_version 守卫模式）。
+- 人人 κ 闭式解（完全一致 → 1.0；混合用例手算 po=0.625、pe=0.5 → 0.25）/
+  退化 → None / 单标不入天花板；归因三态拒绝与分布；round 互不覆盖；
+  import-labels 原子性在新字段下保持；旧 set JSON 真磁盘读回加载；
+  `tests/test_calibration.py`。
+- 词汇封闭机械护栏：`DISAGREEMENT_CAUSES` / `HUMAN_VERDICTS` 与模型 `Literal`
+  用 `typing.get_args` 对齐（两处落点分叉会让 CLI 写进模型拒收的文件）。
+- 全量 853 passed（2026-10-29 实测）。

@@ -6,8 +6,11 @@ judge 隔离：校准只读已落盘的判定事实，不触发 judge，无需 d
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import get_args
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -20,9 +23,17 @@ from agent_eval.calibration.sample import (
 from agent_eval.calibration.store import CalibrationStore
 from agent_eval.cli.app import app
 from agent_eval.errors import InvalidCallError
-from agent_eval.models.calibration import CalibrationItem, CalibrationSet
+from agent_eval.evaluators.fingerprint import compute_judge_config_digest
+from agent_eval.models.calibration import (
+    DISAGREEMENT_CAUSES,
+    HUMAN_VERDICTS,
+    CalibrationItem,
+    CalibrationSet,
+)
+from agent_eval.models.profile import MetricSpec
 from agent_eval.models.results import CaseRunResult, MetricResultModel
 from agent_eval.models.run import RunMetadata, RunStatus
+from agent_eval.runner.runner import RunConfig, Runner
 from agent_eval.storage.production_store import ProductionStore
 from agent_eval.storage.run_store import RunStore
 
@@ -80,6 +91,10 @@ def _item(
     *,
     judge: str = "pass",
     human: str | None = None,
+    human2: str | None = None,
+    rater: str = "",
+    rater2: str = "",
+    cause: str | None = None,
     score: float = 0.9,
     threshold: float = 0.7,
 ) -> CalibrationItem:
@@ -94,13 +109,17 @@ def _item(
         judge_verdict=judge,  # type: ignore[arg-type]
         near_threshold=abs(score - threshold) <= 0.05,
         human_verdict=human,  # type: ignore[arg-type]
+        human_verdict_2=human2,  # type: ignore[arg-type]
+        human_rater=rater,
+        human_rater_2=rater2,
+        disagreement_cause=cause,  # type: ignore[arg-type]
     )
 
 
-def _seed_run(data_dir: Path, run_id: str, *, items_per_case: int = 3) -> None:
+def _seed_run(data_dir: Path, run_id: str, *, items_per_case: int = 3, **meta_overrides) -> None:
     """落一个含 2 case × 3 iteration × 每轮 2 条 agent.* 判定的 run。"""
     store = RunStore(data_dir / "runs")
-    store.create_run(_meta(run_id))
+    store.create_run(_meta(run_id, **meta_overrides))
     for case in ("case-a", "case-b"):
         for iteration in range(1, items_per_case + 1):
             results = [
@@ -263,6 +282,64 @@ class TestStratifiedSample:
         raise AssertionError("empty population must raise InvalidCallError")
 
 
+class TestJudgeConfigDigest:
+    """judge 配置指纹（Spec §26.5 自动补充面）：确定性是"同口径"判定的前提。"""
+
+    @staticmethod
+    def _specs(threshold: float = 0.7) -> list[MetricSpec]:
+        return [
+            MetricSpec(id="agent.task_completion", threshold=threshold),
+            MetricSpec(id="agent.tool_correctness", threshold=0.8),
+        ]
+
+    def _digest(self, **overrides: object) -> str | None:
+        kwargs: dict[str, object] = {
+            "criteria_version": "v1",
+            "judge_model": "judge-x",
+            "deepeval_version": "1.0.0",
+            "judge_specs": self._specs(),
+        }
+        kwargs.update(overrides)
+        return compute_judge_config_digest(**kwargs)  # type: ignore[arg-type]
+
+    def test_same_config_same_digest_and_shape(self) -> None:
+        assert self._digest() == self._digest()
+        digest = self._digest()
+        assert digest is not None
+        assert len(digest) == 16
+
+    def test_any_config_change_changes_digest(self) -> None:
+        base = self._digest()
+        assert base is not None
+        variants: list[dict[str, object]] = [
+            {"criteria_version": "v2"},
+            {"criteria_version": None},
+            {"judge_model": "judge-y"},
+            {"judge_model": None},
+            {"deepeval_version": "2.0.0"},
+            {"deepeval_version": None},
+            {"judge_specs": self._specs(threshold=0.9)},
+            {"judge_specs": [MetricSpec(id="agent.task_completion", threshold=0.7)]},
+        ]
+        for override in variants:
+            assert self._digest(**override) != base, override
+
+    def test_metric_declaration_order_does_not_matter(self) -> None:
+        assert self._digest() == self._digest(judge_specs=list(reversed(self._specs())))
+
+    def test_empty_judge_specs_is_none_not_empty_string(self) -> None:
+        # "没有生效的 judge 口径"如实缺席：None 与空串是两种事实
+        assert (
+            compute_judge_config_digest(
+                criteria_version="v1",
+                judge_model="judge-x",
+                deepeval_version="1.0.0",
+                judge_specs=[],
+            )
+            is None
+        )
+
+
 class TestAgreement:
     def test_confusion_precision_recall_kappa_closed_form(self) -> None:
         # tp=3 fp=2 tn=4 fn=1 → acc=0.7, P=0.6, R=0.75, pe=0.5 → κ=0.4
@@ -310,6 +387,85 @@ class TestAgreement:
         ]
         assert compute_metric_agreement("m", items).threshold is None
 
+    def test_human_kappa_perfect_agreement_is_one(self) -> None:
+        # 双标完全一致且两侧边际非退化（1 fail + 2 pass）→ κ = 1.0
+        items = [
+            _item("a", "m", judge="fail", human="fail", human2="fail"),
+            _item("b", "m", judge="pass", human="pass", human2="pass"),
+            _item("c", "m", judge="pass", human="pass", human2="pass"),
+        ]
+        agreement = compute_metric_agreement("m", items)
+        assert agreement.human_kappa == 1.0
+        assert agreement.human_dual_n == 3
+
+    def test_human_kappa_closed_form_mixed(self) -> None:
+        # r1 vs r2：双 fail=2、r1 fail/r2 pass=1、双 pass=3、r1 pass/r2 fail=2
+        # po=(2+3)/8=0.625；p1=3/8、p2=4/8 → pe=0.5 → κ=(0.625−0.5)/0.5=0.25
+        items = (
+            [_item(f"bf{i}", "m", judge="fail", human="fail", human2="fail") for i in range(2)]
+            + [_item("fp", "m", judge="fail", human="fail", human2="pass")]
+            + [_item(f"bp{i}", "m", judge="pass", human="pass", human2="pass") for i in range(3)]
+            + [_item(f"pf{i}", "m", judge="pass", human="pass", human2="fail") for i in range(2)]
+        )
+        agreement = compute_metric_agreement("m", items)
+        assert agreement.human_dual_n == 8
+        assert agreement.human_kappa == 0.25
+
+    def test_human_kappa_degenerate_marginals_is_none(self) -> None:
+        items = [_item(f"i{i}", "m", judge="fail", human="fail", human2="fail") for i in range(3)]
+        agreement = compute_metric_agreement("m", items)
+        assert agreement.human_kappa is None
+        assert agreement.human_dual_n == 3
+
+    def test_single_rater_items_do_not_enter_ceiling(self) -> None:
+        items = [
+            _item("solo", "m", judge="fail", human="fail"),
+            _item("dual", "m", judge="pass", human="pass", human2="pass"),
+        ]
+        agreement = compute_metric_agreement("m", items)
+        assert agreement.human_dual_n == 1
+        # 唯一双标项两侧全 pass（边际退化）→ κ 如实为 None，不是 0
+        assert agreement.human_kappa is None
+
+    def test_disagreement_total_and_cause_distribution(self) -> None:
+        items = [
+            _item("d1", "m", judge="fail", human="pass", cause="input_missing"),
+            _item("d2", "m", judge="pass", human="fail", cause="rubric_ambiguous"),
+            _item("d3", "m", judge="fail", human="pass"),  # 分歧但未归因
+            _item("d4", "m", judge="fail", human="pass", cause="model_misunderstanding"),
+            _item("a1", "m", judge="pass", human="pass"),
+        ]
+        agreement = compute_metric_agreement("m", items)
+        assert agreement.disagreement_total == 4
+        assert agreement.disagreement_causes == {
+            "input_missing": 1,
+            "rubric_ambiguous": 1,
+            "model_misunderstanding": 1,
+        }
+        # 未归因数 = total − sum(causes)，不单独造字段
+        assert agreement.disagreement_total - sum(agreement.disagreement_causes.values()) == 1
+        # 归因不进混淆矩阵：n 与 accuracy 仍按 5 条 labeled 算（tp=0 fp=3 tn=1 fn=1）
+        assert agreement.n == 5
+        assert agreement.accuracy == 0.2
+
+
+class TestVocabularyClosure:
+    """封闭词汇的机械护栏（Spec §26.2）：常量（CLI/import 校验面）与
+    Literal（模型校验面）是同一词汇的两处落点，分叉会让 CLI 写进模型
+    拒收的 set 文件——两侧必须同步漂移。"""
+
+    @staticmethod
+    def _literal_values(field: str) -> set[str]:
+        inner, _none = get_args(CalibrationItem.model_fields[field].annotation)
+        return set(get_args(inner))
+
+    def test_human_verdicts_match_literal(self) -> None:
+        assert self._literal_values("human_verdict") == set(HUMAN_VERDICTS)
+        assert self._literal_values("human_verdict_2") == set(HUMAN_VERDICTS)
+
+    def test_disagreement_causes_match_literal(self) -> None:
+        assert self._literal_values("disagreement_cause") == set(DISAGREEMENT_CAUSES)
+
 
 class TestCalibrationStore:
     def test_roundtrip(self, tmp_path: Path) -> None:
@@ -348,6 +504,38 @@ class TestCalibrationStore:
         )
         (store.root / "calset_bad.json").write_text("{not json", encoding="utf-8")
         assert [s.cal_id for s in store.list_sets()] == ["calset_ok"]
+
+    def test_legacy_set_json_without_new_fields_loads(self, tmp_path: Path) -> None:
+        """旧 set JSON（无版本/指纹/双标/归因字段）照常加载——pydantic 缺省兜底。"""
+        store = CalibrationStore(tmp_path)
+        store.root.mkdir(parents=True, exist_ok=True)
+        legacy = {
+            "cal_id": "calset_legacy",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "source_kind": "run",
+            "source_ids": ["r1"],
+            "seed": 1,
+            "requested_n": 1,
+            "items": [
+                {
+                    "item_id": "cal_x",
+                    "source": "run",
+                    "source_id": "r1",
+                    "case_id": "c1",
+                    "metric": "agent.task_completion",
+                    "score": 0.9,
+                    "threshold": 0.7,
+                    "judge_verdict": "pass",
+                }
+            ],
+        }
+        (store.root / "calset_legacy.json").write_text(json.dumps(legacy), encoding="utf-8")
+        loaded = store.load_set("calset_legacy")
+        assert loaded.criteria_version is None
+        assert loaded.judge_config_digest is None
+        assert loaded.items[0].human_verdict_2 is None
+        assert loaded.items[0].human_rater == ""
+        assert loaded.items[0].disagreement_cause is None
 
 
 class TestCalibrateCli:
@@ -576,6 +764,9 @@ class TestCalibrateCli:
         cal_set = CalibrationStore(tmp_path / "state").list_sets()[0]
         assert cal_set.source_kind == "production"
         assert len(cal_set.items) == 2
+        # 生产评测记录不含判准版本与指纹——与 judge_model=None 同一先例：不猜
+        assert cal_set.criteria_version is None
+        assert cal_set.judge_config_digest is None
 
     def test_create_rejects_bad_source(self, tmp_path: Path) -> None:
         result = runner.invoke(
@@ -639,3 +830,592 @@ class TestCalibrateCli:
         )
         assert result.exit_code == 0
         assert "labeled 1/2" in result.output
+
+    def test_create_from_run_carries_version_fields_into_set_and_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        _seed_run(
+            tmp_path,
+            "run_cal",
+            criteria_version="rubric-v3",
+            judge_config_digest="aaaa1111bbbb2222",
+        )
+        created = runner.invoke(
+            app,
+            [
+                "calibrate",
+                "create",
+                "--source",
+                "run:run_cal",
+                "--n",
+                "4",
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        assert created.exit_code == 0, created.output
+        cal_set = CalibrationStore(tmp_path / "state").list_sets()[0]
+        assert cal_set.criteria_version == "rubric-v3"
+        assert cal_set.judge_config_digest == "aaaa1111bbbb2222"
+
+        labels = [{"item": i.item_id, "verdict": i.judge_verdict} for i in cal_set.items]
+        labels_file = tmp_path / "labels.yaml"
+        labels_file.write_text(yaml.safe_dump({"labels": labels}), encoding="utf-8")
+        imported = runner.invoke(
+            app,
+            [
+                "calibrate",
+                "import-labels",
+                cal_set.cal_id,
+                str(labels_file),
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        assert imported.exit_code == 0, imported.output
+
+        evaluated = runner.invoke(
+            app, ["calibrate", "evaluate", cal_set.cal_id, "--data-dir", str(tmp_path)]
+        )
+        assert evaluated.exit_code == 0, evaluated.output
+        snapshot = CalibrationStore(tmp_path / "state").load_set(cal_set.cal_id).snapshots[-1]
+        assert snapshot.criteria_version == "rubric-v3"
+        assert snapshot.judge_config_digest == "aaaa1111bbbb2222"
+        # evaluate / show / list 输出展示版本字段（digest 短形式）
+        assert "rubric-v3" in evaluated.output
+        assert "aaaa1111bbbb2222" in evaluated.output
+        shown = runner.invoke(
+            app, ["calibrate", "show", cal_set.cal_id, "--data-dir", str(tmp_path)]
+        )
+        assert shown.exit_code == 0
+        assert "rubric-v3" in shown.output
+
+    def test_label_rounds_do_not_overwrite_each_other(self, tmp_path: Path) -> None:
+        _seed_run(tmp_path, "run_cal")
+        runner.invoke(
+            app,
+            [
+                "calibrate",
+                "create",
+                "--source",
+                "run:run_cal",
+                "--n",
+                "2",
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        cal_set = CalibrationStore(tmp_path / "state").list_sets()[0]
+        target = cal_set.items[0]
+        base = [
+            "calibrate",
+            "label",
+            cal_set.cal_id,
+            "--item",
+            target.item_id,
+            "--data-dir",
+            str(tmp_path),
+        ]
+        first = runner.invoke(app, [*base, "--verdict", "fail", "--rater", "alice"])
+        assert first.exit_code == 0, first.output
+        second = runner.invoke(app, [*base, "--verdict", "pass", "--round", "2", "--rater", "bob"])
+        assert second.exit_code == 0, second.output
+        stored = CalibrationStore(tmp_path / "state").load_set(cal_set.cal_id)
+        item = next(i for i in stored.items if i.item_id == target.item_id)
+        assert item.human_verdict == "fail"
+        assert item.human_rater == "alice"
+        assert item.human_verdict_2 == "pass"
+        assert item.human_rater_2 == "bob"
+
+        evaluated = runner.invoke(
+            app, ["calibrate", "evaluate", cal_set.cal_id, "--data-dir", str(tmp_path)]
+        )
+        assert evaluated.exit_code == 0, evaluated.output
+        snapshot = CalibrationStore(tmp_path / "state").load_set(cal_set.cal_id).snapshots[-1]
+        assert snapshot.overall.human_dual_n == 1
+        # 有双标数据才渲染天花板解读行；无双标时整行缺席（不渲染空表）
+        assert "ceiling" in evaluated.output
+
+    def test_evaluate_without_dual_labels_has_no_ceiling_line(self, tmp_path: Path) -> None:
+        _seed_run(tmp_path, "run_cal")
+        runner.invoke(
+            app,
+            [
+                "calibrate",
+                "create",
+                "--source",
+                "run:run_cal",
+                "--n",
+                "2",
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        cal_set = CalibrationStore(tmp_path / "state").list_sets()[0]
+        labels = [{"item": i.item_id, "verdict": i.judge_verdict} for i in cal_set.items]
+        labels_file = tmp_path / "labels.yaml"
+        labels_file.write_text(yaml.safe_dump({"labels": labels}), encoding="utf-8")
+        runner.invoke(
+            app,
+            [
+                "calibrate",
+                "import-labels",
+                cal_set.cal_id,
+                str(labels_file),
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        evaluated = runner.invoke(
+            app, ["calibrate", "evaluate", cal_set.cal_id, "--data-dir", str(tmp_path)]
+        )
+        assert evaluated.exit_code == 0, evaluated.output
+        assert "ceiling" not in evaluated.output
+        # 全按 judge 原判标注 → 无分歧，归因分布行同样缺席
+        assert "disagreement" not in evaluated.output
+
+    def test_cause_requires_labeled_and_disagreeing_item(self, tmp_path: Path) -> None:
+        _seed_run(tmp_path, "run_cal")
+        runner.invoke(
+            app,
+            [
+                "calibrate",
+                "create",
+                "--source",
+                "run:run_cal",
+                "--n",
+                "2",
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        cal_set = CalibrationStore(tmp_path / "state").list_sets()[0]
+        pass_item = next(i for i in cal_set.items if i.judge_verdict == "pass")
+        fail_item = next(i for i in cal_set.items if i.judge_verdict == "fail")
+        base = [
+            "calibrate",
+            "label",
+            cal_set.cal_id,
+            "--data-dir",
+            str(tmp_path),
+        ]
+        # 生效后仍未标注 → 拒绝：round 2 的 cause 依赖 round 1 human_verdict，
+        # round 1 还没标时分歧不存在（round 1 判定在 Cause 校验里按生效值参与）
+        unlabeled = runner.invoke(
+            app,
+            [
+                *base,
+                "--item",
+                fail_item.item_id,
+                "--verdict",
+                "pass",
+                "--round",
+                "2",
+                "--cause",
+                "input_missing",
+            ],
+        )
+        assert unlabeled.exit_code == 3
+        assert "尚未标注" in unlabeled.output
+        # 生效判定与 judge 一致 → 拒绝（一致项无归因对象）
+        agree = runner.invoke(
+            app, [*base, "--item", pass_item.item_id, "--verdict", "pass", "--rater", "alice"]
+        )
+        assert agree.exit_code == 0, agree.output
+        cause_on_agree = runner.invoke(
+            app,
+            [
+                *base,
+                "--item",
+                pass_item.item_id,
+                "--verdict",
+                "pass",
+                "--cause",
+                "rubric_ambiguous",
+            ],
+        )
+        assert cause_on_agree.exit_code == 3
+        assert "一致" in cause_on_agree.output
+        # 非法 cause 词汇 → exit 3
+        bad_word = runner.invoke(
+            app, [*base, "--item", pass_item.item_id, "--verdict", "pass", "--cause", "whatever"]
+        )
+        assert bad_word.exit_code == 3
+        # 分歧项一次调用内「verdict + cause」成功：生效判定 pass ≠ judge fail
+        disagree = runner.invoke(
+            app,
+            [
+                *base,
+                "--item",
+                fail_item.item_id,
+                "--verdict",
+                "pass",
+                "--rater",
+                "carol",
+                "--cause",
+                "input_missing",
+            ],
+        )
+        assert disagree.exit_code == 0, disagree.output
+        stored = CalibrationStore(tmp_path / "state").load_set(cal_set.cal_id)
+        target = next(i for i in stored.items if i.item_id == fail_item.item_id)
+        assert target.disagreement_cause == "input_missing"
+        assert target.human_verdict == "pass"
+        assert target.human_rater == "carol"
+
+        evaluated = runner.invoke(
+            app, ["calibrate", "evaluate", cal_set.cal_id, "--data-dir", str(tmp_path)]
+        )
+        assert evaluated.exit_code == 0, evaluated.output
+        assert "disagreement" in evaluated.output
+        snapshot = CalibrationStore(tmp_path / "state").load_set(cal_set.cal_id).snapshots[-1]
+        assert snapshot.overall.disagreement_total == 1
+        # cause_on_agree 被拒 → pass_item 无归因；只有 fail_item 归因
+        assert snapshot.overall.disagreement_causes == {"input_missing": 1}
+
+    def test_import_labels_round2_rater_cause_and_atomicity(self, tmp_path: Path) -> None:
+        _seed_run(tmp_path, "run_cal")
+        runner.invoke(
+            app,
+            [
+                "calibrate",
+                "create",
+                "--source",
+                "run:run_cal",
+                "--n",
+                "4",
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        cal_set = CalibrationStore(tmp_path / "state").list_sets()[0]
+        pass_item = next(i for i in cal_set.items if i.judge_verdict == "pass")
+        fail_item = next(i for i in cal_set.items if i.judge_verdict == "fail")
+        another = next(
+            i for i in cal_set.items if i.item_id not in {pass_item.item_id, fail_item.item_id}
+        )
+
+        good = {
+            "labels": [
+                {"item": pass_item.item_id, "verdict": "pass", "round": 2, "rater": "bob"},
+                {"item": fail_item.item_id, "verdict": "pass", "cause": "input_missing"},
+            ]
+        }
+        labels_file = tmp_path / "labels.yaml"
+        labels_file.write_text(yaml.safe_dump(good), encoding="utf-8")
+        result = runner.invoke(
+            app,
+            [
+                "calibrate",
+                "import-labels",
+                cal_set.cal_id,
+                str(labels_file),
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        stored = CalibrationStore(tmp_path / "state").load_set(cal_set.cal_id)
+        by_id = {i.item_id: i for i in stored.items}
+        assert by_id[pass_item.item_id].human_verdict_2 == "pass"
+        assert by_id[pass_item.item_id].human_rater_2 == "bob"
+        assert by_id[pass_item.item_id].human_verdict is None  # round 2 不碰 round 1 字段
+        assert by_id[fail_item.item_id].human_verdict == "pass"
+        assert by_id[fail_item.item_id].disagreement_cause == "input_missing"
+
+        # 非法 round：整批不落盘（全有或全无语义保持）
+        bad = {
+            "labels": [
+                {"item": another.item_id, "verdict": "pass"},
+                {"item": pass_item.item_id, "verdict": "pass", "round": 3},
+            ]
+        }
+        labels_file.write_text(yaml.safe_dump(bad), encoding="utf-8")
+        bad_result = runner.invoke(
+            app,
+            [
+                "calibrate",
+                "import-labels",
+                cal_set.cal_id,
+                str(labels_file),
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        assert bad_result.exit_code == 3
+        stored2 = CalibrationStore(tmp_path / "state").load_set(cal_set.cal_id)
+        still = {i.item_id: i for i in stored2.items}
+        assert still[another.item_id].human_verdict is None
+
+        # 非法 cause：同样整批不落盘
+        bad_cause_labels = {"labels": [{"item": another.item_id, "verdict": "fail", "cause": "x"}]}
+        labels_file.write_text(yaml.safe_dump(bad_cause_labels), encoding="utf-8")
+        bad_cause = runner.invoke(
+            app,
+            [
+                "calibrate",
+                "import-labels",
+                cal_set.cal_id,
+                str(labels_file),
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        assert bad_cause.exit_code == 3
+        stored3 = CalibrationStore(tmp_path / "state").load_set(cal_set.cal_id)
+        assert next(i for i in stored3.items if i.item_id == another.item_id).human_verdict is None
+
+        # cause 写在 round 1 未标注的 item 上（round 2 条目）：生效后仍未标注 →
+        # 整批拒绝，round 2 既有标注不被覆盖
+        labels_file.write_text(
+            yaml.safe_dump(
+                {
+                    "labels": [
+                        {
+                            "item": pass_item.item_id,
+                            "verdict": "fail",
+                            "round": 2,
+                            "cause": "input_missing",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        bad_cause_r2 = runner.invoke(
+            app,
+            [
+                "calibrate",
+                "import-labels",
+                cal_set.cal_id,
+                str(labels_file),
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        assert bad_cause_r2.exit_code == 3
+        stored4 = CalibrationStore(tmp_path / "state").load_set(cal_set.cal_id)
+        pass_after = next(i for i in stored4.items if i.item_id == pass_item.item_id)
+        assert pass_after.human_verdict_2 == "pass"  # 好批次写入的 round 2 未被坏批次覆盖
+        assert pass_after.disagreement_cause is None
+
+
+class TestRunnerDigestBackfill:
+    """A2：runner 在 judge_specs 解析（含 degradation）后回填 meta.judge_config_digest。"""
+
+    @staticmethod
+    async def _run(evals_tree, fixtures_root) -> tuple:
+        evals_root, data_root = evals_tree
+        cfg = RunConfig(
+            evals_root=evals_root,
+            fixtures_root=fixtures_root,
+            data_root=data_root,
+            benchmark="database-core",
+            agent_endpoint="fake://",
+            tag_filter=["smoke"],
+            repeat=1,
+        )
+        runner = Runner(cfg)
+        outcome = await runner.run()
+        meta, _results = runner.store.load_run(outcome.run_id)
+        return outcome, meta
+
+    async def test_no_effective_judge_specs_yields_none(self, evals_tree, fixtures_root) -> None:
+        # conftest 的 deepeval_absent 夹具 → probe 全降级 → 生效集为空 → None（不是空串）
+        _outcome, meta = await self._run(evals_tree, fixtures_root)
+        assert meta.judge_config_digest is None
+
+    async def test_effective_specs_backfill_digest(
+        self, evals_tree, fixtures_root, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_eval.evaluators import deepeval_adapter as adapter_mod
+
+        async def fake_evaluate(self, metric_id, threshold, trace, *, model=None):
+            return 0.9, "stub"
+
+        monkeypatch.setattr(
+            adapter_mod.DeepEvalCapabilityAdapter,
+            "probe",
+            lambda self: {"agent.task_completion": True, "agent.tool_correctness": True},
+        )
+        monkeypatch.setattr(
+            adapter_mod.DeepEvalCapabilityAdapter, "version", lambda self: "9.9.9-test"
+        )
+        monkeypatch.setattr(adapter_mod.DeepEvalCapabilityAdapter, "evaluate", fake_evaluate)
+        _outcome, meta = await self._run(evals_tree, fixtures_root)
+        expected = compute_judge_config_digest(
+            criteria_version=meta.criteria_version,
+            judge_model=meta.judge_model,
+            deepeval_version="9.9.9-test",
+            judge_specs=[
+                MetricSpec(id="agent.task_completion", threshold=0.7),
+                MetricSpec(id="agent.tool_correctness", threshold=0.8),
+            ],
+        )
+        assert meta.judge_config_digest is not None
+        assert meta.judge_config_digest == expected
+
+
+class TestAttributionLifecycle:
+    """归因与分歧同生共死（Spec §26.8）：改判致一致时旧 cause 随分歧消失。
+
+    校验只挡"写 cause 时"的非法写入还不够——round 1 判定被改写成与 judge 一致后，
+    落盘的旧 cause 会违背"归因只能写在分歧上"的不变量。统计端不受污染
+    （agreement 只在当前分歧子集上计数），但字段本身不能说谎。
+    """
+
+    def _create_set(self, tmp_path: Path) -> CalibrationSet:
+        _seed_run(tmp_path, "run_cause")
+        result = runner.invoke(
+            app,
+            [
+                "calibrate",
+                "create",
+                "--source",
+                "run:run_cause",
+                "--n",
+                "4",
+                "--seed",
+                "7",
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        return CalibrationStore(tmp_path / "state").list_sets()[0]
+
+    def test_relabel_to_agreement_clears_stale_cause(self, tmp_path: Path) -> None:
+        cal_set = self._create_set(tmp_path)
+        store = CalibrationStore(tmp_path / "state")
+        # judge=fail 的 item：人工说 pass 才是分歧；说 fail 是一致，cause 会被拒
+        fail_item = next(i for i in cal_set.items if i.judge_verdict == "fail")
+        labeled = runner.invoke(
+            app,
+            [
+                "calibrate",
+                "label",
+                cal_set.cal_id,
+                "--item",
+                fail_item.item_id,
+                "--verdict",
+                "pass",
+                "--cause",
+                "input_missing",
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        assert labeled.exit_code == 0, labeled.output
+        stored = store.load_set(cal_set.cal_id)
+        target = next(i for i in stored.items if i.item_id == fail_item.item_id)
+        assert target.disagreement_cause == "input_missing"
+
+        relabeled = runner.invoke(
+            app,
+            [
+                "calibrate",
+                "label",
+                cal_set.cal_id,
+                "--item",
+                fail_item.item_id,
+                "--verdict",
+                "fail",
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        assert relabeled.exit_code == 0, relabeled.output
+        stored = store.load_set(cal_set.cal_id)
+        target = next(i for i in stored.items if i.item_id == fail_item.item_id)
+        assert target.disagreement_cause is None
+
+    def test_relabel_still_disagree_keeps_cause(self, tmp_path: Path) -> None:
+        cal_set = self._create_set(tmp_path)
+        store = CalibrationStore(tmp_path / "state")
+        fail_item = next(i for i in cal_set.items if i.judge_verdict == "fail")
+        first = runner.invoke(
+            app,
+            [
+                "calibrate",
+                "label",
+                cal_set.cal_id,
+                "--item",
+                fail_item.item_id,
+                "--verdict",
+                "pass",
+                "--cause",
+                "rubric_ambiguous",
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        assert first.exit_code == 0, first.output
+        again = runner.invoke(
+            app,
+            [
+                "calibrate",
+                "label",
+                cal_set.cal_id,
+                "--item",
+                fail_item.item_id,
+                "--verdict",
+                "pass",
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        assert again.exit_code == 0, again.output
+        stored = store.load_set(cal_set.cal_id)
+        target = next(i for i in stored.items if i.item_id == fail_item.item_id)
+        assert target.disagreement_cause == "rubric_ambiguous"
+
+    def test_import_relabel_to_agreement_clears_stale_cause(self, tmp_path: Path) -> None:
+        cal_set = self._create_set(tmp_path)
+        store = CalibrationStore(tmp_path / "state")
+        fail_item = next(i for i in cal_set.items if i.judge_verdict == "fail")
+        labels_file = tmp_path / "labels.yaml"
+        labels_file.write_text(
+            yaml.safe_dump(
+                {
+                    "labels": [
+                        {
+                            "item": fail_item.item_id,
+                            "verdict": "pass",
+                            "cause": "model_misunderstanding",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        imported = runner.invoke(
+            app,
+            [
+                "calibrate",
+                "import-labels",
+                cal_set.cal_id,
+                str(labels_file),
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        assert imported.exit_code == 0, imported.output
+        labels_file.write_text(
+            yaml.safe_dump({"labels": [{"item": fail_item.item_id, "verdict": "fail"}]}),
+            encoding="utf-8",
+        )
+        imported = runner.invoke(
+            app,
+            [
+                "calibrate",
+                "import-labels",
+                cal_set.cal_id,
+                str(labels_file),
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        assert imported.exit_code == 0, imported.output
+        stored = store.load_set(cal_set.cal_id)
+        target = next(i for i in stored.items if i.item_id == fail_item.item_id)
+        assert target.disagreement_cause is None

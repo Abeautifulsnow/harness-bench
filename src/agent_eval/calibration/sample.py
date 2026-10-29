@@ -134,8 +134,7 @@ def stratified_sample(
         by_metric[item.metric].append(item)
     total = len(ordered)
     quotas: dict[str, int] = {
-        metric_name: target_n * len(group) // total
-        for metric_name, group in by_metric.items()
+        metric_name: target_n * len(group) // total for metric_name, group in by_metric.items()
     }
     remainder = target_n - sum(quotas.values())
     # 余数按小数部分从大到小补，平局按 metric 名——全流程无随机

@@ -23,7 +23,12 @@ from agent_eval.calibration.store import CalibrationStore
 from agent_eval.cli.commands import DATA_ROOT, console
 from agent_eval.errors import AgentEvalError, InvalidCallError
 from agent_eval.ids import new_id
-from agent_eval.models.calibration import HUMAN_VERDICTS, CalibrationItem, CalibrationSet
+from agent_eval.models.calibration import (
+    DISAGREEMENT_CAUSES,
+    HUMAN_VERDICTS,
+    CalibrationItem,
+    CalibrationSet,
+)
 from agent_eval.regression.confidence import sample_size_for_precision
 from agent_eval.storage.production_store import ProductionStore
 from agent_eval.storage.run_store import RunStore
@@ -47,6 +52,28 @@ def _store(data_dir: Path) -> CalibrationStore:
 def _exit_with(exc: AgentEvalError) -> None:
     console.print(f"[red]error[/red] {exc.message}")
     raise typer.Exit(exc.exit_code) from exc
+
+
+def _require_disagreement_for_cause(
+    item: CalibrationItem, cause: str | None, pending_verdict: str | None = None
+) -> None:
+    """归因只能写在分歧上（Spec §26.8）。校验对象是**本次操作生效后**
+    的 human_verdict（``pending_verdict`` = 同一命令里正在写入的 round 1 判定）：
+    生效后仍未标注、或与 judge 一致 → 没有归因对象。两种拒绝都指名原因
+    （exit 3，InvalidCallError 语义），不静默忽略——静默等于让归因分布悄悄说谎。"""
+    if cause is None:
+        return
+    effective = pending_verdict if pending_verdict is not None else item.human_verdict
+    if effective is None:
+        raise InvalidCallError(
+            f"item '{item.item_id}' 尚未标注 human_verdict——分歧还不存在，"
+            "--cause 无归因对象（先标 round 1 verdict 再归因）"
+        )
+    if effective == item.judge_verdict:
+        raise InvalidCallError(
+            f"item '{item.item_id}' 人工判定与 judge 一致（{item.judge_verdict}）"
+            "——一致项无归因对象，--cause 拒绝"
+        )
 
 
 def _agreement_table(title: str, rows) -> Table:
@@ -98,6 +125,9 @@ def create(
             meta, results = RunStore(data_dir / "runs").load_run(sid)
             items, excluded = collect_run_items(meta, results)
             judge_model = meta.judge_model
+            # Spec §26.5：run 源的 set 天然单一口径，从 RunMetadata 落账两字段
+            criteria_version = meta.criteria_version
+            judge_digest = meta.judge_config_digest
         else:
             evaluations = ProductionStore(data_dir).list_evaluations(sid)
             if not evaluations:
@@ -105,6 +135,9 @@ def create(
             items, excluded = collect_production_items(sid, evaluations)
             # 评测记录不含 judge model（policy 只存名字）——如实为 None，不猜
             judge_model = None
+            # 生产评测记录不含判准版本与指纹——与 judge_model=None 同一先例：不猜
+            criteria_version = None
+            judge_digest = None
         if metric:
             items = [i for i in items if i.metric == metric]
         sampled = stratified_sample(items, target_n, seed)
@@ -115,6 +148,8 @@ def create(
             seed=seed,
             requested_n=target_n,
             judge_model=judge_model,
+            criteria_version=criteria_version,
+            judge_config_digest=judge_digest,
             items=sampled,
             excluded=excluded,
         )
@@ -144,6 +179,17 @@ def label(
     item: str = typer.Option(..., "--item", help="item id（calibrate show 可查）"),
     verdict: str = typer.Option(..., "--verdict", help="人工判定：pass|fail"),
     note: str = typer.Option("", "--note"),
+    round_num: int = typer.Option(
+        1,
+        "--round",
+        min=1,
+        max=2,
+        help="1 → human_verdict；2 → human_verdict_2（双盲第二标，互不覆盖）",
+    ),
+    rater: str = typer.Option("", "--rater", help="标注人 provenance"),
+    cause: str | None = typer.Option(
+        None, "--cause", help="分歧归因（三分法）：" + "/".join(DISAGREEMENT_CAUSES)
+    ),
     data_dir: Path = typer.Option(DATA_ROOT, "--data-dir"),
 ) -> None:
     """标注单条 item（人工判定与 judge 判定同词汇表，Spec §26.2）。"""
@@ -151,28 +197,50 @@ def label(
     if verdict_norm not in HUMAN_VERDICTS:
         console.print(f"[red]error[/red] --verdict 需为 {'/'.join(HUMAN_VERDICTS)}")
         raise typer.Exit(3)
+    if cause is not None and cause not in DISAGREEMENT_CAUSES:
+        console.print(f"[red]error[/red] --cause 需为 {'/'.join(DISAGREEMENT_CAUSES)}")
+        raise typer.Exit(3)
     try:
         cal_set = _store(data_dir).load_set(cal_id)
         target = next((i for i in cal_set.items if i.item_id == item), None)
         if target is None:
             raise InvalidCallError(f"set {cal_id} 中不存在 item '{item}'")
-        target.human_verdict = verdict_norm  # type: ignore[assignment]
+        _require_disagreement_for_cause(
+            target, cause, pending_verdict=verdict_norm if round_num == 1 else None
+        )
+        if round_num == 1:
+            target.human_verdict = verdict_norm  # type: ignore[assignment]
+            target.human_rater = rater
+            # 归因与分歧同生共死（Spec §26.8）：改判致一致时旧归因随分歧一起消失；
+            # 带 --cause 的改判已在上方被拒，走到这里 cause 必为 None。
+            if verdict_norm == target.judge_verdict:
+                target.disagreement_cause = None
+        else:
+            target.human_verdict_2 = verdict_norm  # type: ignore[assignment]
+            target.human_rater_2 = rater
+        if cause is not None:
+            target.disagreement_cause = cause  # type: ignore[assignment]
         target.note = note
         _store(data_dir).save_set(cal_set)
     except AgentEvalError as exc:
         _exit_with(exc)
         return
     labeled = sum(1 for i in cal_set.items if i.human_verdict is not None)
-    console.print(f"labeled {labeled}/{len(cal_set.items)}（{cal_id}）")
+    dual = sum(1 for i in cal_set.items if i.human_verdict_2 is not None)
+    console.print(
+        f"labeled {labeled}/{len(cal_set.items)}（{cal_id}，round {round_num}，dual {dual}）"
+    )
 
 
 @app.command("import-labels")
 def import_labels(
     cal_id: str = typer.Argument(...),
-    labels_file: Path = typer.Argument(..., help="YAML：{labels: [{item, verdict, note}]}"),
+    labels_file: Path = typer.Argument(
+        ..., help="YAML：{labels: [{item, verdict, note, round?, rater?, cause?}]}"
+    ),
     data_dir: Path = typer.Option(DATA_ROOT, "--data-dir"),
 ) -> None:
-    """批量导入标注。全有或全无：任何未知 item / 非法 verdict 都不落盘。"""
+    """批量导入标注。全有或全无：任何未知 item / 非法字段都不落盘。"""
     try:
         data = yaml.safe_load(labels_file.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -192,20 +260,47 @@ def import_labels(
         return
     by_id = {i.item_id: i for i in cal_set.items}
     problems: list[str] = []
-    updates: list[tuple[CalibrationItem, str, str]] = []
+    updates: list[tuple[CalibrationItem, str, str, int, str, str | None]] = []
     for entry in entries:
-        item_id = str((entry or {}).get("item", ""))
-        verdict = str((entry or {}).get("verdict", "")).strip().lower()
+        payload = entry if isinstance(entry, dict) else {}
+        item_id = str(payload.get("item", ""))
+        verdict = str(payload.get("verdict", "")).strip().lower()
         target = by_id.get(item_id)
-        if target is None or verdict not in HUMAN_VERDICTS:
+        round_num = payload.get("round", 1)
+        rater = str(payload.get("rater", ""))
+        cause = payload.get("cause")
+        if target is None or verdict not in HUMAN_VERDICTS or round_num not in (1, 2):
             problems.append(item_id or "<empty>")
             continue
-        updates.append((target, verdict, str((entry or {}).get("note", ""))))
+        if cause is not None and cause not in DISAGREEMENT_CAUSES:
+            problems.append(f"{item_id}（非法 cause：{cause}）")
+            continue
+        try:
+            _require_disagreement_for_cause(
+                target, cause, pending_verdict=verdict if round_num == 1 else None
+            )
+        except InvalidCallError as exc:
+            problems.append(f"{item_id}（{exc.message}）")
+            continue
+        updates.append((target, verdict, str(payload.get("note", "")), round_num, rater, cause))
     if problems:
-        console.print(f"[red]error[/red] 未知 item 或非法 verdict：{', '.join(sorted(problems))}")
+        console.print(
+            f"[red]error[/red] 未知 item / 非法 verdict / round / cause："
+            f"{'; '.join(sorted(problems))}"
+        )
         raise typer.Exit(3)
-    for target, verdict, note in updates:
-        target.human_verdict = verdict  # type: ignore[assignment]
+    for target, verdict, note, round_num, rater, cause in updates:
+        if round_num == 1:
+            target.human_verdict = verdict  # type: ignore[assignment]
+            target.human_rater = rater
+            # 与 label 同一不变量：改判致一致时旧归因随分歧一起消失（Spec §26.8）。
+            if verdict == target.judge_verdict:
+                target.disagreement_cause = None
+        else:
+            target.human_verdict_2 = verdict  # type: ignore[assignment]
+            target.human_rater_2 = rater
+        if cause is not None:
+            target.disagreement_cause = cause  # type: ignore[assignment]
         target.note = note
     _store(data_dir).save_set(cal_set)
     labeled = sum(1 for i in cal_set.items if i.human_verdict is not None)
@@ -231,10 +326,30 @@ def evaluate(
     console.print(
         f"snapshot [bold]{snapshot.snapshot_id}[/bold]"
         f"（labeled {snapshot.labeled}/{snapshot.total}，"
-        f"judge_model={snapshot.judge_model or '-'}，positive class=fail）"
+        f"judge_model={snapshot.judge_model or '-'}，"
+        f"criteria_version={snapshot.criteria_version or '-'}，"
+        f"digest={snapshot.judge_config_digest or '-'}，positive class=fail）"
     )
     rows = [snapshot.overall, *snapshot.per_metric]
     console.print(_agreement_table(f"Judge vs Human（{cal_id}）", rows))
+    overall = snapshot.overall
+    # 人人 κ 是天花板参照（Spec §26.8）：judge κ 显著低于人人 κ 才是
+    # judge 的问题；人人 κ 本身低说明 rubric 边界模糊。没有双标数据时整行缺席。
+    if overall.human_dual_n:
+        kappa = "-" if overall.human_kappa is None else f"{overall.human_kappa:.3f}"
+        console.print(
+            f"ceiling: 人人 κ={kappa}（dual n={overall.human_dual_n}）——"
+            "judge κ 显著低于人人 κ 才是 judge 的问题；人人 κ 本身低说明 rubric 边界模糊"
+        )
+    # 归因分布行：有分歧才有；未归因数 = total − sum(causes)。
+    if overall.disagreement_total:
+        attributed = sum(overall.disagreement_causes.values())
+        parts = "，".join(
+            f"{name}={count}" for name, count in sorted(overall.disagreement_causes.items())
+        )
+        unattributed = overall.disagreement_total - attributed
+        detail = f"（{parts}，未归因 {unattributed}）" if parts else "（全部未归因）"
+        console.print(f"disagreement: total={overall.disagreement_total}{detail}")
     if snapshot.labeled < snapshot.total:
         console.print(
             f"[yellow]partial[/yellow] 仅 {snapshot.labeled}/{snapshot.total} 已标注——"
@@ -258,6 +373,8 @@ def show(
     console.print(
         f"[bold]{cal_set.cal_id}[/bold] source={cal_set.source_kind}:{sources} "
         f"seed={cal_set.seed} judge_model={cal_set.judge_model or '-'} "
+        f"criteria_version={cal_set.criteria_version or '-'} "
+        f"digest={cal_set.judge_config_digest or '-'} "
         f"labeled {labeled}/{len(cal_set.items)} snapshots={len(cal_set.snapshots)}"
     )
     if cal_set.excluded:
@@ -297,13 +414,15 @@ def list_sets(
         console.print("no calibration sets")
         return
     table = Table(title="Calibration Sets")
-    for col in ("Cal ID", "Source", "Labeled", "Snapshots", "Created"):
+    for col in ("Cal ID", "Source", "Criteria", "Digest", "Labeled", "Snapshots", "Created"):
         table.add_column(col)
     for cal_set in sets:
         labeled = sum(1 for i in cal_set.items if i.human_verdict is not None)
         table.add_row(
             cal_set.cal_id,
             f"{cal_set.source_kind}:{','.join(cal_set.source_ids)}",
+            cal_set.criteria_version or "-",
+            cal_set.judge_config_digest or "-",
             f"{labeled}/{len(cal_set.items)}",
             str(len(cal_set.snapshots)),
             cal_set.created_at.isoformat(timespec="seconds"),
