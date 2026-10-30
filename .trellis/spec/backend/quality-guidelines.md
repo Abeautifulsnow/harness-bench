@@ -355,6 +355,14 @@ Read 工具、certutil）眼里是坏字节（`E902 stream did not contain valid
 再走一遍同一个转换）。判别口诀：**全 CRLF 且有 `\r\n` = 内容问题，可修；
 python/git 读到 LF 而 ruff 报 E902 = 读取期问题，别动它。**
 
+**GitHub 推送需要临时代理（2026-10-29）**：本机直连 github.com:443 不通。
+推/拉 GitHub 远端（`github` remote，也是 origin 的第二个 push URL）时在命令上
+临时挂代理：`git -c http.proxy=http://127.0.0.1:7897 push github main`。
+**不要**整条 `git push origin main` 挂代理——origin 同时含内网 URL，内网直连、
+不该走代理。推 GitHub 报 "Recv failure: Connection was aborted" 后先
+`git -c http.proxy=… ls-remote github main` 核对远端 ref 再决定是否重推：
+连接中断可能发生在服务端已收妥对象之后（实例：报 fatal 但远端已更新到目标提交）。
+
 ## 外部接入约束（2026-09-29，change-plan A2/A3/B2 的固化）
 
 外部 SUT 经转译 shim 接入后，"观测面透传"的漏传来源从内部 runner 变成了接入方。
