@@ -724,3 +724,37 @@ web/README 的执行动词清单更新。新增用例 5 条（取消 / SSE 帧�
 （文章④的 improved/same/regressed，可复用 compare + calibration 基建）；
 Web 校准面板；Sandbox（原 #2）；前端测试（原 #4）；Custom GEval / RBAC /
 Remote Worker（原 #5）。
+
+---
+
+## 2026-10-29 批次二（生产 policy 指纹 + judge 版本回归对比）
+
+来源：同日批次一登记的"生产侧缺口"收尾——生产 evaluation 此前只存 policy id，
+同一 id 改 YAML 后历史结论口径不可追溯（文章论点⑤），且"显式换配置走新旧对比"
+（论点④）缺执行工具。契约口径写在 **Spec §26.9**（文档版本 V2.8）。任务目录
+`10-29-policy-fingerprint-and-judge-regression/`。
+
+| 切片 | 内容 | 状态 |
+| --- | --- | --- |
+| G1 policy_digest | `compute_eval_policy_digest`（只覆盖判分面：judge_model + metrics[id,threshold]；与 judge_config_digest 共享规范化助手，输出逐字节不变）+ `online_eval.policy_digest` 唯一提取点 | ✅ |
+| G2 单点落账 | `run_online_evaluation` summary 加 policy_digest——API / monitor / replay 三调用方零改动自动获得；replay 双侧同 digest | ✅ |
+| G3 校准链生产源 | `calibrate create --source production:` 三态：同构落账 / 异构 → None + `policy_digest_mixed` / 缺失 → `policy_digest_missing`（可并存） | ✅ |
+| G4 policy-compare | `calibrate policy-compare --trace --policy-a --policy-b`：同批 pair 双侧评测按 (case_id, metric) 对齐；a 基线方向 improvement/regression/same；剔除去重（error 优先、每对一次）+ metric_unmatched 分列；均值分差；两类 exit 3；不落盘 | ✅ |
+
+关键裁决（详见 Spec §26.9 与任务 research/design-basis.md）：
+- **digest 只覆盖判分面**：id/display_name/description/timeout 不进摘要（改超时
+  影响能否出分，不影响怎么打分）——测试双向钉死；
+- **不进 compare.py 守卫**：生产 trace 之间没有 run 级基线守卫链，消费点是校准
+  链与 policy-compare 本身；
+- `excluded` 是裸 `dict[str, int]` 非封闭词汇，新计数键不触发加载面拒绝
+  （避开词汇分叉的"CLI 写得进去、加载即坏"形态，§9 护栏不适用）；
+- **run 侧 judge 版本回归不做**：对已存 case trace 树换配置重判是"judge 重放"
+  机制，与 §62 agent 重放是两件事，独立增量。
+
+测试：新增 21 用例（digest 敏感性正反 / summary 落账 / align 闭式分布 / 生产源
+三态 / policy-compare 全链路 stub），**全量 877 passed（实测）**。
+
+**本轮后的剩余缺口（更新）**：金标数据采集与阈值拟合（等真标注）；run 侧 judge
+重放（换配置重判已存 case trace）；Web 校准面板 + 新字段 REST 透传（含
+policy-compare 结果）；Sandbox（Docker/Git/Postgres）；前端测试；Custom GEval /
+RBAC / Remote Worker / OTLP 原生 Receiver。
