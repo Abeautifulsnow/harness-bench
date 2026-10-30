@@ -12,6 +12,11 @@ import httpx
 import pytest
 
 from agent_eval.api.app import create_app
+from agent_eval.evaluators.online_eval import (
+    EvalPolicy,
+    EvalPolicyMetric,
+    policy_digest,
+)
 from agent_eval.execution.events import JobEventHub
 from agent_eval.storage.production_store import ProductionStore
 from agent_eval.trace.otel import convert_otel
@@ -434,6 +439,17 @@ class TestOnlineEval:
             summary = payload["summary"]
             assert summary["cases_evaluated"] == 1
             assert summary["cases_unextractable"] == ["conv-empty"]
+            # 判分面指纹落账（Spec §26.9 待回写）：结果绑定生效 policy 内容
+            assert summary["policy_digest"] == policy_digest(
+                EvalPolicy(
+                    id="qa",
+                    display_name="QA judge",
+                    metrics=[
+                        EvalPolicyMetric(id="agent.task_completion", threshold=0.7),
+                        EvalPolicyMetric(id="agent.step_efficiency", threshold=0.5),
+                    ],
+                )
+            )
             # 事件提取：input 来自 run.started，output 来自 run.finished
             row = next(r for r in payload["rows"] if r["metric"] == "agent.task_completion")
             assert row["case_id"] == "conv-ok"

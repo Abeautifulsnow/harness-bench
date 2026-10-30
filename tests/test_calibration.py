@@ -23,7 +23,18 @@ from agent_eval.calibration.sample import (
 from agent_eval.calibration.store import CalibrationStore
 from agent_eval.cli.app import app
 from agent_eval.errors import InvalidCallError
-from agent_eval.evaluators.fingerprint import compute_judge_config_digest
+from agent_eval.evaluators.fingerprint import (
+    compute_eval_policy_digest,
+    compute_judge_config_digest,
+)
+from agent_eval.evaluators.online_eval import (
+    EvalPair,
+    EvalPolicy,
+    EvalPolicyMetric,
+    align_policy_rows,
+    policy_digest,
+    run_online_evaluation,
+)
 from agent_eval.models.calibration import (
     DISAGREEMENT_CAUSES,
     HUMAN_VERDICTS,
@@ -338,6 +349,190 @@ class TestJudgeConfigDigest:
             )
             is None
         )
+
+
+class TestEvalPolicyDigest:
+    """policy_digest 只覆盖判分面（Spec §26.9 待回写）：判分面变 → 变；非判分面变 → 不变。"""
+
+    @staticmethod
+    def _policy(**overrides: object) -> EvalPolicy:
+        fields: dict[str, object] = {
+            "id": "qa",
+            "display_name": "QA judge",
+            "description": "生产问答判准",
+            "judge_model": "judge-x",
+            "timeout_seconds": 120.0,
+            "metrics": [
+                EvalPolicyMetric(id="m1", threshold=0.7),
+                EvalPolicyMetric(id="m2", threshold=0.8),
+            ],
+        }
+        fields.update(overrides)
+        return EvalPolicy.model_validate(fields)
+
+    def test_deterministic_and_shape(self) -> None:
+        assert policy_digest(self._policy()) == policy_digest(self._policy())
+        assert len(policy_digest(self._policy())) == 16
+
+    def test_metric_declaration_order_does_not_matter(self) -> None:
+        reordered = self._policy(
+            metrics=[
+                EvalPolicyMetric(id="m2", threshold=0.8),
+                EvalPolicyMetric(id="m1", threshold=0.7),
+            ]
+        )
+        assert policy_digest(self._policy()) == policy_digest(reordered)
+
+    def test_judging_surface_changes_digest(self) -> None:
+        base = policy_digest(self._policy())
+        assert policy_digest(self._policy(judge_model="judge-y")) != base
+        assert policy_digest(self._policy(judge_model=None)) != base
+        # 阈值漂移 → 变
+        assert (
+            policy_digest(
+                self._policy(
+                    metrics=[
+                        EvalPolicyMetric(id="m1", threshold=0.9),
+                        EvalPolicyMetric(id="m2", threshold=0.8),
+                    ]
+                )
+            )
+            != base
+        )
+        # metric 集变化 → 变
+        assert (
+            policy_digest(self._policy(metrics=[EvalPolicyMetric(id="m1", threshold=0.7)])) != base
+        )
+
+    def test_non_judging_surface_keeps_digest(self) -> None:
+        # "只覆盖判分面"的直接断言：id/display_name/description/timeout 变 → digest 不变
+        base = policy_digest(self._policy())
+        assert policy_digest(self._policy(id="qa-v2")) == base
+        assert policy_digest(self._policy(display_name="QA judge v2")) == base
+        assert policy_digest(self._policy(description="改了描述")) == base
+        assert policy_digest(self._policy(timeout_seconds=30.0)) == base
+
+    def test_scalar_entrypoint_agrees_with_policy_entrypoint(self) -> None:
+        assert compute_eval_policy_digest(
+            judge_model="judge-x",
+            policy_metrics=[("m1", 0.7), ("m2", 0.8)],
+        ) == policy_digest(self._policy())
+
+
+class TestOnlineEvalSummaryDigest:
+    """policy_digest 在执行口单点落账（Spec §26.9 待回写）：调用方免费获得。"""
+
+    @staticmethod
+    async def _run(policy: EvalPolicy) -> dict:
+        class StubAdapter:
+            def version(self) -> str | None:
+                return "stub-1.0"
+
+            async def evaluate(self, metric_id, threshold, trace, model=None):
+                return 0.9, "stub"
+
+        return await run_online_evaluation(
+            pairs=[EvalPair(case_id="c1", input="q", actual_output="a")],
+            policy=policy,
+            adapter=StubAdapter(),
+            unextractable_cases=[],
+        )
+
+    async def test_summary_carries_policy_digest(self) -> None:
+        policy = EvalPolicy(
+            id="qa",
+            display_name="QA",
+            judge_model="judge-x",
+            metrics=[EvalPolicyMetric(id="m1", threshold=0.5)],
+        )
+        result = await self._run(policy)
+        assert result["summary"]["policy_digest"] == policy_digest(policy)
+
+    async def test_same_judging_surface_same_digest_regardless_of_metadata(self) -> None:
+        first = EvalPolicy(
+            id="qa",
+            display_name="QA",
+            judge_model="j",
+            metrics=[EvalPolicyMetric(id="m1", threshold=0.5)],
+        )
+        renamed = EvalPolicy(
+            id="qa-prod",
+            display_name="QA prod",
+            description="d",
+            timeout_seconds=5.0,
+            judge_model="j",
+            metrics=[EvalPolicyMetric(id="m1", threshold=0.5)],
+        )
+        result_a = await self._run(first)
+        result_b = await self._run(renamed)
+        assert result_a["summary"]["policy_digest"] == result_b["summary"]["policy_digest"]
+
+
+class TestAlignPolicyRows:
+    """对齐判定语义（Spec §26.9 待回写）：闭式分布 + 剔除分列。"""
+
+    @staticmethod
+    def _row(case_id: str, metric: str, verdict: str, score: float | None) -> dict:
+        return {"case_id": case_id, "metric": metric, "verdict": verdict, "score": score}
+
+    def test_closed_form_distribution_and_delta(self) -> None:
+        rows_a = [
+            self._row("c1", "m", "pass", 0.8),
+            self._row("c2", "m", "fail", 0.3),
+            self._row("c3", "m", "pass", 0.9),
+        ]
+        rows_b = [
+            self._row("c1", "m", "fail", 0.4),  # pass→fail = regression
+            self._row("c2", "m", "pass", 0.9),  # fail→pass = improvement
+            self._row("c3", "m", "pass", 0.9),  # pass→pass = same
+        ]
+        result = align_policy_rows(rows_a, rows_b)
+        assert result["overall"] == {"n": 3, "improvement": 1, "regression": 1, "same": 1}
+        assert result["per_metric"]["m"] == result["overall"]
+        expected_delta = round(((-0.4) + 0.6 + 0.0) / 3, 4)
+        assert result["mean_score_delta"]["m"] == expected_delta
+        assert result["mean_score_delta_overall"] == expected_delta
+        assert result["excluded"] == {}
+
+    def test_fail_to_fail_is_same_not_regression(self) -> None:
+        result = align_policy_rows(
+            [self._row("c1", "m", "fail", 0.2)], [self._row("c1", "m", "fail", 0.3)]
+        )
+        assert result["overall"] == {"n": 1, "improvement": 0, "regression": 0, "same": 1}
+
+    def test_single_side_skipped_excluded_and_itemized(self) -> None:
+        result = align_policy_rows(
+            [self._row("c1", "m", "pass", 0.8), self._row("c2", "m", "pass", 0.8)],
+            [self._row("c1", "m", "skipped", None), self._row("c2", "m", "fail", 0.2)],
+        )
+        # 单侧 skipped 的对剔除并分列；另一对正常进判定
+        assert result["excluded"] == {"skipped": 1}
+        assert result["overall"] == {"n": 1, "improvement": 0, "regression": 1, "same": 0}
+
+    def test_error_side_excluded_and_takes_priority_over_skipped(self) -> None:
+        result = align_policy_rows(
+            [self._row("c1", "m", "error", None), self._row("c2", "m", "error", None)],
+            [self._row("c1", "m", "pass", 0.9), self._row("c2", "m", "skipped", None)],
+        )
+        assert result["excluded"] == {"error": 2}
+        assert result["overall"]["n"] == 0
+
+    def test_unmatched_metric_counted_not_paired(self) -> None:
+        result = align_policy_rows(
+            [self._row("c1", "m1", "pass", 0.9)],
+            [self._row("c1", "m2", "pass", 0.9)],
+        )
+        # 两侧各自的孤儿行各计 1 次——不构造伪配对，也不静默丢弃
+        assert result["excluded"] == {"metric_unmatched": 2}
+        assert result["overall"]["n"] == 0
+
+    def test_mean_score_delta_none_when_scores_missing(self) -> None:
+        result = align_policy_rows(
+            [self._row("c1", "m", "pass", None)], [self._row("c1", "m", "pass", None)]
+        )
+        assert result["overall"] == {"n": 1, "improvement": 0, "regression": 0, "same": 1}
+        assert result["mean_score_delta"]["m"] is None
+        assert result["mean_score_delta_overall"] is None
 
 
 class TestAgreement:
@@ -767,6 +962,72 @@ class TestCalibrateCli:
         # 生产评测记录不含判准版本与指纹——与 judge_model=None 同一先例：不猜
         assert cal_set.criteria_version is None
         assert cal_set.judge_config_digest is None
+        # 旧记录缺 policy_digest → None + missing 计数（Spec §26.9 待回写）
+        assert cal_set.excluded.get("policy_digest_missing") == 1
+
+    @staticmethod
+    def _save_prod_evaluation(
+        tmp_path: Path, trace_id: str, evaluation_id: str, digest: str | None
+    ) -> None:
+        row = {
+            "case_id": f"c-{evaluation_id}",
+            "metric": "agent.task_completion",
+            "threshold": 0.7,
+            "score": 0.9,
+            "verdict": "pass",
+        }
+        summary: dict = {"policy": "qa"}
+        if digest is not None:
+            summary["policy_digest"] = digest
+        ProductionStore(tmp_path).save_evaluation(
+            trace_id, {"evaluation_id": evaluation_id, "rows": [row], "summary": summary}
+        )
+
+    def _create_production(self, tmp_path: Path, trace_id: str):
+        return runner.invoke(
+            app,
+            [
+                "calibrate",
+                "create",
+                "--source",
+                f"production:{trace_id}",
+                "--n",
+                "4",
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+
+    def test_create_from_production_homogeneous_digest_is_recorded(self, tmp_path: Path) -> None:
+        for eval_id in ("eval_1", "eval_2"):
+            self._save_prod_evaluation(tmp_path, "tr_hom", eval_id, "aaaa1111bbbb2222")
+        result = self._create_production(tmp_path, "tr_hom")
+        assert result.exit_code == 0, result.output
+        cal_set = CalibrationStore(tmp_path / "state").list_sets()[0]
+        # 同构 digest 落账（Spec §26.9 待回写）
+        assert cal_set.judge_config_digest == "aaaa1111bbbb2222"
+        assert not any(k.startswith("policy_digest") for k in cal_set.excluded)
+
+    def test_create_from_production_mixed_digest_is_none_and_counted(self, tmp_path: Path) -> None:
+        self._save_prod_evaluation(tmp_path, "tr_mix", "eval_1", "aaaa1111bbbb2222")
+        self._save_prod_evaluation(tmp_path, "tr_mix", "eval_2", "cccc3333dddd4444")
+        result = self._create_production(tmp_path, "tr_mix")
+        assert result.exit_code == 0, result.output
+        cal_set = CalibrationStore(tmp_path / "state").list_sets()[0]
+        # 异构 → None + 全部携带 digest 的份数进 excluded（无任何一份可代表集合）
+        assert cal_set.judge_config_digest is None
+        assert cal_set.excluded.get("policy_digest_mixed") == 2
+
+    def test_create_from_production_missing_and_mixed_both_counted(self, tmp_path: Path) -> None:
+        self._save_prod_evaluation(tmp_path, "tr_both", "eval_1", "aaaa1111bbbb2222")
+        self._save_prod_evaluation(tmp_path, "tr_both", "eval_2", "cccc3333dddd4444")
+        self._save_prod_evaluation(tmp_path, "tr_both", "eval_3", None)
+        result = self._create_production(tmp_path, "tr_both")
+        assert result.exit_code == 0, result.output
+        cal_set = CalibrationStore(tmp_path / "state").list_sets()[0]
+        assert cal_set.judge_config_digest is None
+        assert cal_set.excluded.get("policy_digest_missing") == 1
+        assert cal_set.excluded.get("policy_digest_mixed") == 2
 
     def test_create_rejects_bad_source(self, tmp_path: Path) -> None:
         result = runner.invoke(
@@ -1254,6 +1515,204 @@ class TestRunnerDigestBackfill:
         )
         assert meta.judge_config_digest is not None
         assert meta.judge_config_digest == expected
+
+
+class TestPolicyCompareCli:
+    """policy-compare 全链路（stub judge，Spec §26.9 待回写）。
+
+    分数由 stub 按 (case input, judge_model) 控制——两份 policy 的判分面差异
+    （judge_model / threshold）因此可控地映射为 improvement / regression / same。
+    """
+
+    JUDGE_MODELS = {"pol-a": "judge-a", "pol-b": "judge-b"}
+
+    @staticmethod
+    def _write_policies(tmp_path: Path) -> Path:
+        evals_root = tmp_path / "evals"
+        directory = evals_root / "eval-policies"
+        directory.mkdir(parents=True)
+        for policy_id, judge_model in TestPolicyCompareCli.JUDGE_MODELS.items():
+            body = (
+                f"id: {policy_id}\n"
+                "display_name: 判准\n"
+                f"judge_model: {judge_model}\n"
+                "metrics:\n  - id: m\n    threshold: 0.5\n"
+            )
+            (directory / f"{policy_id}.yaml").write_text(body, encoding="utf-8")
+        return evals_root
+
+    @staticmethod
+    def _ingest_trace(tmp_path: Path, case_ids: list[str]) -> str:
+        cases = [
+            {
+                "case_id": case_id,
+                "events": [
+                    {
+                        "event_id": f"{case_id}-1",
+                        "trace_id": "t1",
+                        "type": "run.started",
+                        "timestamp": "2026-10-29T10:00:00+08:00",
+                        "data": {"input": f"q-{case_id}"},
+                    },
+                    {
+                        "event_id": f"{case_id}-2",
+                        "trace_id": "t1",
+                        "type": "run.finished",
+                        "timestamp": "2026-10-29T10:00:01+08:00",
+                        "data": {"output": f"out-{case_id}", "status": "success"},
+                    },
+                ],
+            }
+            for case_id in case_ids
+        ]
+        return ProductionStore(tmp_path).save(source="platform", cases=cases, trace_id="t1")
+
+    @staticmethod
+    def _stub_judge(
+        monkeypatch: pytest.MonkeyPatch,
+        scores: dict[tuple[str, str], float],
+        error_inputs: frozenset[str] = frozenset(),
+    ) -> None:
+        from agent_eval.evaluators import deepeval_adapter as adapter_mod
+
+        monkeypatch.setattr(
+            adapter_mod.DeepEvalCapabilityAdapter, "version", lambda self: "9.9.9-test"
+        )
+
+        async def fake_evaluate(self, metric_id, threshold, trace, *, model=None):
+            if trace["input"] in error_inputs:
+                raise RuntimeError("judge provider down")
+            value = scores.get((trace["input"], model))
+            if value is None:
+                raise RuntimeError(f"no stub score for {trace['input']!r} / {model!r}")
+            return value, "stub"
+
+        monkeypatch.setattr(adapter_mod.DeepEvalCapabilityAdapter, "evaluate", fake_evaluate)
+
+    def _invoke(self, tmp_path: Path, evals_root: Path, *, policy_a: str = "pol-a"):
+        return runner.invoke(
+            app,
+            [
+                "calibrate",
+                "policy-compare",
+                "--trace",
+                "t1",
+                "--policy-a",
+                policy_a,
+                "--policy-b",
+                "pol-b",
+                "--root",
+                str(evals_root),
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+
+    def _expected_digest(self, policy_id: str) -> str:
+        return compute_eval_policy_digest(
+            judge_model=self.JUDGE_MODELS[policy_id],
+            policy_metrics=[("m", 0.5)],
+        )
+
+    def test_full_link_distribution_delta_and_digests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 闭式场景：reg / imp / same 三对 + 一对基线侧 error 被剔除
+        self._stub_judge(
+            monkeypatch,
+            {
+                ("q-reg", "judge-a"): 0.8,  # pass→fail regression，Δ=-0.4
+                ("q-reg", "judge-b"): 0.4,
+                ("q-imp", "judge-a"): 0.3,  # fail→pass improvement，Δ=+0.6
+                ("q-imp", "judge-b"): 0.9,
+                ("q-same", "judge-a"): 0.9,  # pass→pass same，Δ=0
+                ("q-same", "judge-b"): 0.9,
+            },
+            error_inputs=frozenset({"q-err"}),
+        )
+        evals_root = self._write_policies(tmp_path)
+        self._ingest_trace(tmp_path, ["reg", "imp", "same", "err"])
+        result = self._invoke(tmp_path, evals_root)
+        assert result.exit_code == 0, result.output
+        output = result.output
+        # 头行绑定两侧配置版本（论点⑤：结果记录生效配置版本）
+        assert self._expected_digest("pol-a") in output
+        assert self._expected_digest("pol-b") in output
+        assert "pol-a" in output and "pol-b" in output
+        assert "n=3" in output
+        # overall 均值分差 (−0.4 + 0.6 + 0.0) / 3
+        assert "+0.0667" in output
+        # 基线侧 error 的对剔除并分列
+        assert "'error': 1" in output
+
+    def test_unextractable_cases_counted_not_paired(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub_judge(monkeypatch, {("q-c1", "judge-a"): 0.9, ("q-c1", "judge-b"): 0.9})
+        evals_root = self._write_policies(tmp_path)
+        ProductionStore(tmp_path).save(
+            source="platform",
+            trace_id="t1",
+            cases=[
+                {
+                    "case_id": "c1",
+                    "events": [
+                        {"event_id": "e1", "type": "run.started", "data": {"input": "q-c1"}},
+                        {"event_id": "e2", "type": "run.finished", "data": {"output": "out"}},
+                    ],
+                },
+                # 无 input/output：提取不出，如实计数不进比对
+                {
+                    "case_id": "c-empty",
+                    "events": [{"event_id": "e3", "type": "tool.call", "data": {"name": "x"}}],
+                },
+            ],
+        )
+        result = self._invoke(tmp_path, evals_root)
+        assert result.exit_code == 0, result.output
+        assert "unextractable" in result.output
+
+    def test_unknown_policy_is_invalid_call(self, tmp_path: Path) -> None:
+        evals_root = self._write_policies(tmp_path)
+        self._ingest_trace(tmp_path, ["c1"])
+        result = self._invoke(tmp_path, evals_root, policy_a="ghost")
+        assert result.exit_code == 3
+        assert "ghost" in result.output
+
+    def test_unknown_trace_is_invalid_call(self, tmp_path: Path) -> None:
+        evals_root = self._write_policies(tmp_path)
+        result = runner.invoke(
+            app,
+            [
+                "calibrate",
+                "policy-compare",
+                "--trace",
+                "no-such-trace",
+                "--policy-a",
+                "pol-a",
+                "--policy-b",
+                "pol-b",
+                "--root",
+                str(evals_root),
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        assert result.exit_code == 3
+        assert "no-such-trace" in result.output
+
+    def test_all_skipped_is_invalid_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_eval.evaluators import deepeval_adapter as adapter_mod
+
+        # DeepEval 缺失 → 双侧全 skipped → 无可比判定（exit 3）
+        monkeypatch.setattr(adapter_mod.DeepEvalCapabilityAdapter, "version", lambda self: None)
+        evals_root = self._write_policies(tmp_path)
+        self._ingest_trace(tmp_path, ["c1", "c2"])
+        result = self._invoke(tmp_path, evals_root)
+        assert result.exit_code == 3
+        assert "无可比判定" in result.output
 
 
 class TestAttributionLifecycle:

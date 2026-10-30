@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from yaml import SafeLoader
 from yaml import load as _yaml_load
 
 from agent_eval.errors import InvalidCallError
+from agent_eval.evaluators.fingerprint import compute_eval_policy_digest
 
 DEFAULT_EVAL_TIMEOUT_SECONDS = 120.0
 
@@ -65,6 +67,18 @@ def load_eval_policies(evals_root: Path) -> list[EvalPolicy]:
         except Exception as exc:
             raise InvalidCallError(f"invalid eval policy '{path.name}': {exc}") from exc
     return policies
+
+
+def policy_digest(policy: EvalPolicy) -> str:
+    """EvalPolicy → 判分面指纹（Spec §26.9）。
+
+    policy → 标量的唯一提取点：落账（run_online_evaluation）与比对
+    （calibrate policy-compare）共用，保证两处摘要同源。
+    """
+    return compute_eval_policy_digest(
+        judge_model=policy.judge_model,
+        policy_metrics=[(metric.id, metric.threshold) for metric in policy.metrics],
+    )
 
 
 # ----------------------------------------------------------------- pairs
@@ -203,6 +217,9 @@ async def run_online_evaluation(
             bucket["scores"].append(row["score"])
     summary = {
         "policy": policy.id,
+        # Spec §26.9：单点落账——API / monitor / replay 三个调用方自动获得；
+        # replay 双侧同 policy → 同 digest，apples-to-apples 关系不变。
+        "policy_digest": policy_digest(policy),
         "cases_total": len(pairs) + len(unextractable_cases),
         "cases_evaluated": len(pairs),
         "cases_unextractable": unextractable_cases,
@@ -268,3 +285,70 @@ async def _evaluate_one(
         return {**base, "score": None, "verdict": "error", "reason": reason or "no score"}
     verdict = "pass" if metric.threshold is None or score >= metric.threshold else "fail"
     return {**base, "score": score, "verdict": verdict, "reason": reason}
+
+
+# ----------------------------------------------------------------- compare
+
+
+def align_policy_rows(rows_a: list[dict], rows_b: list[dict]) -> dict[str, Any]:
+    """两份 policy 的评测 rows 按 (case_id, metric) 对齐（Spec §26.9）。
+
+    policy-a 基线视角：b 由 pass 转 fail = regression、由 fail 转 pass =
+    improvement、其余 same。undetermined 的对不进判定分母（§26.4 同纪律）：
+    任一侧 skipped / error → 剔除并按原因分列；单侧独有的 metric 没有对齐
+    对象 → 如实计数（metric_unmatched），不构造伪配对。
+
+    分差只统计可比对（双侧 score 非 None）的对，取 mean(score_b − score_a)。
+    """
+    index_a = {(row["case_id"], row["metric"]): row for row in rows_a}
+    index_b = {(row["case_id"], row["metric"]): row for row in rows_b}
+    excluded: dict[str, int] = defaultdict(int)
+    buckets: dict[str, dict[str, int]] = {}
+    deltas: dict[str, list[float]] = defaultdict(list)
+    for key in sorted(set(index_a) | set(index_b)):
+        row_a = index_a.get(key)
+        row_b = index_b.get(key)
+        counts = buckets.setdefault(
+            key[1], {"n": 0, "improvement": 0, "regression": 0, "same": 0}
+        )
+        if row_a is None or row_b is None:
+            excluded["metric_unmatched"] += 1
+            continue
+        verdict_a = str(row_a.get("verdict", ""))
+        verdict_b = str(row_b.get("verdict", ""))
+        if "error" in (verdict_a, verdict_b):
+            excluded["error"] += 1
+            continue
+        if "skipped" in (verdict_a, verdict_b):
+            excluded["skipped"] += 1
+            continue
+        if verdict_a == "pass" and verdict_b == "fail":
+            counts["regression"] += 1
+        elif verdict_a == "fail" and verdict_b == "pass":
+            counts["improvement"] += 1
+        else:
+            counts["same"] += 1
+        counts["n"] += 1
+        score_a = row_a.get("score")
+        score_b = row_b.get("score")
+        if score_a is not None and score_b is not None:
+            deltas[key[1]].append(float(score_b) - float(score_a))
+    overall = {"n": 0, "improvement": 0, "regression": 0, "same": 0}
+    for counts in buckets.values():
+        for name in overall:
+            overall[name] += counts[name]
+    all_deltas = [delta for values in deltas.values() for delta in values]
+    # 每个 metric 都给分差键（无可比对分数时为 None），与 per_metric 键集同构
+    mean_score_delta: dict[str, float | None] = {}
+    for metric in sorted(buckets):
+        values = deltas.get(metric)
+        mean_score_delta[metric] = round(sum(values) / len(values), 4) if values else None
+    return {
+        "overall": overall,
+        "per_metric": {metric: buckets[metric] for metric in sorted(buckets)},
+        "mean_score_delta": mean_score_delta,
+        "mean_score_delta_overall": (
+            round(sum(all_deltas) / len(all_deltas), 4) if all_deltas else None
+        ),
+        "excluded": dict(excluded),
+    }

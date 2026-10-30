@@ -6,6 +6,10 @@ digest 从**生效**配置（判准版本 / judge_model / deepeval 版本 / 各 
 任何漂移从此在 compare 守卫里可见。两者并存（digest 相等 ⇒ criteria_version
 相等；反之不成立），设计裁决见任务研究文档"自动指纹与手工声明的关系"。
 
+本模块还提供 ``compute_eval_policy_digest``（Spec §26.9）：EvalPolicy
+判分面指纹，与 judge 配置指纹同一算式家风——两个指纹函数共享
+``_sorted_metric_entries`` 规范化助手，不复制算式。
+
 纯 stdlib（hashlib + json）：指纹计算不允许引入 SDK 依赖。
 """
 
@@ -15,6 +19,17 @@ import hashlib
 import json
 
 from agent_eval.models.profile import MetricSpec
+
+
+def _sorted_metric_entries(entries: list[tuple[str, float | None]]) -> list[dict]:
+    """metric (id, threshold) 列表 → 规范化条目，按规范化 JSON 全序排序。
+
+    两个指纹函数共享同一排序与条目形状——"同算式家风"是 digest 可比性的前提，
+    不是可各自复制的实现细节。排序键与条目本身同构，声明顺序不影响 digest。
+    """
+    metrics = [{"metric": metric_id, "threshold": threshold} for metric_id, threshold in entries]
+    metrics.sort(key=lambda entry: json.dumps(entry, sort_keys=True))
+    return metrics
 
 
 def compute_judge_config_digest(
@@ -38,13 +53,37 @@ def compute_judge_config_digest(
     """
     if not judge_specs:
         return None
-    metrics = [{"metric": spec.id, "threshold": spec.threshold} for spec in judge_specs]
-    metrics.sort(key=lambda entry: json.dumps(entry, sort_keys=True))
+    metrics = _sorted_metric_entries([(spec.id, spec.threshold) for spec in judge_specs])
     payload = {
         "criteria_version": criteria_version,
         "judge_model": judge_model,
         "deepeval_version": deepeval_version,
         "metrics": metrics,
+    }
+    canonical = json.dumps(payload, sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def compute_eval_policy_digest(
+    *,
+    judge_model: str | None,
+    policy_metrics: list[tuple[str, float | None]],
+) -> str:
+    """EvalPolicy 判分面 → sha256 前 16 位 hex（Spec §26.9）。
+
+    只覆盖判分面：judge_model + metrics 的 (id, threshold)。policy 的 id /
+    display_name / description / timeout_seconds **不进**摘要——改名、改描述、
+    改超时不改变判法（timeout 决定"能不能出分"，不决定"怎么打分"）。
+    policy 恒有 metrics 定义面，无"无判分面"分支：metrics 为空的 policy 照算
+    digest，空表语义由既有执行路径处理，不在此扩大。
+
+    参数取标量字段而非 EvalPolicy 对象：fingerprint 只依赖 models 层，
+    不与 evaluators 内部互相导入（调用方自带 policy → 标量的提取点在
+    online_eval.policy_digest）。
+    """
+    payload = {
+        "judge_model": judge_model,
+        "metrics": _sorted_metric_entries(policy_metrics),
     }
     canonical = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]

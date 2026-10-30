@@ -1,6 +1,6 @@
 # Agent Eval Platform Engineering Specification V2.1
 
-> 文档版本：V2.7（Engineering Specification，增补型；P0 缺口回填与扩展面落地，
+> 文档版本：V2.8（Engineering Specification，增补型；P0 缺口回填与扩展面落地，
 > V2.2 增补 §11 评测词汇表增补 / §12 Security 挂载点 / §13 Web Platform 只读契约，
 > Changelog 见 §14；V2.3 增补 §15 必跑套件校验 / §16 安全用例集口径 /
 > §17 Evaluator Plugin SDK / §18 用例集覆盖与 case 级 metric 参数 /
@@ -10,6 +10,7 @@
 > V2.6 增补 §25 定义层解析开销与 skipped 的 run 级可见性；
 > V2.7 增补 §26.8 judge 配置指纹与校准标注升级（§26 Judge Calibration 主体为
 > 2026-10-15 批次增补，版本链顺延至此统一编号）；
+> V2.8 增补 §26.9 生产 policy 指纹与 judge 版本回归；
 > V2.1 的复核修订见 §10.1）
 > 上游文档：`agent-evaluation-regression-platform-engineering-prd-v2.md`（下称 PRD V2.0，保持有效，不因本文档作废）
 > 状态：Engineering Ready
@@ -2743,3 +2744,79 @@ run 源从 `RunMetadata` 读入；production 源两字段 `None`（生产评测�
 - 词汇封闭机械护栏：`DISAGREEMENT_CAUSES` / `HUMAN_VERDICTS` 与模型 `Literal`
   用 `typing.get_args` 对齐（两处落点分叉会让 CLI 写进模型拒收的文件）。
 - 全量 853 passed（2026-10-29 实测）。
+
+## 26.9 生产 policy 指纹与 judge 版本回归（2026-10-29，V2.8）
+
+> 需求源：§26.8 批次登记的"生产侧缺口"收尾——生产 evaluation 此前只存 policy
+> **id**，同一 id 改 YAML 后历史结论的口径不可追溯（论点⑤），且"显式换配置走
+> 新旧对比"（论点④）缺执行工具。设计依据沉淀在任务
+> `10-29-policy-fingerprint-and-judge-regression/research/design-basis.md`。
+
+### 26.9.1 policy_digest：EvalPolicy 判分面指纹
+
+- `compute_eval_policy_digest(judge_model, policy_metrics)`（`evaluators/fingerprint.py`，
+  与 `compute_judge_config_digest` 共享规范化助手，算式同源：规范化 JSON
+  sort_keys → sha256 前 16 hex）。参数取标量而非 EvalPolicy 对象——fingerprint
+  保持只依赖 models 层，导入方向 models ← fingerprint ← online_eval，无循环。
+- **只覆盖判分面**：judge_model + metrics 的 (id, threshold)；`id` / `display_name`
+  / `description` / `timeout_seconds` 不进摘要——改名/改描述/改超时不改变判法
+  （timeout 影响能否出分，不影响怎么打分）。测试双向钉死（判分面变 → 变；
+  非判分面变 → 不变）。
+- `online_eval.policy_digest(policy)` 是 policy → 判分面标量的**唯一提取点**，
+  落账与比对两侧共用，不允许第二处手写提取。
+- **不进 compare.py 守卫**：生产 trace 之间没有 run 级基线守卫链；消费点是校准
+  链（26.9.3）与 policy-compare（26.9.4）本身。
+
+### 26.9.2 单点落账
+
+`run_online_evaluation` 的 summary 增加 `"policy_digest"`——API（POST evaluate）、
+monitor 自动化、Trace Replay 三个调用方零改动自动获得；replay 双侧同 policy →
+同 digest，apples-to-apples 语义不变反而多了可核验证据。旧 evaluation 记录无该
+字段 → 读侧 `None`（`summary or {}` 容忍整个 summary 缺失；不猜）。
+
+### 26.9.3 校准链生产源三态
+
+`calibrate create --source production:` 收集各 evaluation 的 summary.policy_digest：
+
+- **同构**（≥1 份全一致）→ 落 `CalibrationSet.judge_config_digest`；
+- **异构** → None + `excluded["policy_digest_mixed"]`（= 携带 digest 的全部份数）；
+- **缺失**（旧记录）→ None + `excluded["policy_digest_missing"]`；缺失与异构
+  并存时两个计数同时落账。
+
+混合口径的集合不能声称单一判准——"不猜但可见"。`excluded` 是裸 `dict[str, int]`
+（非封闭词汇），新键不会触发加载面拒绝；`criteria_version` 生产源维持 None。
+
+### 26.9.4 `calibrate policy-compare`：judge 版本回归（生产侧）
+
+- 签名：`calibrate policy-compare --trace <id> --policy-a <id> --policy-b <id>
+  [--root <evals_root>] [--data-dir]`；policy-a 语义上是基线/旧版，b 是候选/新版。
+- 流程：`load_events` → `extract_pair`（提取不出的 case 如实 unextractable）→
+  同一批 pair 双侧 `evaluate_rows` → `align_policy_rows` 按 `(case_id, metric)`
+  对齐。
+- 方向语义（a 基线）：pass→fail = `regression`，fail→pass = `improvement`，其余
+  `same`。**剔除去重**：任一侧 skipped/error 的对剔除并按因分列（同时 error+
+  skipped 计 error——更严重的因，每对只剔一次）；单侧独有 metric 计
+  `metric_unmatched`（两侧孤儿各计 1，永不进 n——不构造伪配对也不静默丢弃）。
+  undetermined 不进判定分母（§26.4 同纪律）。
+- 输出：头行带两侧 policy id + digest（结果绑定配置版本，论点⑤）+ overall/per-metric
+  分布 + 分数可比对的均值分差（b − a，键集与 per_metric 机械同构，无可比对为
+  None）。
+- 两类拒绝（exit 3 指名原因）：policy 不存在 / 全部对被剔除（无可比判定，典型
+  是 DeepEval 缺失双侧全 skipped）。
+- **不落盘**：打印即结论；存储格式等使用一段时间后再定。
+
+### 26.9.5 裁决：run 侧 judge 版本回归不做
+
+对已存 case trace 树用另一份 judge 配置重判是"judge 重放"机制（与 §62 的 agent
+重放是两件事），独立增量；本批版本回归仅覆盖生产侧（policy 便宜、trace 事件流
+已持久化、pair 可重提取）。
+
+### 26.9.6 验收与测试锚点
+
+- digest 判分面敏感性正反断言；`compute_judge_config_digest` 抽共享助手后输出
+  逐字节不变（独立进程复算比对）。
+- summary 落账（API 全流程断言 `summary["policy_digest"]`）；校准链生产源三态
+  （同构 / 异构+缺失并存两计数 / run 源零回归）；旧记录与旧 set 文件兼容。
+- policy-compare 全链路 stub：分布闭式断言、单侧 error 剔除、metric_unmatched、
+  两类 exit 3、双侧 digest 进输出、双侧全 skipped → exit 3。
+- 全量 877 passed（2026-10-29 实测）。

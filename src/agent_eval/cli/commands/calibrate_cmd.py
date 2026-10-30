@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from typing import Any
 
 import typer
 import yaml
@@ -20,8 +22,18 @@ from agent_eval.calibration.sample import (
     stratified_sample,
 )
 from agent_eval.calibration.store import CalibrationStore
-from agent_eval.cli.commands import DATA_ROOT, console
+from agent_eval.cli.commands import DATA_ROOT, EVALS_ROOT, console
 from agent_eval.errors import AgentEvalError, InvalidCallError
+from agent_eval.evaluators.deepeval_adapter import DeepEvalCapabilityAdapter
+from agent_eval.evaluators.online_eval import (
+    EvalPair,
+    EvalPolicy,
+    align_policy_rows,
+    evaluate_rows,
+    extract_pair,
+    load_eval_policies,
+    policy_digest,
+)
 from agent_eval.ids import new_id
 from agent_eval.models.calibration import (
     DISAGREEMENT_CAUSES,
@@ -47,6 +59,32 @@ def _parse_source(source: str) -> tuple[str, str]:
 
 def _store(data_dir: Path) -> CalibrationStore:
     return CalibrationStore(data_dir / "state")
+
+
+def _production_policy_digest(evaluations: list[dict]) -> tuple[str | None, dict[str, int]]:
+    """生产源 policy_digest 三态（Spec §26.9）：同构落账；缺失/异构 → None。
+
+    混合口径的集合不能声称单一判准——与 criteria_version 生产源恒 None 的
+    "不猜"先例同源；但"哪几份记录造成不可信"必须可见，份数进 excluded：
+    ``policy_digest_missing`` = 旧记录缺字段的份数；``policy_digest_mixed`` =
+    异构时携带 digest 的全部份数（没有哪一份可代表集合）。
+    """
+    present: list[str] = []
+    missing = 0
+    for evaluation in evaluations:
+        value = (evaluation.get("summary") or {}).get("policy_digest")
+        if isinstance(value, str) and value:
+            present.append(value)
+        else:
+            missing += 1
+    excluded: dict[str, int] = {}
+    if missing:
+        excluded["policy_digest_missing"] = missing
+    if len(set(present)) > 1:
+        excluded["policy_digest_mixed"] = len(present)
+    if present and missing == 0 and len(set(present)) == 1:
+        return present[0], excluded
+    return None, excluded
 
 
 def _exit_with(exc: AgentEvalError) -> None:
@@ -135,9 +173,12 @@ def create(
             items, excluded = collect_production_items(sid, evaluations)
             # 评测记录不含 judge model（policy 只存名字）——如实为 None，不猜
             judge_model = None
-            # 生产评测记录不含判准版本与指纹——与 judge_model=None 同一先例：不猜
+            # 生产评测记录不含判准版本——与 judge_model=None 同一先例：不猜；
+            # policy_digest 则从各 evaluation 的 summary 收集（同构落账，缺失/异构 → None）
             criteria_version = None
-            judge_digest = None
+            judge_digest, digest_excluded = _production_policy_digest(evaluations)
+            for key, count in digest_excluded.items():
+                excluded[key] = excluded.get(key, 0) + count
         if metric:
             items = [i for i in items if i.metric == metric]
         sampled = stratified_sample(items, target_n, seed)
@@ -168,7 +209,9 @@ def create(
         table.add_row(name, str(counts[name]))
     console.print(table)
     if excluded:
-        console.print(f"[yellow]excluded[/yellow] {excluded}（skipped/error/unscored 不进样本）")
+        console.print(
+            f"[yellow]excluded[/yellow] {excluded}（skipped/error/unscored/口径不齐 不进样本）"
+        )
     console.print("标注：calibrate label <cal-id> --item <item-id> --verdict pass|fail")
     console.print("或批量：calibrate import-labels <cal-id> labels.yaml")
 
@@ -445,3 +488,103 @@ def plan(
         f"precision ±{precision:.0%} @ {confidence:.0%} 置信"
         f"（p={rate:g}）需要标注 [bold]{required_n}[/bold] 条 judge 判定"
     )
+
+
+async def _evaluate_pairs_with_both(
+    pairs: list[EvalPair],
+    policy_a: EvalPolicy,
+    policy_b: EvalPolicy,
+    adapter: Any,
+) -> tuple[list[dict], list[dict]]:
+    """同一批 pair 分别用两份 policy 各评一遍（对齐比较的前提是同一评测对象集）。"""
+
+    rows_a = await evaluate_rows(pairs, policy_a, adapter)
+    rows_b = await evaluate_rows(pairs, policy_b, adapter)
+    return rows_a, rows_b
+
+
+@app.command("policy-compare")
+def policy_compare(
+    trace: str = typer.Option(..., "--trace", help="production trace id"),
+    policy_a: str = typer.Option(..., "--policy-a", help="基线 policy id（旧判准）"),
+    policy_b: str = typer.Option(..., "--policy-b", help="候选 policy id（新判准）"),
+    root: Path = typer.Option(EVALS_ROOT, "--root", help="evals 根目录（eval-policies/ 所在）"),
+    data_dir: Path = typer.Option(DATA_ROOT, "--data-dir"),
+) -> None:
+    """judge 版本回归对比（Spec §26.9）。
+
+    同一批提取 pair 用两份 policy 各评一遍，按 (case_id, metric) 对齐；
+    policy-a 基线视角：b 由 pass 转 fail = regression、由 fail 转 pass =
+    improvement、其余 same。结果只打印不落盘——历史留痕由调用方截图/重跑获得。
+    """
+    try:
+        policies = {p.id: p for p in load_eval_policies(root)}
+        missing = [pid for pid in (policy_a, policy_b) if pid not in policies]
+        if missing:
+            raise InvalidCallError(
+                f"eval policy 不存在：{'、'.join(missing)}（--root 下 eval-policies/ 未找到）"
+            )
+        pa, pb = policies[policy_a], policies[policy_b]
+        store = ProductionStore(data_dir)
+        meta = store.get_meta(trace)
+        if meta is None:
+            raise InvalidCallError(f"production trace 不存在：{trace}")
+        pairs: list[EvalPair] = []
+        unextractable: list[str] = []
+        for case_id, entry in (meta.get("cases") or {}).items():
+            pair = extract_pair(case_id, entry, store.load_events(trace, case_id))
+            if pair is None:
+                # 观测不足 ≠ 编造：如实计数，与 §61 提取语义一致
+                unextractable.append(case_id)
+            else:
+                pairs.append(pair)
+        rows_a, rows_b = asyncio.run(
+            _evaluate_pairs_with_both(pairs, pa, pb, DeepEvalCapabilityAdapter())
+        )
+        comparison = align_policy_rows(rows_a, rows_b)
+        overall = comparison["overall"]
+        if overall["n"] == 0:
+            reasons = "，".join(f"{k}={v}" for k, v in sorted(comparison["excluded"].items()))
+            if not reasons:
+                reasons = "没有提取出可评测对" if not pairs else "全部对被剔除"
+            raise InvalidCallError(
+                f"policy-compare 无可比判定（{reasons}；unextractable={len(unextractable)}）"
+                "——典型原因：DeepEval 缺失导致双侧全 skipped，或事件提取不出评测对"
+            )
+    except AgentEvalError as exc:
+        _exit_with(exc)
+        return
+    console.print(
+        f"policy-compare trace [bold]{trace}[/bold]："
+        f"a=[bold]{pa.id}[/bold]（digest {policy_digest(pa)}） → "
+        f"b=[bold]{pb.id}[/bold]（digest {policy_digest(pb)}）"
+    )
+    if unextractable:
+        console.print(
+            f"[yellow]unextractable[/yellow] {len(unextractable)} case（提取不出评测对，不进比对）"
+        )
+    delta_overall = comparison["mean_score_delta_overall"]
+    table = Table(title=f"判定分布（a={pa.id} 基线视角，n={overall['n']}）")
+    for col in ("Metric", "N", "Improvement", "Regression", "Same", "ΔScore(b−a)"):
+        table.add_column(col)
+    rows = [("overall", overall, delta_overall)]
+    rows += [
+        (metric, counts, comparison["mean_score_delta"].get(metric))
+        for metric, counts in comparison["per_metric"].items()
+    ]
+    for name, counts, delta in rows:
+        table.add_row(
+            name,
+            str(counts["n"]),
+            str(counts["improvement"]),
+            str(counts["regression"]),
+            str(counts["same"]),
+            "-" if delta is None else f"{delta:+.4f}",
+        )
+    console.print(table)
+    if comparison["excluded"]:
+        console.print(
+            f"[yellow]excluded[/yellow] {comparison['excluded']}"
+            "（skipped/error/单侧无 metric 不进判定分母）"
+        )
+    console.print("结果未落盘（历史留痕由调用方截图/重跑获得）")
