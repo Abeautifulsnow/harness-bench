@@ -47,7 +47,20 @@ BENCHMARK = "ai-chatbot-core"
 # C 类覆盖维度 → case 必须带的 tag（与 PRD §103 的六维不同名，因为被测方不同：
 # 这里没有 MCP 维度——MCP server 由运行期配置决定，点名等于把断言绑到某台机器，
 # 见 tool-surface.yaml 的 stability 说明）。
-DIMENSIONS = ("tool-use", "database", "skill", "error-recovery", "context", "security")
+#
+# rich-block 是 2026-11 新增的第七维：正文富块（```chart / ```mermaid）的通道选择与
+# 契约约束不落在任何既有维度里——它不是工具调用、不是上下文记忆、也不是数据库断言。
+# 负向已成对：chart.negative.*（不该画的时候不画）与 channel.summary_no_chart
+# （单结论不配图），因此这一维不会被 test_dimensions_covered_with_a_negative_each 卡住。
+DIMENSIONS = (
+    "tool-use",
+    "database",
+    "skill",
+    "error-recovery",
+    "context",
+    "security",
+    "rich-block",
+)
 
 # 超时下限（秒）。依据是本轮实测的墙钟分布（tmp/probe_c_cases.py + 预算校准）：
 # 单工具往返 6~18s、SQLite 探索 14~36s、子代理 24s 起；再加上 shim 侧
@@ -106,7 +119,7 @@ class TestDatasetShape:
     def test_benchmark_points_at_this_dataset_and_a_real_suite(self) -> None:
         """change-plan §3.5：gate 声明的套件必须真有套件文件（YAML 装饰品拦不住）。"""
         benchmark = load_benchmark(EVALS, BENCHMARK)
-        assert benchmark.dataset == "chatbot-core@1.1.0"
+        assert benchmark.dataset == "chatbot-core@1.2.0"
         suites = load_suites(EVALS)
         assert set(benchmark.suites) <= set(suites), (
             f"benchmark 声明了不存在的套件：{set(benchmark.suites) - set(suites)}"

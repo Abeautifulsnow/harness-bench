@@ -1,0 +1,35 @@
+# 维度：rich-block / chart 负向 —— 单个数值画图毫无信息量（判据 #7）。
+#
+# 与 two_points 分开写而不是合并：两点至少还有"对比"语义，单值连对比都没有。
+# 两者都红说明模型完全没看数据量；只红单值说明它只学会了"两点了就别画"这种
+# 表层模式——报告上能区分这两种退化程度。
+id: chatbot.chart.negative.single_value
+version: 1
+name: 只有单个数值 → 不该画图（负向）
+tags:
+  - chatbot
+  - rich-block
+  - chart
+  - regression
+  - negative
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    本站点本月总用电 5200 kWh，画个图吧。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  output:
+    not_contains:
+      - "```chart"
+
+evaluation_profile: chatbot-plain

@@ -1,0 +1,35 @@
+# 维度：rich-block / channel 负向 —— 单个结论不该配一张图。
+#
+# 判据 #5 与 mermaid 契约的"只是单个结论时不必画图"是同一件事。
+# 该红路径：模型为了体现能力，把"5200 环比 +8%"画成一根柱子。
+# 单值 + 一个变化率不构成"趋势/对比/占比"里的任何一种。
+id: chatbot.channel.summary_no_chart
+version: 1
+name: 单结论摘要 → 不该画图（负向）
+tags:
+  - chatbot
+  - rich-block
+  - channel
+  - regression
+  - negative
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    用一句话总结下面这个情况：本月用电 5200 kWh，环比上升 8%。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  output:
+    not_contains:
+      - "```chart"
+
+evaluation_profile: chatbot-plain

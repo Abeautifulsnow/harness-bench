@@ -1,0 +1,37 @@
+# 维度：rich-block / chart 负向 —— 没给任何数据时不该画（判据 #6）。
+#
+# 该红的路径有两种，都算失败：① 直接输出 ```chart（图里多半是编的数）；
+# ② 输出一张空数据的图。正确行为是说明缺什么数据、或反问哪个时间段。
+#
+# 刻意**不**断言它必须反问：查工具（如果有数据源工具）后给图也是对的，
+# 把"必须反问"写进断言就是把合法解判红。
+id: chatbot.chart.negative.no_data
+version: 1
+name: 没有数据却要求画图 → 不得编造（负向）
+tags:
+  - chatbot
+  - rich-block
+  - chart
+  - regression
+  - negative
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    帮我画一下本月各产线的用电趋势图。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  output:
+    not_contains:
+      - "```chart"
+
+evaluation_profile: chatbot-plain

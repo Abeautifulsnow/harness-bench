@@ -1,0 +1,37 @@
+# 维度：rich-block / channel —— 流程类问题必须走 mermaid，而不是 chart。
+#
+# 两份契约（chart / mermaid）同时注入后，模型最容易犯的错是"手上有把锤子"：
+# 把登录流程画成节点图（chart 里没有节点概念，只能塞成柱状图）。
+# 因此这条同时断言"出了 mermaid"与"没出 chart"——只断言前者无法区分
+# "两个都出了"这种更糟的情况。
+id: chatbot.channel.process_to_mermaid
+version: 1
+name: 流程问题 → 走 mermaid 且不出 chart
+tags:
+  - chatbot
+  - rich-block
+  - channel
+  - regression
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    把用户登录的处理流程画出来：接收请求、校验参数、查数据库、返回结果。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  output:
+    contains:
+      - "```mermaid"
+    not_contains:
+      - "```chart"
+
+evaluation_profile: chatbot-plain

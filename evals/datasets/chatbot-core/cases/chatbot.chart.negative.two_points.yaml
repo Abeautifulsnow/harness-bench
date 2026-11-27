@@ -1,0 +1,37 @@
+# 维度：rich-block / chart 负向 —— 只有两个数据点时不该画图（判据 #7）。
+#
+# 该红的路径：模型仍然输出 ```chart（两个点的柱图/折线）。这是最常见的过度可视化：
+# 「用户给了数、问了个比较」被理解成「要图」。两点的比较用一句话就够。
+#
+# 与所有负向用例一样，它只在 regression 套件里作为"这条判据真的会被违反"的证据，
+# 不进 golden（release 档 required_pass_rate: 1.0）。
+id: chatbot.chart.negative.two_points
+version: 1
+name: 只有两个数据点 → 不该画图（负向）
+tags:
+  - chatbot
+  - rich-block
+  - chart
+  - regression
+  - negative
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    这个月用了 5200 kWh，上个月用了 4300 kWh，哪个月高？
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  output:
+    not_contains:
+      - "```chart"
+
+evaluation_profile: chatbot-plain

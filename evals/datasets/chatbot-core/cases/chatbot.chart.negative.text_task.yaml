@@ -1,0 +1,36 @@
+# 维度：rich-block / chart 负向 —— 纯文本任务不该出任何图形围栏。
+#
+# 该红的路径：模型把"输出一个代码块"当成了默认动作，翻译结果被套进
+# ```chart 或 ```mermaid。这条与前面几条负向的区别在于**连结构都没有**——
+# 防的是"为了用上能力而硬凑一张图"。
+id: chatbot.chart.negative.text_task
+version: 1
+name: 纯翻译任务 → 不得出图表或流程图（负向）
+tags:
+  - chatbot
+  - rich-block
+  - chart
+  - regression
+  - negative
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    把下面这句话翻译成英文，只要译文：设备运行正常，本周无需维护。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  output:
+    not_contains:
+      - "```chart"
+      - "```mermaid"
+
+evaluation_profile: chatbot-plain

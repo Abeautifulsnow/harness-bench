@@ -6,9 +6,9 @@
 # suites 只声明 chatbot 一个套件——**这就是"首版只做确定性部分"的落点**：
 # 换档（把 judge 类 case 收进同一套件）由 profile 决定，不由 benchmark 决定。
 name: ai-chatbot-core
-description: ai-chatbot 专用评测集（C 类，change-plan §3）：确定性断言首版
+description: ai-chatbot 专用评测集（C 类，change-plan §3）：确定性断言 + 工具面广度 + 正文富块
 owner: agent-platform
-dataset: chatbot-core@1.1.0
+dataset: chatbot-core@1.2.0
 suites:
   - chatbot
 default_profile: chatbot-plain

@@ -1,0 +1,39 @@
+# 维度：rich-block / chart 正向 —— 3 个类目的占比，明确要饼图。
+#
+# 3 个类目在判据 #8 的 pie 适用区间内（≤6），因此这条**不会**因为
+# "类目过多不该用 pie" 而变成一条设计上就矛盾的用例。
+#
+# 数值断言用 5200 而不是类目名 "A 线"：类目名在中文排版里写成 "A线"（无空格）
+# 同样合理，按空格逐字匹配会把合法解判红；数值是用户给的事实，写法稳定。
+id: chatbot.chart.render.pie
+version: 1
+name: 三类占比 + 明确要饼图 → type 必须是 pie
+tags:
+  - chatbot
+  - rich-block
+  - chart
+  - regression
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    本月三条产线的用电量：A 线 5200、B 线 4300、C 线 2845（kWh）。
+    画成饼图看各自的占比。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  output:
+    contains:
+      - "```chart"
+      - "5200"
+    regex: '"type"\s*:\s*"pie"'
+
+evaluation_profile: chatbot-plain

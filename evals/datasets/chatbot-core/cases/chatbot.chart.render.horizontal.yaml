@@ -1,0 +1,35 @@
+# 维度：rich-block / chart 正向 —— 用户点名的图种是"横向条形图"。
+#
+# 这条专门钉 `horizontal` 开关：模型很容易画成普通纵向柱（type=bar 也能过
+# 前面的断言），但用户点名了横向，方向错了就是没听懂需求。
+# 注意给了 3 个数据点——若只给 2 个，就会与判据 #7（<3 不画）自相矛盾。
+id: chatbot.chart.render.horizontal
+version: 1
+name: 明确要横向条形图 → horizontal 必须为 true
+tags:
+  - chatbot
+  - rich-block
+  - chart
+  - regression
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    用横向条形图展示三个厂房的用电量：101 厂房 5200、103 动力站 4300、105 车间 2845（kWh）。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  output:
+    contains:
+      - "```chart"
+    regex: '"horizontal"\s*:\s*true'
+
+evaluation_profile: chatbot-plain

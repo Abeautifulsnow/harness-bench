@@ -1,0 +1,42 @@
+# 维度：rich-block / chart 正向 —— 两条产线 × 三个月，必须建成**两个系列**。
+#
+# 判据是「series 数组里出现两个 key」：regex 在 `"series": [` 之后要求两处
+# `"key"`，不要求它们相邻、也不要求 key 在 data 之前。`[\s\S]*?` 跨过对象/数组，
+# 因为模型把 `data` 写在 `key` 前面同样合法——用 `[^]]*"key"` 这类依赖字段
+# 顺序的写法会把合法解判红（本仓库的反模式：把自由度写进断言）。
+# 同理不强断言 series 长度恰为 2：拆成带 stackId 的分组写法也合法。
+id: chatbot.chart.render.multi_series
+version: 1
+name: 两条产线三个月 → 折线多系列
+tags:
+  - chatbot
+  - rich-block
+  - chart
+  - regression
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    两条产线三个月的用电量（kWh）：
+    A 线：1 月 5200、2 月 4800、3 月 5100
+    B 线：1 月 3100、2 月 2900、3 月 3300
+    画成折线图对比这两条线的走势。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  output:
+    contains:
+      - "```chart"
+      - "5200"
+      - "3300"
+    regex: '"series"\s*:\s*\[[\s\S]*?"key"[\s\S]*?"key"'
+
+evaluation_profile: chatbot-plain

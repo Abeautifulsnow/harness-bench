@@ -1,0 +1,37 @@
+# 维度：rich-block / chart 正向 —— 给了 3 个数据点且明确要柱状图，必须出 ```chart。
+#
+# 断言用 regex 而不是子串：模型输出 JSON 时可能带空格（"type": "bar"），
+# 子串 '"type":"bar"' 会假红；`"type"\s*:\s*"bar"` 两种写法都命中。
+# 同时断言原始数值出现——只画了空图、或把 5200 改写成别的数，都算失败。
+id: chatbot.chart.render.bar
+version: 1
+name: 三个数据点 + 明确要柱状图 → 必须出 chart
+tags:
+  - chatbot
+  - rich-block
+  - chart
+  - regression
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    把下面三个班组的用电量画成柱状图：1 号 5200、2 号 4300、3 号 2845（kWh）。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  output:
+    contains:
+      - "```chart"
+      - "5200"
+      - "2845"
+    regex: '"type"\s*:\s*"bar"'
+
+evaluation_profile: chatbot-plain

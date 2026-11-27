@@ -1,0 +1,37 @@
+# 维度：rich-block / chart 正向 —— 7 个点的时序，明确要折线图。
+#
+# 这条与 bar 那条成对：同样的数据形态下，模型能不能按"用户点名的图种"选，
+# 而不是永远回一个默认图种。判据 #8（时间趋势用 line）在这里被钉住。
+id: chatbot.chart.render.line
+version: 1
+name: 七日时序 + 明确要折线图 → type 必须是 line
+tags:
+  - chatbot
+  - rich-block
+  - chart
+  - regression
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    这是本站点最近 7 天的用电量（kWh）：120、132、101、145、160、138、150。
+    按 11-01 到 11-07 的日期画成折线图，看我这几天的趋势。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  output:
+    contains:
+      - "```chart"
+      - "120"
+      - "160"
+    regex: '"type"\s*:\s*"line"'
+
+evaluation_profile: chatbot-plain

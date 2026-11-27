@@ -1,0 +1,39 @@
+# 维度：rich-block / chart 约束 —— 单位必须落在 series[].unit，数值保持裸数字。
+#
+# 判据 #1 与 #10 的实测版：`"5200kWh"` 这种写法会被 zod 拒绝（CellSchema 只要
+# string/number/null，而 series 的 dataKey 取不到值），前端降级成源码。
+#
+# 为什么 not_contains 用 `"5200kWh"` 而不是 `5200kWh`：正文里写 "5200 kWh"（带空格）
+# 是正常表达，不该被这条断言判红；紧贴的 `5200kWh` 只可能出现在 JSON 值里。
+id: chatbot.chart.constraint.unit_in_series
+version: 1
+name: 单位写进 series.unit，数值不得带单位字符串
+tags:
+  - chatbot
+  - rich-block
+  - chart
+  - regression
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    A 线 5200 kWh、B 线 4300 kWh、C 线 2845 kWh，画柱状图对比。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  output:
+    contains:
+      - "```chart"
+    not_contains:
+      - '"5200kWh"'
+    regex: '"unit"\s*:\s*"kWh"'
+
+evaluation_profile: chatbot-plain

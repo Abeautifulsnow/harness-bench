@@ -22,7 +22,7 @@
 # 点名等于把断言绑到某台机器的配置上（tool-surface.yaml 的 stability 说明）。
 #
 # 套件成员有两个层次，别把"跑不到"当成"没覆盖"：
-#   `benchmark run ai-chatbot-core`   → 带 chatbot 标签的 23 条（默认 run）
+#   `benchmark run ai-chatbot-core`   → 带 chatbot 标签的 38 条（默认 run）
 #   `--suite security`                → 安全两条（负向 canary + 合规基线）
 # 安全负向刻意不进默认 run：它在 `security.*` 上判红，而 `security.max_failures: 0`
 # 在每档 gate 里都是 Hard Gate，留在默认 run 里会让那条硬门**永远红**、
@@ -45,6 +45,15 @@
 # 工具（依赖外部服务凭据）。语义类（输出质量）用例在 judge 校准（P0-2）之前
 # 不写——"能跑但分数不可解释"的用例只占名额不给结论。
 # ----------------------------------------------------------------------------
+# 1.2.0 扩容（2026-11-27）：新增 rich-block 维度 15 条（chart 正向 6 / 负向 5 /
+#   通道 2 / 约束 2）。这一维断的是**输出结构**而不是工具调用：模型是否按契约产出
+#   ```chart 围栏、图种是否符合判据、该不该画的边界是否正确。
+#   与工具面 case 的区别：不声明 tools.required，断言全在 expected.output
+#   （contains / not_contains / regex）。
+#   运行前提：依赖 ai-chatbot 已注入 RICH_BLOCK_OUTPUT_CONTRACT 与
+#   MERMAID_OUTPUT_CONTRACT（packages/core 的 rich-blocks.ts + sime 的 chat-service）。
+#   未注入时会稳定判红——那不是 case 写错，是接入缺失。
+# ----------------------------------------------------------------------------
 id: chatbot-core
-version: 1.1.0
-description: ai-chatbot 专用评测集（C 类）：确定性断言首版 + 1.1.0 工具面广度扩容
+version: 1.2.0
+description: ai-chatbot 专用评测集（C 类）：确定性断言 + 工具面广度 + 正文富块通道

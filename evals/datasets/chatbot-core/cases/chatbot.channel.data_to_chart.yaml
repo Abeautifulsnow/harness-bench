@@ -1,0 +1,35 @@
+# 维度：rich-block / channel —— 数值对比必须走 chart，而不是 mermaid。
+#
+# 与 process_to_mermaid 对称：这条防的是反向选错（把三条产线的电量画成
+# 三个节点连起来）。断言同样双向：出了 chart、且没出 mermaid。
+id: chatbot.channel.data_to_chart
+version: 1
+name: 数值对比 → 走 chart 且不出 mermaid
+tags:
+  - chatbot
+  - rich-block
+  - channel
+  - regression
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    三条产线本月的用电量：A 线 5200、B 线 4300、C 线 2845（kWh）。用一张图对比它们。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  output:
+    contains:
+      - "```chart"
+    not_contains:
+      - "```mermaid"
+
+evaluation_profile: chatbot-plain

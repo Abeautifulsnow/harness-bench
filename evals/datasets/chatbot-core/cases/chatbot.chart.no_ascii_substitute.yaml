@@ -1,0 +1,38 @@
+# 维度：rich-block / chart 正向（反 ASCII）—— 该画图时不许拿字符画交差。
+#
+# 这条是"正向断言 + 负向内容"的组合：既要 ```chart，又不许出现 ASCII 图特征。
+# 单独一条的理由：模型在没有渲染能力时会退化成 `+----+` 字符画，而这类输出
+# 在纯文本审查里"看起来像画了图"，是最容易骗过人工检查的一种失败。
+id: chatbot.chart.no_ascii_substitute
+version: 1
+name: 该画图时不得用 ASCII 字符画代替
+tags:
+  - chatbot
+  - rich-block
+  - chart
+  - regression
+difficulty: easy
+
+input:
+  type: single_turn
+  prompt: |
+    用柱状图对比三个班组的用电量：1 号 5200、2 号 4300、3 号 2845（kWh）。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  output:
+    contains:
+      - "```chart"
+    not_contains:
+      - "+---"
+      - "│"
+      - "├"
+
+evaluation_profile: chatbot-plain

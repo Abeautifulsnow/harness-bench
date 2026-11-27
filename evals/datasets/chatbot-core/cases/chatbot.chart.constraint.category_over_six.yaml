@@ -1,0 +1,38 @@
+# 维度：rich-block / chart 约束 —— 10 个类目的对比不该用饼图（判据 #8）。
+#
+# 这条**依赖本轮新加的判据**：判据加入前，模型很可能选 pie（"看对比"被理解成"看占比"），
+# 该 case 会稳定判红。它存在的意义是把"类目 >6 不用 pie"从一句建议变成可验证的约束。
+#
+# 断言只钉 type=bar，不钉 horizontal/stacked 等自由度：那些是合法选择，
+# 写进断言就是把模型的合理自由当成失败（本仓库 TestExpectationsArePinnedByThePrompt 的反面）。
+id: chatbot.chart.constraint.category_over_six
+version: 1
+name: 十个类目对比 → 必须用 bar，不得用 pie
+tags:
+  - chatbot
+  - rich-block
+  - chart
+  - regression
+difficulty: medium
+
+input:
+  type: single_turn
+  prompt: |
+    十个班组本月用电量（kWh）：A 5200、B 4300、C 2845、D 3900、E 4100、
+    F 2200、G 3100、H 2800、I 3600、J 4000。画图对比各班组的用电多少。
+
+environment:
+  fixture: chatbot_workspace
+  database: filesystem
+
+execution:
+  timeout: 90
+  repeat: 2
+
+expected:
+  output:
+    contains:
+      - "```chart"
+    regex: '"type"\s*:\s*"bar"'
+
+evaluation_profile: chatbot-plain
