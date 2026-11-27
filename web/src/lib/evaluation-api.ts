@@ -280,6 +280,10 @@ export interface EvaluationRow {
 
 export interface EvaluationSummary {
   policy: string;
+  /** 判分面指纹（Spec §26.9，sha256 前 16 位）：policy → 标量的唯一提取点，
+   *  judge_model + (metric, threshold) 决定；monitor / replay 双侧同 digest
+   *  才是 apples-to-apples。10-30 之前落账的旧记录没有该字段。 */
+  policy_digest?: string | null;
   cases_total: number;
   cases_evaluated: number;
   cases_unextractable: string[];

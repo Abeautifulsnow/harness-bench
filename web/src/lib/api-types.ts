@@ -55,6 +55,15 @@ export interface RunMetadata {
   agent_model: string | null;
   judge_model: string | null;
   deepeval_version: string | null;
+  /** 判准版本（Spec §26.5）：单一 profile 且声明了 criteria_version 时落账；
+   *  多 profile 混跑或未声明 → null。compare 用它守 apples-to-apples，
+   *  两侧都声明且不等 → INVALID。 */
+  criteria_version: string | null;
+  /** judge 配置自动指纹（Spec §26.8，sha256 前 16 位）：由生效 judge 配置
+   *  （判准版本 / judge_model / deepeval 版本 / 各 metric 阈值）确定性算出。
+   *  null = 旧 run 或无生效 judge 口径（--no-judge / probe 全 False）；
+   *  compare 对单侧 null 放行，不据此判 INVALID。 */
+  judge_config_digest: string | null;
   eval_platform_version: string;
   started_at: string;
   finished_at: string | null;
@@ -395,6 +404,26 @@ export interface FailureCategoryDiff {
   delta: number;
 }
 
+/** 配对 case 翻转统计（Spec §26.4）：**只进呈现层**——不改 valid、不进 Gate、
+ *  不动 exit code。b / c 是两个方向的翻转数（b = baseline 稳定通过 → candidate
+ *  稳定失败）；FLAKY / UNKNOWN / INVALID 不是二值证据，剔除后分列计数。 */
+export interface ComparisonStatistics {
+  paired_cases: number;
+  excluded_flaky: number;
+  excluded_unknown: number;
+  excluded_invalid: number;
+  /** b：baseline PASS → candidate FAIL 的 case 数 */
+  regressions: number;
+  /** c：baseline FAIL → candidate PASS 的 case 数 */
+  improvements: number;
+  /** McNemar 精确检验双尾 p 值。b + c == 0 时后端返回 1.0（完全一致），
+   *  不会为 null。 */
+  mcnemar_p: number;
+  alpha: number;
+  /** significant = 翻转不太可能只是噪声；within_noise = 证据不足 */
+  verdict: "significant" | "within_noise";
+}
+
 export interface RegressionAnalysis {
   run_id: string;
   candidate_run_id: string;
@@ -411,6 +440,9 @@ export interface RegressionAnalysis {
   trace_diffs: TraceDiff[];
   baseline_totals: Record<string, number>;
   candidate_totals: Record<string, number>;
+  /** Spec §26.4 配对翻转统计。后端每次比较都会产出（valid=false 也产出，
+   *  只作用呈现层）；仅当连接旧版 API 时才可能缺席。 */
+  statistics: ComparisonStatistics | null;
 }
 
 export interface FailureRow {

@@ -23,8 +23,15 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, ApiError } from "@/lib/api";
-import type { RegressionAnalysis } from "@/lib/api-types";
-import { fmtDelta, fmtNumber, fmtPercentDelta, fmtRelative, shortId } from "@/lib/format";
+import type { ComparisonStatistics, RegressionAnalysis } from "@/lib/api-types";
+import {
+  fmtDelta,
+  fmtNumber,
+  fmtPercentDelta,
+  fmtPValue,
+  fmtRelative,
+  shortId,
+} from "@/lib/format";
 
 export function Regression() {
   const runs = useQuery({
@@ -126,6 +133,7 @@ function RegressionDetail({ runId }: { runId: string }) {
     return <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
   }
   const data = query.data!;
+  const stats = data.statistics;
 
   if (!data.valid) {
     return (
@@ -180,6 +188,8 @@ function RegressionDetail({ runId }: { runId: string }) {
           ]}
         />
       </Section>
+
+      <ComparisonStatisticsSection stats={stats} />
 
       <Tabs defaultValue="metric">
         <TabsList>
@@ -353,6 +363,102 @@ function RegressionDetail({ runId }: { runId: string }) {
         </TabsContent>
       </Tabs>
     </div>
+  );
+}
+
+/** 统计块的四种状态 → 徽章文案 / 颜色 / 脚注：
+ *  - NO PAIRS：没有可检验配对（两侧无稳定结论或被剔除），p 无意义；
+ *  - NO FLIPS：可检验配对全部一致，p 恒为 1.0，不存在方向性变化；
+ *  - SIGNIFICANT：p < α，翻转不太可能只是噪声（颜色按 b / c 方向区分退步与进步）；
+ *  - WITHIN NOISE：p ≥ α，证据不足以排除噪声。
+ * 前两种不能套用 WITHIN NOISE 的「证据不足」话术，所以单独成支。
+ * 集中成一个纯映射，避免 JSX 里四层嵌套三元。 */
+function describeStatistics(stats: ComparisonStatistics): {
+  label: string;
+  tone: string;
+  note: string;
+} {
+  if (stats.paired_cases === 0) {
+    return {
+      label: "NO PAIRS",
+      tone: "text-muted-foreground",
+      note: "没有可检验的配对（两侧稳定结论不足或已全部剔除），这次比较不做显著性判断。",
+    };
+  }
+  if (stats.regressions === 0 && stats.improvements === 0) {
+    return {
+      label: "NO FLIPS",
+      tone: "text-muted-foreground",
+      note: `${stats.paired_cases} 个可检验配对的稳定结论完全一致，无方向性翻转；p 恒为 1.0，不需要重跑。`,
+    };
+  }
+
+  const significant = stats.verdict === "significant";
+  // 默认 α = 0.05 下 p < α 需要单侧翻转 ≥ 6，因此 b 与 c 必不相等，方向一定确定。
+  // （α 若调到更宽松，b == c 仍会是 p = 1.0，significant 依旧不会与「方向持平」共存。）
+  const regressionsLead = stats.regressions > stats.improvements;
+  // 方向决定颜色：显著的「进步」不能染成失败色，否则读起来正好相反。
+  const tone = !significant
+    ? "text-muted-foreground"
+    : regressionsLead
+      ? "text-[var(--fail)]"
+      : "text-[var(--pass)]";
+  // 徽章只放状态词（与本页 Tab / VerdictBadge 的英文口径一致）；方向由颜色 + 脚注表达，
+  // 不依赖颜色单独传达（色弱读者可从脚注与「翻转方向」读到 b / c）。
+  const label = significant ? "SIGNIFICANT" : "WITHIN NOISE";
+  const note = significant
+    ? `p = ${fmtPValue(stats.mcnemar_p)} < α = ${stats.alpha}：翻转不太可能只是噪声，方向偏${regressionsLead ? "退步" : "进步"}。`
+    : `p = ${fmtPValue(stats.mcnemar_p)} ≥ α = ${stats.alpha}：证据不足以排除噪声（退步 ${stats.regressions} / 进步 ${stats.improvements}），重跑确认后再下结论。`;
+  return { label, tone, note };
+}
+
+/** Spec §26.4 配对翻转统计：只进呈现层，不改 valid / 不进 Gate / 不动 exit code。
+ *  独立组件让 RegressionDetail 保持可读，也让这段纯展示逻辑可单独渲染测试。 */
+function ComparisonStatisticsSection({ stats }: { stats: ComparisonStatistics | null }) {
+  if (!stats) {
+    return (
+      <Section title="翻转统计显著性（Spec §26.4）">
+        <p className="text-sm text-muted-foreground">
+          本次比较未返回统计块（仅在连接不支持 §26.4 的旧版 API 时出现）；它只影响阅读，不参与 Gate 判定。
+        </p>
+      </Section>
+    );
+  }
+
+  const view = describeStatistics(stats);
+
+  return (
+    <Section
+      title="翻转统计显著性（Spec §26.4）"
+      description="只进呈现层：不改 valid、不进 Gate、不动 exit code。McNemar 精确检验回答「这组翻转有多少可能只是噪声」，是否放行仍由人判断。"
+      actions={
+        <Badge variant="outline" className={view.tone}>
+          {view.label}
+        </Badge>
+      }
+    >
+      <KeyValue
+        columns={3}
+        items={[
+          { label: "可检验配对", value: stats.paired_cases },
+          {
+            label: "翻转方向",
+            value: `退步 ${stats.regressions}（b） / 进步 ${stats.improvements}（c）`,
+          },
+          {
+            label: "McNemar p",
+            // 无可检验配对时后端回 1.0（无翻转的兜底值），但那是「没做检验」，
+            // 显示成数值会让人误以为检验过且不显著——按不可用呈现。
+            value: <Mono>{stats.paired_cases === 0 ? "—" : fmtPValue(stats.mcnemar_p)}</Mono>,
+          },
+          {
+            label: "剔除（非二值证据）",
+            value: `flaky ${stats.excluded_flaky} / unknown ${stats.excluded_unknown} / invalid ${stats.excluded_invalid}`,
+          },
+        ]}
+      />
+      <p className="mt-3 text-xs text-muted-foreground">{view.note}</p>
+    </Section>
   );
 }
 

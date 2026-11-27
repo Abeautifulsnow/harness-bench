@@ -973,6 +973,8 @@ function ConfigTab({ overview }: { overview: RunOverview }) {
             { label: "Agent endpoint", value: <Mono>{run.agent_endpoint || "—"}</Mono> },
             { label: "Agent model", value: run.agent_model ?? "—" },
             { label: "Judge model", value: run.judge_model ?? "—" },
+            { label: "Criteria version", value: <Mono>{run.criteria_version ?? "—"}</Mono> },
+            { label: "Judge digest", value: <Mono>{run.judge_config_digest ?? "—"}</Mono> },
             { label: "No judge", value: run.no_judge ? "是" : "否" },
             { label: "Git branch", value: run.git_branch ?? "—" },
             { label: "Git commit", value: <Mono>{shortCommit(run.git_commit)}</Mono> },
@@ -992,6 +994,9 @@ function ConfigTab({ overview }: { overview: RunOverview }) {
             { label: "Finished", value: fmtRelative(run.finished_at) },
           ]}
         />
+        <p className="mt-3 text-xs text-muted-foreground">
+          判准版本 / 指纹用于 compare 的 apples-to-apples 守卫（Spec §26.5/§26.8）：两侧都声明且不等 → INVALID；单侧为空（旧 run、多 profile 混跑、未声明或 --no-judge）时放行，不据此判不可比。
+        </p>
       </Section>
 
       <div className="grid gap-4 lg:grid-cols-2">

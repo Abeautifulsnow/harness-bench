@@ -267,7 +267,8 @@ class RegressionAnalysis(BaseModel):
     trace_diffs: list[dict[str, Any]] = Field(default_factory=list)
     baseline_totals: dict[str, float] = Field(default_factory=dict)
     candidate_totals: dict[str, float] = Field(default_factory=dict)
-    # Spec §26.4 配对翻转统计（呈现层）； INVALID 比较为 None
+    # Spec §26.4 配对翻转统计（呈现层）。None 仅为响应模型兼容保留：
+    # compare_runs 对每次比较（含 valid=false）都会产出该块，实际不会缺。
     statistics: dict[str, Any] | None = None
 
 

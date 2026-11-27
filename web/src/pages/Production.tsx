@@ -251,6 +251,14 @@ function EvaluationSection({ traceId }: { traceId: string }) {
                 {summary.cases_unextractable.length} 条无法提取（跳过）
               </Badge>
             )}
+            {/* §26.9 判分面指纹：monitor / replay 双侧同 digest 才是 apples-to-apples。
+                标签用 digest 而非 policy，避免与上面的 policy id 撞名。
+                10-30 之前落账的旧记录没有该字段，这里如实省略。 */}
+            {summary.policy_digest && (
+              <Badge variant="outline" className="font-mono text-muted-foreground">
+                digest {summary.policy_digest}
+              </Badge>
+            )}
             {Object.entries(summary.metrics).map(([metric, stat]) => (
               <Badge
                 key={metric}

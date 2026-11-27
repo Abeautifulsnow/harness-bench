@@ -34,6 +34,16 @@ export function fmtPercentDelta(value: number | null | undefined, digits = 2): s
   return `${value > 0 ? "+" : ""}${value.toFixed(digits)}%`;
 }
 
+/** p 值专用：小于 0.0001 时用科学计数法。
+ *
+ * toFixed(4) 会把 4e-05 与 1e-09 都渲染成 "0.0000"——极显著读起来像"没有数据"，
+ * 而显著性判断恰恰依赖量级。 */
+export function fmtPValue(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  if (value < 0.0001) return value.toExponential(2);
+  return value.toFixed(4);
+}
+
 export function fmtMs(value: number | null | undefined): string {
   if (value === null || value === undefined) return "—";
   if (value < 1000) return `${Math.round(value)} ms`;
